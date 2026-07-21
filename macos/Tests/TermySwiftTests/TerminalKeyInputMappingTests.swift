@@ -4,6 +4,16 @@ import XCTest
 /// Covers the Swift keyCode → terminal-key-name mapping (the event→FFI input
 /// path) that hands off to the Rust encoder.
 final class TerminalKeyInputMappingTests: XCTestCase {
+    func testOptionAsAltEncodesOptionSpaceAsEscapePrefixedSpace() throws {
+        let terminal = try LibTermyTerminal(displayCols: 80, rows: 24, loadUserConfig: false)
+        let bytes = try terminal.encodeKey(
+            TerminalKeyInput(key: "space", keyChar: "\u{a0}", alt: true),
+            macosOptionAsAlt: true
+        )
+
+        XCTAssertEqual(bytes, Array("\u{1b} ".utf8))
+    }
+
     func testSpecialKeysMapToNames() {
         XCTAssertEqual(KeyboardCaptureView.specialKey(for: 36)?.key, "enter")
         XCTAssertEqual(KeyboardCaptureView.specialKey(for: 48)?.key, "tab")

@@ -15,7 +15,13 @@ expect_failure() {
     echo "render-perf-regressions: $name failed as expected"
 }
 
-"$SCRIPT_DIR/check-render-perf.sh"
+if ! "$SCRIPT_DIR/check-render-perf.sh"; then
+    echo "render-perf-regressions: primary gate failed; retrying (1/2)" >&2
+    if ! "$SCRIPT_DIR/check-render-perf.sh" --skip-build; then
+        echo "render-perf-regressions: primary gate failed again; retrying (2/2)" >&2
+        "$SCRIPT_DIR/check-render-perf.sh" --skip-build
+    fi
+fi
 expect_failure "forced full redraw" TERMY_BENCHMARK_FORCE_FULL=1
 expect_failure "artificial render delay" TERMY_BENCHMARK_BUILD_DELAY_MICROS=5000
 

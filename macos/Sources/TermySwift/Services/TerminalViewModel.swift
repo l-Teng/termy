@@ -473,7 +473,10 @@ final class TerminalViewModel: ObservableObject {
 
     func encodedKeyBytes(_ keyInput: TerminalKeyInput) -> [UInt8]? {
         do {
-            guard let bytes = try terminal?.encodeKey(keyInput), !bytes.isEmpty else {
+            guard let bytes = try terminal?.encodeKey(
+                keyInput,
+                macosOptionAsAlt: configuration.native.macosOptionAsAlt
+            ), !bytes.isEmpty else {
                 return nil
             }
             return bytes

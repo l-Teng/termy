@@ -292,6 +292,7 @@ typedef struct {
   bool progress_indicator_enabled;
   bool auto_hide_tabbar;
   bool show_termy_in_titlebar;
+  bool macos_option_as_alt;
 } TermyFfiNativeConfig;
 
 typedef struct {
@@ -492,6 +493,11 @@ TermyFfiStatus termy_terminal_feed_output(
 TermyFfiStatus termy_terminal_encode_key(
     TermyFfiTerminal *terminal,
     const TermyFfiKeystroke *keystroke,
+    TermyFfiBytes *out_bytes);
+TermyFfiStatus termy_terminal_encode_key_with_options(
+    TermyFfiTerminal *terminal,
+    const TermyFfiKeystroke *keystroke,
+    bool macos_option_as_alt,
     TermyFfiBytes *out_bytes);
 TermyFfiStatus termy_terminal_encode_mouse(
     TermyFfiTerminal *terminal,

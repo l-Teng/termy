@@ -352,6 +352,7 @@ struct TermyNativeConfiguration {
     var progressIndicatorEnabled: Bool
     var autoHideTabbar: Bool
     var showTermyInTitlebar: Bool
+    var macosOptionAsAlt: Bool
 
     static let `default` = TermyNativeConfiguration(
         autoUpdate: true,
@@ -372,7 +373,8 @@ struct TermyNativeConfiguration {
         shellIntegrationEnabled: true,
         progressIndicatorEnabled: true,
         autoHideTabbar: true,
-        showTermyInTitlebar: true
+        showTermyInTitlebar: true,
+        macosOptionAsAlt: false
     )
 
     init(
@@ -394,7 +396,8 @@ struct TermyNativeConfiguration {
         shellIntegrationEnabled: Bool,
         progressIndicatorEnabled: Bool,
         autoHideTabbar: Bool,
-        showTermyInTitlebar: Bool
+        showTermyInTitlebar: Bool,
+        macosOptionAsAlt: Bool
     ) {
         self.autoUpdate = autoUpdate
         self.simpleMode = simpleMode
@@ -415,6 +418,7 @@ struct TermyNativeConfiguration {
         self.progressIndicatorEnabled = progressIndicatorEnabled
         self.autoHideTabbar = autoHideTabbar
         self.showTermyInTitlebar = showTermyInTitlebar
+        self.macosOptionAsAlt = macosOptionAsAlt
     }
 
     init(_ ffiConfig: TermyFfiNativeConfig) {
@@ -437,6 +441,7 @@ struct TermyNativeConfiguration {
         progressIndicatorEnabled = ffiConfig.progress_indicator_enabled
         autoHideTabbar = ffiConfig.auto_hide_tabbar
         showTermyInTitlebar = ffiConfig.show_termy_in_titlebar
+        macosOptionAsAlt = ffiConfig.macos_option_as_alt
     }
 }
 

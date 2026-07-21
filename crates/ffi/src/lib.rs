@@ -19,7 +19,7 @@ use termy_core::{
     TerminalMouseModifiers, TerminalMousePosition, TerminalOptions, TerminalQueryColors,
     TerminalReplyHost, TerminalRuntimeConfig, TerminalSize, TermyCell, TermyColor,
     TermyFrameUpdate, TermyKeystroke, TermyModifiers, TermySearchOptions, TermySharedSearchMatch,
-    encode_mouse_report, keystroke_to_input, load_config_from_contents,
+    encode_mouse_report, keystroke_to_input_with_options, load_config_from_contents,
     load_config_from_default_path, load_config_from_path,
 };
 
@@ -304,6 +304,7 @@ pub struct TermyFfiNativeConfig {
     pub progress_indicator_enabled: bool,
     pub auto_hide_tabbar: bool,
     pub show_termy_in_titlebar: bool,
+    pub macos_option_as_alt: bool,
 }
 
 /// Opaque terminal handle passed across the C ABI as `*mut TermyFfiTerminal`.
@@ -1192,6 +1193,7 @@ pub unsafe extern "C" fn termy_config_native(
                 progress_indicator_enabled: app_config.progress_indicator_enabled,
                 auto_hide_tabbar: app_config.auto_hide_tabbar,
                 show_termy_in_titlebar: app_config.show_termy_in_titlebar,
+                macos_option_as_alt: app_config.macos_option_as_alt,
             };
         }
         TermyFfiStatus::Ok
@@ -2660,51 +2662,72 @@ pub unsafe extern "C" fn termy_terminal_encode_key(
     keystroke: *const TermyFfiKeystroke,
     out_bytes: *mut TermyFfiBytes,
 ) -> TermyFfiStatus {
-    ffi_status_guard(|| {
-        if terminal.is_null() || keystroke.is_null() || out_bytes.is_null() {
-            return TermyFfiStatus::Null;
-        }
-
-        let keystroke = unsafe { *keystroke };
-        let key = match unsafe { required_utf8(keystroke.key_ptr, keystroke.key_len) } {
-            Ok(key) => key.to_owned(),
-            Err(status) => return status,
-        };
-        let key_char =
-            match unsafe { optional_utf8(keystroke.key_char_ptr, keystroke.key_char_len) } {
-                Ok(key_char) => key_char.map(ToOwned::to_owned),
-                Err(status) => return status,
-            };
-        let event_kind = match keystroke.event_kind {
-            2 => TerminalKeyEventKind::Repeat,
-            3 => TerminalKeyEventKind::Release,
-            _ => TerminalKeyEventKind::Press,
-        };
-        let input = unsafe {
-            let terminal = &(*terminal).terminal;
-            keystroke_to_input(
-                &TermyKeystroke {
-                    modifiers: TermyModifiers {
-                        control: keystroke.control,
-                        alt: keystroke.alt,
-                        shift: keystroke.shift,
-                        platform: keystroke.platform,
-                        function: keystroke.function,
-                    },
-                    key,
-                    key_char,
-                },
-                event_kind,
-                terminal.keyboard_mode(),
-                true,
-            )
-        };
-
-        unsafe {
-            *out_bytes = input.map_or_else(|| termy_null_buffer(), ffi_bytes_from_vec);
-        }
-        TermyFfiStatus::Ok
+    ffi_status_guard(|| unsafe {
+        termy_terminal_encode_key_impl(terminal, keystroke, false, out_bytes)
     })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termy_terminal_encode_key_with_options(
+    terminal: *mut TermyFfiTerminal,
+    keystroke: *const TermyFfiKeystroke,
+    macos_option_as_alt: bool,
+    out_bytes: *mut TermyFfiBytes,
+) -> TermyFfiStatus {
+    ffi_status_guard(|| unsafe {
+        termy_terminal_encode_key_impl(terminal, keystroke, macos_option_as_alt, out_bytes)
+    })
+}
+
+unsafe fn termy_terminal_encode_key_impl(
+    terminal: *mut TermyFfiTerminal,
+    keystroke: *const TermyFfiKeystroke,
+    macos_option_as_alt: bool,
+    out_bytes: *mut TermyFfiBytes,
+) -> TermyFfiStatus {
+    if terminal.is_null() || keystroke.is_null() || out_bytes.is_null() {
+        return TermyFfiStatus::Null;
+    }
+
+    let keystroke = unsafe { *keystroke };
+    let key = match unsafe { required_utf8(keystroke.key_ptr, keystroke.key_len) } {
+        Ok(key) => key.to_owned(),
+        Err(status) => return status,
+    };
+    let key_char = match unsafe { optional_utf8(keystroke.key_char_ptr, keystroke.key_char_len) } {
+        Ok(key_char) => key_char.map(ToOwned::to_owned),
+        Err(status) => return status,
+    };
+    let event_kind = match keystroke.event_kind {
+        2 => TerminalKeyEventKind::Repeat,
+        3 => TerminalKeyEventKind::Release,
+        _ => TerminalKeyEventKind::Press,
+    };
+    let input = unsafe {
+        let terminal = &(*terminal).terminal;
+        keystroke_to_input_with_options(
+            &TermyKeystroke {
+                modifiers: TermyModifiers {
+                    control: keystroke.control,
+                    alt: keystroke.alt,
+                    shift: keystroke.shift,
+                    platform: keystroke.platform,
+                    function: keystroke.function,
+                },
+                key,
+                key_char,
+            },
+            event_kind,
+            terminal.keyboard_mode(),
+            true,
+            macos_option_as_alt,
+        )
+    };
+
+    unsafe {
+        *out_bytes = input.map_or_else(|| termy_null_buffer(), ffi_bytes_from_vec);
+    }
+    TermyFfiStatus::Ok
 }
 
 #[unsafe(no_mangle)]
@@ -4373,6 +4396,47 @@ mod tests {
         );
         let encoded = unsafe { slice::from_raw_parts(bytes.ptr, bytes.len) };
         assert_eq!(encoded, b"\x1b[Z");
+
+        assert_eq!(unsafe { termy_buffer_free(bytes) }, TermyFfiStatus::Ok);
+        assert_eq!(unsafe { termy_terminal_free(terminal) }, TermyFfiStatus::Ok);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn terminal_encode_key_with_options_applies_macos_option_as_alt() {
+        let size = TermyFfiSize {
+            cols: 16,
+            rows: 4,
+            cell_width: 9.0,
+            cell_height: 18.0,
+        };
+        let mut terminal = ptr::null_mut();
+
+        assert_eq!(
+            unsafe { termy_terminal_new(size, ptr::null(), 0, &mut terminal) },
+            TermyFfiStatus::Ok
+        );
+
+        let key = b"space";
+        let key_char = "\u{a0}".as_bytes();
+        let keystroke = TermyFfiKeystroke {
+            alt: true,
+            key_ptr: key.as_ptr(),
+            key_len: key.len(),
+            key_char_ptr: key_char.as_ptr(),
+            key_char_len: key_char.len(),
+            event_kind: 1,
+            ..TermyFfiKeystroke::default()
+        };
+        let mut bytes = TermyFfiBytes::default();
+        assert_eq!(
+            unsafe {
+                termy_terminal_encode_key_with_options(terminal, &keystroke, true, &mut bytes)
+            },
+            TermyFfiStatus::Ok
+        );
+        let encoded = unsafe { slice::from_raw_parts(bytes.ptr, bytes.len) };
+        assert_eq!(encoded, b"\x1b ");
 
         assert_eq!(unsafe { termy_buffer_free(bytes) }, TermyFfiStatus::Ok);
         assert_eq!(unsafe { termy_terminal_free(terminal) }, TermyFfiStatus::Ok);

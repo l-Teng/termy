@@ -49,6 +49,7 @@ final class TermyConfigurationParityTests: XCTestCase {
         progress_indicator_enabled = false
         auto_hide_tabbar = false
         show_termy_in_titlebar = false
+        macos_option_as_alt = true
         scrollback_history = 777
         inactive_tab_scrollback = 123
         task.build.command = cargo build
@@ -89,6 +90,7 @@ final class TermyConfigurationParityTests: XCTestCase {
         XCTAssertEqual(native.progressIndicatorEnabled, false)
         XCTAssertEqual(native.autoHideTabbar, false)
         XCTAssertEqual(native.showTermyInTitlebar, false)
+        XCTAssertEqual(native.macosOptionAsAlt, true)
         XCTAssertEqual(configuration.uiFontFamily, "Avenir Next")
         XCTAssertTrue(configuration.isUIFontExplicitlySet)
         XCTAssertEqual(configuration.scrollbackHistory, 777)
