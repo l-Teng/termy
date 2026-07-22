@@ -97,7 +97,7 @@ pub fn quote_tmux_arg(value: &str) -> String {
     }
     if value
         .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:@%+#,=".contains(&byte))
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:@%+,=".contains(&byte))
     {
         return value.to_string();
     }
@@ -140,6 +140,13 @@ mod tests {
             quote_tmux_arg("pane name with spaces and 'quote'"),
             "'pane name with spaces and '\\''quote'\\'''"
         );
+    }
+
+    #[test]
+    fn quote_tmux_arg_quotes_format_expressions() {
+        // In tmux's command language an unquoted `#` starts a comment, which
+        // would silently discard format arguments such as subscriptions.
+        assert_eq!(quote_tmux_arg("#{pane_id}"), "'#{pane_id}'");
     }
 
     #[test]

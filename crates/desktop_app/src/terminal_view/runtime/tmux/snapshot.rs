@@ -376,6 +376,7 @@ mod tests {
             height,
             cursor_x: 0,
             cursor_y: 0,
+            mouse_mode: TmuxPaneMouseMode::default(),
             current_path: String::new(),
             current_command: String::new(),
         }
@@ -447,6 +448,7 @@ mod tests {
             height: 24,
             cursor_x: 0,
             cursor_y: 0,
+            mouse_mode: TmuxPaneMouseMode::default(),
             current_path: path.to_string(),
             current_command: String::new(),
         }

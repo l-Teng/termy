@@ -57,6 +57,15 @@ impl Default for TmuxRuntimeConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TmuxPaneMouseMode {
+    pub standard: bool,
+    pub button: bool,
+    pub any: bool,
+    pub sgr: bool,
+    pub utf8: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxPaneState {
     pub id: String,
@@ -69,6 +78,7 @@ pub struct TmuxPaneState {
     pub height: u16,
     pub cursor_x: u16,
     pub cursor_y: u16,
+    pub mouse_mode: TmuxPaneMouseMode,
     pub current_path: String,
     pub current_command: String,
 }

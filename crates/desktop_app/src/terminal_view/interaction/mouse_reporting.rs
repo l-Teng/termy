@@ -84,6 +84,17 @@ fn terminal_mouse_modifiers(modifiers: gpui::Modifiers) -> TerminalMouseModifier
     }
 }
 
+fn terminal_mouse_mode_from_tmux(mode: TmuxPaneMouseMode) -> TerminalMouseMode {
+    TerminalMouseMode {
+        enabled: mode.standard || mode.button || mode.any,
+        report_click: mode.standard,
+        report_drag: mode.button,
+        report_motion: mode.any,
+        sgr_encoding: mode.sgr,
+        utf8_encoding: mode.utf8,
+    }
+}
+
 fn quantized_scroll_steps(accumulated: &mut f32, delta_pixels: f32, cell_extent: f32) -> usize {
     if cell_extent <= f32::EPSILON {
         return 0;
@@ -162,7 +173,44 @@ fn has_forwarded_press(state: &MouseReportingState) -> bool {
 
 impl TerminalView {
     fn pane_mouse_mode(&self, pane_id: &str) -> Option<TerminalMouseMode> {
-        self.pane_terminal_by_id(pane_id).map(Terminal::mouse_mode)
+        let pane = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .find(|pane| pane.id == pane_id)?;
+        let terminal = pane.maybe_terminal()?;
+        eprintln!(
+            "TERMY_MOUSE_DEBUG click pane={} cached={:?} parser={:?}",
+            pane.id,
+            pane.tmux_mouse_mode,
+            terminal.mouse_mode()
+        );
+        Some(
+            pane.tmux_mouse_mode
+                .map(terminal_mouse_mode_from_tmux)
+                .unwrap_or_else(|| terminal.mouse_mode()),
+        )
+    }
+
+    fn refresh_tmux_pane_mouse_mode(&mut self, pane_id: &str) -> Option<TerminalMouseMode> {
+        if self.runtime_kind() != RuntimeKind::Tmux {
+            return None;
+        }
+
+        let mode = self
+            .tmux_runtime()
+            .client
+            .query_pane_mouse_mode(pane_id)
+            .ok()?;
+        if let Some(pane) = self
+            .tabs
+            .iter_mut()
+            .flat_map(|tab| tab.panes.iter_mut())
+            .find(|pane| pane.id == pane_id)
+        {
+            pane.tmux_mouse_mode = Some(mode);
+        }
+        Some(terminal_mouse_mode_from_tmux(mode))
     }
 
     fn send_mouse_packet_to_pane(&self, pane_id: &str, packet: &[u8]) -> bool {
@@ -227,6 +275,17 @@ impl TerminalView {
             return MouseForwardOutcome::NotHandled;
         };
 
+        self.try_send_mouse_event_to_pane_with_mode(pane_id, mode, event_kind, cell, modifiers)
+    }
+
+    fn try_send_mouse_event_to_pane_with_mode(
+        &self,
+        pane_id: &str,
+        mode: TerminalMouseMode,
+        event_kind: TerminalMouseEventKind,
+        cell: CellPos,
+        modifiers: gpui::Modifiers,
+    ) -> MouseForwardOutcome {
         let send_result = Self::encode_mouse_packet(mode, event_kind, cell, modifiers)
             .map(|packet| self.send_owned_mouse_packet_to_pane(pane_id, packet));
         mouse_forward_outcome(mode, send_result)
@@ -365,12 +424,24 @@ impl TerminalView {
             return false;
         };
 
-        let outcome = self.try_send_mouse_event_to_pane(
-            pane_id.as_str(),
-            TerminalMouseEventKind::Press(button.terminal_button()),
-            cell,
-            event.modifiers,
-        );
+        let event_kind = TerminalMouseEventKind::Press(button.terminal_button());
+        let mut outcome =
+            self.try_send_mouse_event_to_pane(pane_id.as_str(), event_kind, cell, event.modifiers);
+        // A tmux pane can enable mouse reporting between metadata refreshes.
+        // Before Termy opens its own right-click menu, make one short live query
+        // so the nested application's context menu wins deterministically.
+        if !outcome.is_handled()
+            && button == MouseTrackedButton::Right
+            && let Some(mode) = self.refresh_tmux_pane_mouse_mode(pane_id.as_str())
+        {
+            outcome = self.try_send_mouse_event_to_pane_with_mode(
+                pane_id.as_str(),
+                mode,
+                event_kind,
+                cell,
+                event.modifiers,
+            );
+        }
         if !outcome.is_handled() {
             return false;
         }
@@ -644,6 +715,30 @@ mod tests {
             enabled: true,
             ..TerminalMouseMode::default()
         }
+    }
+
+    #[test]
+    fn tmux_mouse_mode_maps_any_event_and_sgr_reporting() {
+        let mode = terminal_mouse_mode_from_tmux(TmuxPaneMouseMode {
+            any: true,
+            sgr: true,
+            ..TmuxPaneMouseMode::default()
+        });
+
+        assert!(mode.enabled);
+        assert!(mode.report_motion);
+        assert!(mode.can_report_drag());
+        assert!(mode.sgr_encoding);
+        assert!(!mode.utf8_encoding);
+    }
+
+    #[test]
+    fn tmux_mouse_mode_stays_disabled_without_reporting_flags() {
+        let mode = terminal_mouse_mode_from_tmux(TmuxPaneMouseMode::default());
+
+        assert!(!mode.enabled);
+        assert!(!mode.report_click);
+        assert!(!mode.can_report_drag());
     }
 
     #[test]

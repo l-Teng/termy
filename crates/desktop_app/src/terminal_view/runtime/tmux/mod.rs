@@ -89,6 +89,7 @@ impl TerminalPane {
             height: state.height,
             pane_zoom_steps: 0,
             degraded,
+            tmux_mouse_mode: Some(state.mouse_mode),
             progress_state: ProgressState::default(),
             content: PaneContent::Terminal(terminal),
             render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),

@@ -28,7 +28,10 @@ use super::shutdown::{
     is_tmux_missing_client_error, is_tmux_no_server_error, normalize_shutdown_teardown_result,
     run_shutdown_actions,
 };
-use super::snapshot::{PANE_SNAPSHOT_FORMAT, WINDOW_SNAPSHOT_FORMAT, parse_snapshot};
+use super::snapshot::{
+    PANE_MOUSE_MODE_FORMAT, PANE_SNAPSHOT_FORMAT, WINDOW_SNAPSHOT_FORMAT, parse_pane_mouse_mode,
+    parse_snapshot,
+};
 use tmux_control_core::control::{
     FATAL_EXIT_QUEUE_BOUND, NOTIFICATION_QUEUE_BOUND, PENDING_QUEUE_BOUND, REQUEST_QUEUE_BOUND,
     spawn_control_threads,
@@ -37,8 +40,8 @@ use tmux_control_core::payload::{
     capture_full_pane_args, capture_pane_range_args, sanitize_tmux_payload, unescape_tmux_payload,
 };
 use tmux_control_core::types::{
-    TmuxControlError, TmuxLaunchTarget, TmuxNotification, TmuxRuntimeConfig, TmuxSessionSummary,
-    TmuxShutdownMode, TmuxSnapshot, TmuxSocketTarget,
+    TmuxControlError, TmuxLaunchTarget, TmuxNotification, TmuxPaneMouseMode, TmuxRuntimeConfig,
+    TmuxSessionSummary, TmuxShutdownMode, TmuxSnapshot, TmuxSocketTarget,
 };
 
 pub struct TmuxClient {
@@ -375,6 +378,32 @@ impl TmuxClient {
         ])?;
 
         parse_snapshot(&self.session_name, &windows_output, &panes_output)
+    }
+
+    /// Query tmux's authoritative mouse mode for one pane. This is a short,
+    /// bounded fallback for context-menu decisions when cached mode metadata is
+    /// stale; it must not turn a right click into a multi-second UI stall.
+    pub fn query_pane_mouse_mode(&self, pane_id: &str) -> Result<TmuxPaneMouseMode> {
+        const MOUSE_MODE_QUERY_TIMEOUT: Duration = Duration::from_millis(250);
+        let command = tmux_control_command_line(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane_id,
+            PANE_MOUSE_MODE_FORMAT,
+        ])
+        .map_err(|error| {
+            anyhow!(TmuxControlError::protocol(format!(
+                "refusing unsafe tmux mouse mode query: {error}"
+            )))
+        })?;
+        let response = self
+            .send_control_command_wait_with_timeout(command.as_str(), MOUSE_MODE_QUERY_TIMEOUT)
+            .with_context(|| format!("tmux pane mouse mode query failed: {command}"))?;
+        let unescaped = unescape_tmux_payload(response.output.as_bytes());
+        let value = String::from_utf8(unescaped)
+            .with_context(|| format!("tmux pane mouse mode is not valid UTF-8: {command}"))?;
+        parse_pane_mouse_mode(value.trim())
     }
 
     pub fn new_window_after(

@@ -646,6 +646,7 @@ mod tests {
             height: 1,
             pane_zoom_steps: 0,
             degraded: false,
+            tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
             content: PaneContent::Terminal(test_terminal()),
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),

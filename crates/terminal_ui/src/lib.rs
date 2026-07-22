@@ -44,6 +44,7 @@ pub use shell_integration::{CommandLifecycle, CommandPhase, ProgressState};
 pub use termy_core::KittyGraphicsRenderPlacement;
 pub use termy_core::monotonic_now_ns;
 pub use tmux::{
-    TmuxClient, TmuxLaunchTarget, TmuxNotification, TmuxPaneState, TmuxRuntimeConfig,
-    TmuxSessionSummary, TmuxShutdownMode, TmuxSnapshot, TmuxSocketTarget, TmuxWindowState,
+    TmuxClient, TmuxLaunchTarget, TmuxNotification, TmuxPaneMouseMode, TmuxPaneState,
+    TmuxRuntimeConfig, TmuxSessionSummary, TmuxShutdownMode, TmuxSnapshot, TmuxSocketTarget,
+    TmuxWindowState,
 };

@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 
-use tmux_control_core::types::{TmuxPaneState, TmuxSessionSummary, TmuxSnapshot, TmuxWindowState};
+use tmux_control_core::types::{
+    TmuxPaneMouseMode, TmuxPaneState, TmuxSessionSummary, TmuxSnapshot, TmuxWindowState,
+};
 
 const SNAPSHOT_FIELD_SEP: char = '\u{1f}';
 const SESSION_SNAPSHOT_FORMAT: &str = concat!(
@@ -47,9 +49,26 @@ pub(crate) const PANE_SNAPSHOT_FORMAT: &str = concat!(
     "\u{1f}",
     "#{cursor_y}",
     "\u{1f}",
+    "#{mouse_standard_flag}",
+    "\u{1f}",
+    "#{mouse_button_flag}",
+    "\u{1f}",
+    "#{mouse_any_flag}",
+    "\u{1f}",
+    "#{mouse_sgr_flag}",
+    "\u{1f}",
+    "#{mouse_utf8_flag}",
+    "\u{1f}",
     "#{q:pane_current_path}",
     "\u{1f}",
     "#{q:pane_current_command}",
+);
+pub(crate) const PANE_MOUSE_MODE_FORMAT: &str = concat!(
+    "#{mouse_standard_flag}",
+    "#{mouse_button_flag}",
+    "#{mouse_any_flag}",
+    "#{mouse_sgr_flag}",
+    "#{mouse_utf8_flag}",
 );
 
 pub(crate) fn session_snapshot_format() -> &'static str {
@@ -162,6 +181,27 @@ fn parse_snapshot_i32(value: &str, field: &str, kind: &str, line: &str) -> Resul
         .with_context(|| format!("invalid {field} in tmux {kind} line: '{line}'"))
 }
 
+pub(crate) fn parse_pane_mouse_mode(value: &str) -> Result<TmuxPaneMouseMode> {
+    let [standard, button, any, sgr, utf8] = value.as_bytes() else {
+        return Err(anyhow!(
+            "invalid tmux pane mouse mode: expected 5 flags, got {value:?}"
+        ));
+    };
+    let flag = |value| match value {
+        b'0' => Ok(false),
+        b'1' => Ok(true),
+        _ => Err(anyhow!("invalid tmux pane mouse mode flag: {value:?}")),
+    };
+
+    Ok(TmuxPaneMouseMode {
+        standard: flag(*standard)?,
+        button: flag(*button)?,
+        any: flag(*any)?,
+        sgr: flag(*sgr)?,
+        utf8: flag(*utf8)?,
+    })
+}
+
 pub(crate) fn parse_session_summaries(output: &str) -> Result<Vec<TmuxSessionSummary>> {
     let mut sessions = Vec::new();
 
@@ -202,9 +242,14 @@ pub(crate) fn parse_snapshot(
             pane_height,
             cursor_x,
             cursor_y,
+            mouse_standard,
+            mouse_button,
+            mouse_any,
+            mouse_sgr,
+            mouse_utf8,
             current_path,
             current_command,
-        ] = parse_snapshot_fields::<12>(line, "pane")?;
+        ] = parse_snapshot_fields::<17>(line, "pane")?;
         let is_active = parse_snapshot_bool(&pane_active, "pane_active", "pane", line)?;
         let left = parse_snapshot_u16(&pane_left, "pane_left", "pane", line)?;
         let top = parse_snapshot_u16(&pane_top, "pane_top", "pane", line)?;
@@ -212,6 +257,13 @@ pub(crate) fn parse_snapshot(
         let height = parse_snapshot_u16(&pane_height, "pane_height", "pane", line)?;
         let cursor_x = parse_snapshot_u16(&cursor_x, "cursor_x", "pane", line)?;
         let cursor_y = parse_snapshot_u16(&cursor_y, "cursor_y", "pane", line)?;
+        let mouse_mode = TmuxPaneMouseMode {
+            standard: parse_snapshot_bool(&mouse_standard, "mouse_standard_flag", "pane", line)?,
+            button: parse_snapshot_bool(&mouse_button, "mouse_button_flag", "pane", line)?,
+            any: parse_snapshot_bool(&mouse_any, "mouse_any_flag", "pane", line)?,
+            sgr: parse_snapshot_bool(&mouse_sgr, "mouse_sgr_flag", "pane", line)?,
+            utf8: parse_snapshot_bool(&mouse_utf8, "mouse_utf8_flag", "pane", line)?,
+        };
 
         if session_id.is_none() {
             session_id = Some(pane_session_id.clone());
@@ -231,6 +283,7 @@ pub(crate) fn parse_snapshot(
                 height,
                 cursor_x,
                 cursor_y,
+                mouse_mode,
                 current_path,
                 current_command,
             });
@@ -281,7 +334,25 @@ pub(crate) fn parse_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use super::{SNAPSHOT_FIELD_SEP, parse_session_summaries, parse_snapshot};
+    use super::{
+        SNAPSHOT_FIELD_SEP, parse_pane_mouse_mode, parse_session_summaries, parse_snapshot,
+    };
+
+    #[test]
+    fn parse_pane_mouse_mode_accepts_tmux_flags() {
+        let mode = parse_pane_mouse_mode("00110").expect("mouse mode");
+        assert!(mode.any);
+        assert!(mode.sgr);
+        assert!(!mode.standard);
+        assert!(!mode.button);
+        assert!(!mode.utf8);
+    }
+
+    #[test]
+    fn parse_pane_mouse_mode_rejects_invalid_flags() {
+        assert!(parse_pane_mouse_mode("0011").is_err());
+        assert!(parse_pane_mouse_mode("00x10").is_err());
+    }
 
     #[test]
     fn parse_snapshot_builds_windows_and_panes() {
@@ -290,9 +361,9 @@ mod tests {
             "@1{sep}0{sep}one{sep}layout-a{sep}1{sep}1\n@2{sep}1{sep}two{sep}layout-b{sep}0{sep}0\n",
         );
         let panes = format!(
-            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}13{sep}22{sep}/tmp{sep}zsh\n\
-             %2{sep}@2{sep}$1{sep}1{sep}0{sep}0{sep}60{sep}24{sep}7{sep}2{sep}/work{sep}sleep\n\
-             %3{sep}@2{sep}$1{sep}0{sep}61{sep}0{sep}19{sep}24{sep}3{sep}8{sep}/work{sep}zsh\n",
+            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}13{sep}22{sep}0{sep}0{sep}1{sep}1{sep}0{sep}/tmp{sep}zsh\n\
+             %2{sep}@2{sep}$1{sep}1{sep}0{sep}0{sep}60{sep}24{sep}7{sep}2{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/work{sep}sleep\n\
+             %3{sep}@2{sep}$1{sep}0{sep}61{sep}0{sep}19{sep}24{sep}3{sep}8{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/work{sep}zsh\n",
         );
         let snapshot = parse_snapshot("termy", windows.as_str(), panes.as_str()).expect("snapshot");
         assert_eq!(snapshot.windows.len(), 2);
@@ -303,6 +374,9 @@ mod tests {
         assert!(!snapshot.windows[1].automatic_rename);
         assert_eq!(snapshot.windows[0].panes[0].cursor_x, 13);
         assert_eq!(snapshot.windows[0].panes[0].cursor_y, 22);
+        assert!(snapshot.windows[0].panes[0].mouse_mode.any);
+        assert!(snapshot.windows[0].panes[0].mouse_mode.sgr);
+        assert!(!snapshot.windows[0].panes[0].mouse_mode.standard);
         assert_eq!(snapshot.windows[0].panes[0].current_path, "/tmp");
         assert_eq!(snapshot.windows[1].panes[0].current_command, "sleep");
     }
@@ -313,7 +387,7 @@ mod tests {
         let windows =
             format!("@1{sep}0{sep}name\\x09with-tab\\x1fwindow{sep}layout\\x1fgrid{sep}1{sep}1\n");
         let panes = format!(
-            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}/tmp\\x1fdir\\x09tab{sep}cmd\\x0awith-nl\\x1fpart\n",
+            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/tmp\\x1fdir\\x09tab{sep}cmd\\x0awith-nl\\x1fpart\n",
         );
         let snapshot = parse_snapshot("termy", windows.as_str(), panes.as_str()).expect("snapshot");
         assert_eq!(snapshot.windows[0].name, "name\twith-tab\x1fwindow");
@@ -334,7 +408,7 @@ mod tests {
         let windows =
             format!("@1{sep}0{sep}name\\011with-tab\\037window{sep}layout\\037grid{sep}1{sep}1\n");
         let panes = format!(
-            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}/tmp\\011dir\\037tab{sep}cmd\\012with-nl\\037part\n",
+            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/tmp\\011dir\\037tab{sep}cmd\\012with-nl\\037part\n",
         );
         let snapshot = parse_snapshot("termy", windows.as_str(), panes.as_str()).expect("snapshot");
         assert_eq!(snapshot.windows[0].name, "name\twith-tab\x1fwindow");
@@ -356,7 +430,7 @@ mod tests {
             "@1{sep}0{sep}one{sep}aeea,149x39,0,0{{74x39,0,0\\[74x19,0,0,0,74x19,0,20,2],74x39,75,0,1}}{sep}1{sep}1\n",
         );
         let panes = format!(
-            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}149{sep}39{sep}0{sep}0{sep}/tmp{sep}zsh\n"
+            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}149{sep}39{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/tmp{sep}zsh\n"
         );
         let snapshot = parse_snapshot("termy", windows.as_str(), panes.as_str()).expect("snapshot");
         assert_eq!(
@@ -371,7 +445,7 @@ mod tests {
         let windows =
             format!("@1{sep}0{sep}name\\[a\\]\\(b\\)\\ c\\*d\\?e{sep}layout-a{sep}1{sep}1\n",);
         let panes = format!(
-            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}/tmp\\ path\\[x\\]\\(y\\){sep}cmd\\ \\\"quoted\\\"\\ and\\ symbols\\*\\?\n",
+            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/tmp\\ path\\[x\\]\\(y\\){sep}cmd\\ \\\"quoted\\\"\\ and\\ symbols\\*\\?\n",
         );
         let snapshot = parse_snapshot("termy", windows.as_str(), panes.as_str()).expect("snapshot");
         assert_eq!(snapshot.windows[0].name, "name[a](b) c*d?e");
@@ -387,7 +461,7 @@ mod tests {
         let sep = SNAPSHOT_FIELD_SEP;
         let windows = format!("@1{sep}0{sep}broken{sep}name{sep}layout{sep}1{sep}1\n");
         let panes = format!(
-            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}/tmp{sep}zsh\n"
+            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/tmp{sep}zsh\n"
         );
         let error = parse_snapshot("termy", windows.as_str(), panes.as_str()).unwrap_err();
         assert!(error.to_string().contains("expected 6 fields, got 7"));
@@ -398,7 +472,7 @@ mod tests {
         let sep = SNAPSHOT_FIELD_SEP;
         let windows = format!("@1{sep}0{sep}name\\x0g{sep}layout{sep}1{sep}1\n");
         let panes = format!(
-            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}/tmp{sep}zsh\n"
+            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/tmp{sep}zsh\n"
         );
         let error = parse_snapshot("termy", windows.as_str(), panes.as_str()).unwrap_err();
         assert!(error.to_string().contains("invalid hex escape"));
@@ -429,8 +503,8 @@ mod tests {
         let sep = SNAPSHOT_FIELD_SEP;
         let windows = format!("@1{sep}0{sep}one{sep}layout-a{sep}1{sep}1\n");
         let panes = format!(
-            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}/tmp{sep}zsh\n\
-             %2{sep}@2{sep}$1{sep}0{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}/tmp{sep}zsh\n"
+            "%1{sep}@1{sep}$1{sep}1{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/tmp{sep}zsh\n\
+             %2{sep}@2{sep}$1{sep}0{sep}0{sep}0{sep}80{sep}24{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}0{sep}/tmp{sep}zsh\n"
         );
         let snapshot = parse_snapshot("termy", windows.as_str(), panes.as_str()).expect("snapshot");
         assert_eq!(snapshot.windows.len(), 1);

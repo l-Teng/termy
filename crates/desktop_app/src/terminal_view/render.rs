@@ -3921,6 +3921,7 @@ mod tests {
             height: rows,
             pane_zoom_steps: 0,
             degraded: false,
+            tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
             content: PaneContent::Terminal(Terminal::new_tmux(
                 size,

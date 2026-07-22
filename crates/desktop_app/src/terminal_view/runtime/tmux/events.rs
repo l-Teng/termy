@@ -1,6 +1,26 @@
 use super::*;
+use crate::terminal_view::runtime::TMUX_MOUSE_MODE_SUBSCRIPTION_NAME;
 use std::time::{Duration, Instant};
 use termy_terminal_ui::TmuxNotification;
+
+fn parse_tmux_mouse_mode_subscription(value: &str) -> Option<TmuxPaneMouseMode> {
+    let [standard, button, any, sgr, utf8] = value.as_bytes() else {
+        return None;
+    };
+    let flag = |value| match value {
+        b'0' => Some(false),
+        b'1' => Some(true),
+        _ => None,
+    };
+
+    Some(TmuxPaneMouseMode {
+        standard: flag(*standard)?,
+        button: flag(*button)?,
+        any: flag(*any)?,
+        sgr: flag(*sgr)?,
+        utf8: flag(*utf8)?,
+    })
+}
 
 impl TerminalView {
     pub(in crate::terminal_view) fn request_tmux_resize_convergence(
@@ -177,12 +197,22 @@ impl TerminalView {
                     termy_toast::warning(message);
                     should_redraw = true;
                 }
-                TmuxNotification::SubscriptionChanged { .. } => {
-                    // The desktop app reconciles pane/window metadata from
-                    // snapshots on NeedsRefresh and does not consume format
-                    // subscriptions yet. The plumbing exists for control-mode
-                    // embedders that opt in via TmuxClient::subscribe.
+                TmuxNotification::SubscriptionChanged {
+                    name, pane, value, ..
+                } if name == TMUX_MOUSE_MODE_SUBSCRIPTION_NAME => {
+                    eprintln!("TERMY_MOUSE_DEBUG event pane={pane} value={value}");
+                    if let Some(mode) = parse_tmux_mouse_mode_subscription(&value)
+                        && let Some(pane) = self
+                            .tabs
+                            .iter_mut()
+                            .flat_map(|tab| tab.panes.iter_mut())
+                            .find(|candidate| candidate.id == pane)
+                    {
+                        pane.tmux_mouse_mode = Some(mode);
+                        eprintln!("TERMY_MOUSE_DEBUG applied mode={mode:?}");
+                    }
                 }
+                TmuxNotification::SubscriptionChanged { .. } => {}
                 TmuxNotification::Exit(reason) => {
                     let reason =
                         Some(reason.unwrap_or_else(|| "tmux control mode exited".to_string()));
@@ -222,6 +252,26 @@ impl TerminalView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_tmux_mouse_mode_subscription_flags() {
+        assert_eq!(
+            parse_tmux_mouse_mode_subscription("00110"),
+            Some(TmuxPaneMouseMode {
+                standard: false,
+                button: false,
+                any: true,
+                sgr: true,
+                utf8: false,
+            })
+        );
+        assert_eq!(
+            parse_tmux_mouse_mode_subscription("00000"),
+            Some(Default::default())
+        );
+        assert_eq!(parse_tmux_mouse_mode_subscription("0011"), None);
+        assert_eq!(parse_tmux_mouse_mode_subscription("00x10"), None);
+    }
 
     #[test]
     fn tmux_snapshot_refresh_mode_is_debounced_when_deadline_has_elapsed() {

@@ -46,9 +46,9 @@ use termy_terminal_ui::{
     TerminalGridRows, TerminalKeyEventKind, TerminalKeyboardMode, TerminalLaunch,
     TerminalMouseMode, TerminalOptions, TerminalQueryColors, TerminalReplyHost,
     TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, TmuxLaunchTarget,
-    WindowsShell as RuntimeWindowsShell, WorkingDirFallback as RuntimeWorkingDirFallback,
-    find_link_in_line, hyperlink_at_viewport_cell, keystroke_to_input,
-    normalize_working_directory_candidate, resolve_launch_working_directory,
+    TmuxPaneMouseMode, WindowsShell as RuntimeWindowsShell,
+    WorkingDirFallback as RuntimeWorkingDirFallback, find_link_in_line, hyperlink_at_viewport_cell,
+    keystroke_to_input, normalize_working_directory_candidate, resolve_launch_working_directory,
     resolve_working_directory_path,
 };
 use termy_toast::ToastManager;
@@ -867,6 +867,7 @@ struct TerminalPane {
     height: u16,
     pane_zoom_steps: i16,
     degraded: bool,
+    tmux_mouse_mode: Option<TmuxPaneMouseMode>,
     content: PaneContent,
     // Progress reported by this pane's shell via OSC 9;4; the tab strip shows
     // the per-tab aggregate (TerminalTab::aggregate_progress_state).
@@ -927,6 +928,7 @@ impl TerminalPane {
             height,
             pane_zoom_steps: 0,
             degraded: false,
+            tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
             content: PaneContent::Terminal(terminal),
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),
@@ -945,6 +947,7 @@ impl TerminalPane {
             height,
             pane_zoom_steps: 0,
             degraded: false,
+            tmux_mouse_mode: None,
             content: PaneContent::Browser(Box::new(browser::BrowserTabState::new(url))),
             progress_state: ProgressState::default(),
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),

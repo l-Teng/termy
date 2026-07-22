@@ -10,6 +10,15 @@ mod tmux_sync;
 
 pub(super) use tmux_sync::{TmuxResizeScheduler, TmuxResizeWakeup};
 
+const TMUX_MOUSE_MODE_SUBSCRIPTION_NAME: &str = "termy_mouse_mode";
+const TMUX_MOUSE_MODE_SUBSCRIPTION_FORMAT: &str = concat!(
+    "#{mouse_standard_flag}",
+    "#{mouse_button_flag}",
+    "#{mouse_any_flag}",
+    "#{mouse_sgr_flag}",
+    "#{mouse_utf8_flag}",
+);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RuntimeKind {
     Native,
@@ -99,6 +108,16 @@ impl TmuxRuntime {
         cols: u16,
         rows: u16,
     ) -> Self {
+        // tmux consumes a nested application's mouse-mode escape sequences, so
+        // the display parser cannot observe mode changes itself. Keep the pane
+        // state current between full snapshots on tmux 3.4+; tmux 3.3 remains
+        // supported through the snapshot fallback.
+        let mouse_subscription = client.subscribe(
+            TMUX_MOUSE_MODE_SUBSCRIPTION_NAME,
+            "%*",
+            TMUX_MOUSE_MODE_SUBSCRIPTION_FORMAT,
+        );
+        eprintln!("TERMY_MOUSE_DEBUG subscribe={mouse_subscription:?}");
         Self {
             config,
             client,
