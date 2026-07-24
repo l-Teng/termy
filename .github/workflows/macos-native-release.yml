@@ -196,6 +196,11 @@ jobs:
       # Published under a `native` name so a downloaded preview DMG is never
       # mistaken for the GPUI desktop artifact, which uses the same
       # Termy-<version>-macos-<arch>.dmg pattern.
+      #
+      # Everything uploaded must live in one flat directory. upload-artifact
+      # roots the archive at the least common ancestor of the path inputs; a
+      # mix of macos/dist/publish/* and macos/dist/*.json would nest DMGs under
+      # dist/publish/ on download and break the publish job's dist/*.dmg globs.
       - name: Stage publishable assets
         run: |
           mkdir -p macos/dist/publish
@@ -214,19 +219,16 @@ jobs:
             echo "swift=$(swift --version | head -n 1)"
             echo "xcode=$(xcodebuild -version | tr '\n' ' ')"
           } > "macos/dist/publish/native-release-${ARCH}.metadata"
+          cp "macos/dist/native-launch-${ARCH}.json" "macos/dist/publish/"
+          cp "macos/dist/native-soak-${ARCH}.json" "macos/dist/publish/"
+          cp "macos/dist/native-soak-${ARCH}.log" "macos/dist/publish/"
           cat "macos/dist/publish/${asset}.sha256"
 
       - name: Upload native release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: termy-native-release-${{ matrix.arch }}
-          path: |
-            macos/dist/publish/Termy-native-*-macos-${{ matrix.arch }}.dmg
-            macos/dist/publish/Termy-native-*-macos-${{ matrix.arch }}.dmg.sha256
-            macos/dist/publish/native-release-${{ matrix.arch }}.metadata
-            macos/dist/native-launch-${{ matrix.arch }}.json
-            macos/dist/native-soak-${{ matrix.arch }}.json
-            macos/dist/native-soak-${{ matrix.arch }}.log
+          path: macos/dist/publish/*
           if-no-files-found: error
           retention-days: 30
 
@@ -248,9 +250,14 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           cd dist
-          find . -maxdepth 1 -type f -name '*.dmg' -print0 \
-            | sort -z \
-            | xargs -0 sha256sum > checksums.txt
+          shopt -s nullglob
+          dmgs=(*.dmg)
+          if (( ${#dmgs[@]} == 0 )); then
+            echo "Expected flat *.dmg files in dist/ after download; got:" >&2
+            find . -print >&2
+            exit 1
+          fi
+          sha256sum "${dmgs[@]}" | sort > checksums.txt
           cat checksums.txt
 
       - name: Write release notes
