@@ -18,7 +18,9 @@ const llmMiddleware = createMiddleware().server(({ next, request }) => {
       .filter((v) => v.length > 0);
     url.pathname = slugsToMarkdownPath(slugs).url;
 
-    throw redirect(url);
+    throw redirect({
+      href: `${url.pathname}${url.search}${url.hash}`,
+    });
   }
 
   return next();

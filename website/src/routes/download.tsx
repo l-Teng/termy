@@ -21,6 +21,19 @@ import {
 } from '@/lib/github-release';
 
 type DownloadChannel = 'desktop' | 'native';
+type DownloadEdition = 'native-macos';
+
+type DownloadSearch = {
+  edition?: DownloadEdition;
+};
+
+function channelFromEdition(edition: DownloadEdition | undefined): DownloadChannel {
+  return edition === 'native-macos' ? 'native' : 'desktop';
+}
+
+function editionFromChannel(channel: DownloadChannel): DownloadEdition | undefined {
+  return channel === 'native' ? 'native-macos' : undefined;
+}
 
 const loadDownloadReleases = createServerFn({ method: 'GET' }).handler(
   async () => {
@@ -62,18 +75,35 @@ const loadDownloadReleases = createServerFn({ method: 'GET' }).handler(
 
 export const Route = createFileRoute('/download')({
   head: () => ({ links: marketingFontLinks }),
+  validateSearch: (search: Record<string, unknown>): DownloadSearch => ({
+    edition: search.edition === 'native-macos' ? 'native-macos' : undefined,
+  }),
   component: DownloadPage,
   loader: () => loadDownloadReleases(),
 });
 
 function DownloadPage() {
   const { desktop, native } = Route.useLoaderData();
-  const [channel, setChannel] = useState<DownloadChannel>('desktop');
+  const { edition } = Route.useSearch();
+  const navigate = Route.useNavigate();
+  const channel = channelFromEdition(edition);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [pendingDownload, setPendingDownload] = useState<{
     name: string;
     url: string;
   } | null>(null);
+
+  const setChannel = (next: DownloadChannel) => {
+    void navigate({
+      search: (prev) => {
+        const nextEdition = editionFromChannel(next);
+        if (nextEdition) return { ...prev, edition: nextEdition };
+        const { edition: _edition, ...rest } = prev;
+        return rest;
+      },
+      replace: true,
+    });
+  };
 
   const active = channel === 'desktop' ? desktop : native;
   const release = active.release;
