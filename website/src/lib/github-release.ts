@@ -103,6 +103,18 @@ function assetPlatform(
   return 'other';
 }
 
+/** Sidecar files attached to releases; not installers. */
+function isInstallableReleaseAsset(name: string): boolean {
+  const lower = name.toLowerCase();
+  if (lower === 'checksums.txt') return false;
+  return !(
+    lower.endsWith('.sha256') ||
+    lower.endsWith('.metadata') ||
+    lower.endsWith('.json') ||
+    lower.endsWith('.log')
+  );
+}
+
 export function groupReleaseAssets(
   assets: GitHubReleaseAsset[],
 ): PlatformAssetGroup[] {
@@ -113,12 +125,27 @@ export function groupReleaseAssets(
   ];
 
   for (const asset of assets) {
+    if (!isInstallableReleaseAsset(asset.name)) continue;
     const platform = assetPlatform(asset.name);
     if (platform === 'other') continue;
     groups.find((group) => group.id === platform)?.assets.push(asset);
   }
 
   return groups.filter((group) => group.assets.length > 0);
+}
+
+export const NATIVE_MACOS_TAG_PREFIX = 'macos-native-v';
+
+export function isNativeMacosReleaseTag(tag: string): boolean {
+  return tag.startsWith(NATIVE_MACOS_TAG_PREFIX);
+}
+
+/** Newest `macos-native-v*` prerelease, or null when none exist. */
+export async function fetchLatestNativeMacosRelease(): Promise<GitHubRelease | null> {
+  const releases = await fetchGitHubReleases();
+  return (
+    releases.find((release) => isNativeMacosReleaseTag(release.tagName)) ?? null
+  );
 }
 
 export function assetArch(name: string): string | null {

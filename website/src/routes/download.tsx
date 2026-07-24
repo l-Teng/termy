@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { createServerFn } from '@tanstack/react-start';
 import { TriangleAlert } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import {
   MarketingPageShell,
   marketingFontLinks,
@@ -12,43 +12,78 @@ import {
 import {
   assetArch,
   fetchLatestGitHubRelease,
+  fetchLatestNativeMacosRelease,
   formatBytes,
   formatReleaseDate,
   groupReleaseAssets,
   type GitHubRelease,
+  type PlatformAssetGroup,
 } from '@/lib/github-release';
 
-const loadLatestRelease = createServerFn({ method: 'GET' }).handler(async () => {
-  try {
+type DownloadChannel = 'desktop' | 'native';
+
+const loadDownloadReleases = createServerFn({ method: 'GET' }).handler(
+  async () => {
+    const [desktop, native] = await Promise.allSettled([
+      fetchLatestGitHubRelease(),
+      fetchLatestNativeMacosRelease(),
+    ]);
+
     return {
-      release: await fetchLatestGitHubRelease(),
-      error: null as string | null,
+      desktop:
+        desktop.status === 'fulfilled'
+          ? {
+              release: desktop.value,
+              error: null as string | null,
+            }
+          : {
+              release: null as GitHubRelease | null,
+              error:
+                desktop.reason instanceof Error
+                  ? desktop.reason.message
+                  : 'Failed to load latest release',
+            },
+      native:
+        native.status === 'fulfilled'
+          ? {
+              release: native.value,
+              error: null as string | null,
+            }
+          : {
+              release: null as GitHubRelease | null,
+              error:
+                native.reason instanceof Error
+                  ? native.reason.message
+                  : 'Failed to load native beta release',
+            },
     };
-  } catch (err) {
-    return {
-      release: null as GitHubRelease | null,
-      error:
-        err instanceof Error ? err.message : 'Failed to load latest release',
-    };
-  }
-});
+  },
+);
 
 export const Route = createFileRoute('/download')({
   head: () => ({ links: marketingFontLinks }),
   component: DownloadPage,
-  loader: () => loadLatestRelease(),
+  loader: () => loadDownloadReleases(),
 });
 
 function DownloadPage() {
-  const { release, error } = Route.useLoaderData();
+  const { desktop, native } = Route.useLoaderData();
+  const [channel, setChannel] = useState<DownloadChannel>('desktop');
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [pendingDownload, setPendingDownload] = useState<{
     name: string;
     url: string;
   } | null>(null);
+
+  const active = channel === 'desktop' ? desktop : native;
+  const release = active.release;
+  const error = active.error;
   const groups = release ? groupReleaseAssets(release.assets) : [];
   const githubUrl =
-    release?.htmlUrl ?? 'https://github.com/lassejlv/termy/releases';
+    release?.htmlUrl ??
+    (channel === 'native'
+      ? 'https://github.com/lassejlv/termy/releases?q=macos-native'
+      : 'https://github.com/lassejlv/termy/releases');
 
   const warnBeforeMacDownload = (name: string, url: string) => {
     setPendingDownload({ name, url });
@@ -67,88 +102,86 @@ function DownloadPage() {
         <p className="text-sm text-[#7aa2f7]" style={{ fontFamily: marketingMono }}>
           $ termy install
         </p>
-        <h1 className="mt-3 text-4xl font-medium leading-none tracking-tight text-[#e8eeff] md:text-5xl" style={{ fontFamily: marketingMono }}>
+        <h1
+          className="mt-3 text-4xl font-medium leading-none tracking-tight text-[#e8eeff] md:text-5xl"
+          style={{ fontFamily: marketingMono }}
+        >
           Download
         </h1>
+
+        <div
+          className="mt-8 inline-flex w-fit items-center rounded-full border border-white/[0.08] bg-[#14141c]/70 p-1 backdrop-blur-md"
+          role="tablist"
+          aria-label="Download channel"
+        >
+          <ChannelTab
+            id="desktop"
+            active={channel === 'desktop'}
+            onSelect={setChannel}
+          >
+            Desktop
+          </ChannelTab>
+          <ChannelTab
+            id="native"
+            active={channel === 'native'}
+            onSelect={setChannel}
+            badge="beta"
+          >
+            Native macOS
+          </ChannelTab>
+        </div>
+
+        {channel === 'native' && (
+          <p className="mt-5 max-w-2xl text-sm leading-relaxed text-[#787c99]">
+            Public beta of the SwiftUI macOS host, published separately from the
+            desktop app. Unsigned builds for Apple silicon and Intel — clear
+            quarantine after installing.
+          </p>
+        )}
+
         {release && (
-          <p className="mt-5 text-sm text-[#787c99]" style={{ fontFamily: marketingMono }}>
+          <p
+            className="mt-5 text-sm text-[#787c99]"
+            style={{ fontFamily: marketingMono }}
+          >
             <span className="text-[#c0caf5]">{release.tagName}</span>
             {' · '}
             {formatReleaseDate(release.publishedAt)}
             {' · '}
-            <Link to="/releases" className={marketingLinkClass}>
-              release notes
-            </Link>
-          </p>
-        )}
-
-        <div className={`${marketingPanelClass} mt-12 divide-y divide-white/[0.07] px-5 sm:px-7`}>
-          {error && (
-            <p className="py-8 font-mono text-sm text-fd-muted-foreground">
-              <span className="text-fd-error">error:</span> could not reach
-              GitHub.{' '}
+            {channel === 'desktop' ? (
+              <Link to="/releases" className={marketingLinkClass}>
+                release notes
+              </Link>
+            ) : (
               <a
-                href="https://github.com/lassejlv/termy/releases/latest"
+                href={release.htmlUrl}
                 target="_blank"
                 rel="noreferrer"
                 className={marketingLinkClass}
               >
-                Download from GitHub →
+                release notes ↗
               </a>
-            </p>
-          )}
+            )}
+          </p>
+        )}
 
-          {release && groups.length === 0 && (
-            <p className="py-8 font-mono text-sm text-fd-muted-foreground">
-              No binaries for this release yet.{' '}
-              <a href={githubUrl} target="_blank" rel="noreferrer" className={marketingLinkClass}>
-                View on GitHub →
-              </a>
-            </p>
-          )}
-
-          {groups.map((group) => (
-            <section key={group.id} className="py-7">
-              <h2 className="text-base font-medium text-[#e8eeff]" style={{ fontFamily: marketingMono }}>{group.title}</h2>
-              <ul className="mt-3 divide-y divide-white/[0.06]">
-                {group.assets.map((asset) => {
-                  const arch = assetArch(asset.name);
-                  return (
-                    <li key={asset.id}>
-                      <a
-                        href={asset.downloadUrl}
-                        onClick={(event) => {
-                          if (
-                            group.id === 'macos' &&
-                            (arch === 'arm64' || arch === 'x64')
-                          ) {
-                            event.preventDefault();
-                            warnBeforeMacDownload(asset.name, asset.downloadUrl);
-                          }
-                        }}
-                        className="group -mx-2 flex items-center gap-3 rounded-lg px-2 py-3.5 transition-colors hover:bg-white/[0.04]"
-                      >
-                        <span className="min-w-0 flex-1 break-all text-sm text-[#c0caf5]" style={{ fontFamily: marketingMono }}>
-                          {asset.name}
-                        </span>
-                        {arch && (
-                          <span className="hidden shrink-0 text-[10px] text-[#565f89] sm:inline" style={{ fontFamily: marketingMono }}>
-                            {arch}
-                          </span>
-                        )}
-                        <span className="shrink-0 text-xs text-[#787c99] tabular-nums" style={{ fontFamily: marketingMono }}>
-                          {formatBytes(asset.size)}
-                        </span>
-                      </a>
-                    </li>
-                  );
-                })}
-              </ul>
-            </section>
-          ))}
+        <div
+          className={`${marketingPanelClass} mt-12 divide-y divide-white/[0.07] px-5 sm:px-7`}
+        >
+          <AssetPanel
+            channel={channel}
+            error={error}
+            release={release}
+            groups={groups}
+            githubUrl={githubUrl}
+            onMacDownload={warnBeforeMacDownload}
+          />
         </div>
 
-        <footer className="mt-8 flex flex-wrap gap-x-6 gap-y-2 text-xs text-[#787c99]" style={{ fontFamily: marketingMono }}>
+        <footer
+          className="mt-8 flex flex-wrap gap-x-6 gap-y-2 text-xs text-[#787c99]"
+          style={{ fontFamily: marketingMono }}
+        >
           <Link to="/releases" className="hover:text-white">
             all releases →
           </Link>
@@ -160,7 +193,7 @@ function DownloadPage() {
           >
             GitHub ↗
           </a>
-          {release && (
+          {channel === 'desktop' && release && (
             <a href={release.tarballUrl} className="hover:text-white">
               source tarball ↓
             </a>
@@ -209,7 +242,11 @@ function DownloadPage() {
               className="mt-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-[#0d0f17] px-4 py-3.5 text-xs leading-relaxed text-[#9ece6a]"
               style={{ fontFamily: marketingMono }}
             >
-              <code>sudo xattr -d com.apple.quarantine /Applications/Termy.app</code>
+              <code>
+                {channel === 'native'
+                  ? 'xattr -dr com.apple.quarantine /Applications/Termy.app'
+                  : 'sudo xattr -d com.apple.quarantine /Applications/Termy.app'}
+              </code>
             </pre>
 
             <a
@@ -250,5 +287,174 @@ function DownloadPage() {
         </dialog>
       </main>
     </MarketingPageShell>
+  );
+}
+
+function ChannelTab({
+  id,
+  active,
+  onSelect,
+  badge,
+  children,
+}: {
+  id: DownloadChannel;
+  active: boolean;
+  onSelect: (id: DownloadChannel) => void;
+  badge?: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      id={`download-tab-${id}`}
+      aria-selected={active}
+      onClick={() => onSelect(id)}
+      className={`rounded-full px-4 py-2 text-sm transition-colors active:scale-[0.97] ${
+        active
+          ? 'bg-[#24283b] text-[#e8eeff] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]'
+          : 'text-[#787c99] hover:text-[#c0caf5]'
+      }`}
+      style={{ fontFamily: marketingMono }}
+    >
+      {children}
+      {badge && (
+        <span
+          className={`ml-2 text-[10px] uppercase tracking-wide ${
+            active ? 'text-[#7aa2f7]' : 'text-[#565f89]'
+          }`}
+        >
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function AssetPanel({
+  channel,
+  error,
+  release,
+  groups,
+  githubUrl,
+  onMacDownload,
+}: {
+  channel: DownloadChannel;
+  error: string | null;
+  release: GitHubRelease | null;
+  groups: PlatformAssetGroup[];
+  githubUrl: string;
+  onMacDownload: (name: string, url: string) => void;
+}) {
+  if (error) {
+    return (
+      <p className="py-8 font-mono text-sm text-fd-muted-foreground">
+        <span className="text-fd-error">error:</span> could not reach GitHub.{' '}
+        <a
+          href={
+            channel === 'native'
+              ? 'https://github.com/lassejlv/termy/releases?q=macos-native'
+              : 'https://github.com/lassejlv/termy/releases/latest'
+          }
+          target="_blank"
+          rel="noreferrer"
+          className={marketingLinkClass}
+        >
+          Download from GitHub →
+        </a>
+      </p>
+    );
+  }
+
+  if (!release) {
+    return (
+      <p className="py-8 font-mono text-sm text-fd-muted-foreground">
+        {channel === 'native'
+          ? 'No native macOS beta release yet.'
+          : 'No release published yet.'}{' '}
+        <a
+          href={githubUrl}
+          target="_blank"
+          rel="noreferrer"
+          className={marketingLinkClass}
+        >
+          View on GitHub →
+        </a>
+      </p>
+    );
+  }
+
+  if (groups.length === 0) {
+    return (
+      <p className="py-8 font-mono text-sm text-fd-muted-foreground">
+        No binaries for this release yet.{' '}
+        <a
+          href={githubUrl}
+          target="_blank"
+          rel="noreferrer"
+          className={marketingLinkClass}
+        >
+          View on GitHub →
+        </a>
+      </p>
+    );
+  }
+
+  return (
+    <>
+      {groups.map((group) => (
+        <section key={group.id} className="py-7">
+          <h2
+            className="text-base font-medium text-[#e8eeff]"
+            style={{ fontFamily: marketingMono }}
+          >
+            {group.title}
+          </h2>
+          <ul className="mt-3 divide-y divide-white/[0.06]">
+            {group.assets.map((asset) => {
+              const arch = assetArch(asset.name);
+              return (
+                <li key={asset.id}>
+                  <a
+                    href={asset.downloadUrl}
+                    onClick={(event) => {
+                      if (
+                        group.id === 'macos' &&
+                        (arch === 'arm64' || arch === 'x64')
+                      ) {
+                        event.preventDefault();
+                        onMacDownload(asset.name, asset.downloadUrl);
+                      }
+                    }}
+                    className="group -mx-2 flex items-center gap-3 rounded-lg px-2 py-3.5 transition-colors hover:bg-white/[0.04]"
+                  >
+                    <span
+                      className="min-w-0 flex-1 break-all text-sm text-[#c0caf5]"
+                      style={{ fontFamily: marketingMono }}
+                    >
+                      {asset.name}
+                    </span>
+                    {arch && (
+                      <span
+                        className="hidden shrink-0 text-[10px] text-[#565f89] sm:inline"
+                        style={{ fontFamily: marketingMono }}
+                      >
+                        {arch}
+                      </span>
+                    )}
+                    <span
+                      className="shrink-0 text-xs text-[#787c99] tabular-nums"
+                      style={{ fontFamily: marketingMono }}
+                    >
+                      {formatBytes(asset.size)}
+                    </span>
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ))}
+    </>
   );
 }
