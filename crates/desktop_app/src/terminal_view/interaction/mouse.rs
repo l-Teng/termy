@@ -1209,8 +1209,7 @@ impl TerminalView {
 
             let hover_cell = self.position_to_cell(event.position, false);
             if let (Some(cell), Some(current)) = (hover_cell, self.hovered_link.as_ref())
-                && current.row == cell.row
-                && (current.start_col..=current.end_col).contains(&cell.col)
+                && current.contains(cell)
             {
                 return;
             }

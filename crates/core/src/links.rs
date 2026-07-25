@@ -9,12 +9,21 @@ use alacritty_terminal::{
     event::EventListener,
     grid::Dimensions,
     index::{Column, Line},
-    term::Term,
+    term::{Term, cell::Flags},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedLink {
     pub start_col: usize,
+    pub end_col: usize,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedViewportLink {
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
     pub end_col: usize,
     pub target: String,
 }
@@ -126,6 +135,233 @@ pub fn hyperlink_at_viewport_cell<T: EventListener>(
         start_col,
         end_col,
         target: target.uri().to_string(),
+    })
+}
+
+/// The link under a viewport cell, including links spanning soft-wrapped rows.
+///
+/// OSC 8 metadata takes priority over heuristic URL detection. The returned
+/// range is clipped to the visible viewport while the target is built from the
+/// complete logical link, including portions currently in scrollback.
+pub fn link_at_viewport_cell<T: EventListener>(
+    term: &Term<T>,
+    row: usize,
+    col: usize,
+) -> Option<DetectedViewportLink> {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let screen_lines = grid.screen_lines();
+    if row >= screen_lines || col >= columns || columns == 0 {
+        return None;
+    }
+
+    let display_offset = i32::try_from(grid.display_offset()).ok()?;
+    let hovered = GridPosition {
+        line: i32::try_from(row).ok()?.saturating_sub(display_offset),
+        col,
+    };
+    let bounds = grid_line_bounds(grid)?;
+
+    if let Some(target) = grid[Line(hovered.line)][Column(hovered.col)].hyperlink() {
+        let target_uri = target.uri().to_string();
+        let mut start = hovered;
+        while let Some(previous) = previous_wrapped_position(grid, start, bounds, columns) {
+            if grid[Line(previous.line)][Column(previous.col)]
+                .hyperlink()
+                .is_some_and(|candidate| candidate == target)
+            {
+                start = previous;
+            } else {
+                break;
+            }
+        }
+
+        let mut end = hovered;
+        while let Some(next) = next_wrapped_position(grid, end, bounds, columns) {
+            if grid[Line(next.line)][Column(next.col)]
+                .hyperlink()
+                .is_some_and(|candidate| candidate == target)
+            {
+                end = next;
+            } else {
+                break;
+            }
+        }
+
+        return viewport_link_from_grid_range(
+            start,
+            end,
+            target_uri,
+            display_offset,
+            screen_lines,
+            columns,
+        );
+    }
+
+    let hovered_char = grid_cell_char(grid, hovered);
+    if hovered_char.is_whitespace() {
+        return None;
+    }
+
+    let mut positions_before = Vec::new();
+    let mut cursor = hovered;
+    while let Some(previous) = previous_wrapped_position(grid, cursor, bounds, columns) {
+        let candidate = grid_cell_char(grid, previous);
+        if candidate.is_whitespace() {
+            break;
+        }
+        positions_before.push((previous, candidate));
+        cursor = previous;
+    }
+    positions_before.reverse();
+
+    let mut positions = Vec::with_capacity(positions_before.len().saturating_add(16));
+    positions.extend(positions_before);
+    let hovered_index = positions.len();
+    positions.push((hovered, hovered_char));
+
+    cursor = hovered;
+    while let Some(next) = next_wrapped_position(grid, cursor, bounds, columns) {
+        let candidate = grid_cell_char(grid, next);
+        if candidate.is_whitespace() {
+            break;
+        }
+        positions.push((next, candidate));
+        cursor = next;
+    }
+
+    let token: Vec<char> = positions.iter().map(|(_, character)| *character).collect();
+    let detected = find_link_in_line(&token, hovered_index)?;
+    let start = positions.get(detected.start_col)?.0;
+    let end = positions.get(detected.end_col)?.0;
+    viewport_link_from_grid_range(
+        start,
+        end,
+        detected.target,
+        display_offset,
+        screen_lines,
+        columns,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct GridPosition {
+    line: i32,
+    col: usize,
+}
+
+fn grid_line_bounds(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+) -> Option<(i32, i32)> {
+    let screen_lines = i32::try_from(grid.screen_lines()).ok()?;
+    let total_lines = i32::try_from(grid.total_lines()).ok()?;
+    if screen_lines <= 0 || total_lines <= 0 {
+        return None;
+    }
+    Some((-(total_lines - screen_lines), screen_lines - 1))
+}
+
+fn previous_wrapped_position(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    position: GridPosition,
+    (min_line, _): (i32, i32),
+    columns: usize,
+) -> Option<GridPosition> {
+    if position.col > 0 {
+        return Some(GridPosition {
+            line: position.line,
+            col: position.col - 1,
+        });
+    }
+    let previous_line = position.line.checked_sub(1)?;
+    if previous_line < min_line {
+        return None;
+    }
+    let previous_col = columns.checked_sub(1)?;
+    grid[Line(previous_line)][Column(previous_col)]
+        .flags
+        .contains(Flags::WRAPLINE)
+        .then_some(GridPosition {
+            line: previous_line,
+            col: previous_col,
+        })
+}
+
+fn next_wrapped_position(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    position: GridPosition,
+    (_, max_line): (i32, i32),
+    columns: usize,
+) -> Option<GridPosition> {
+    if position.col + 1 < columns {
+        return Some(GridPosition {
+            line: position.line,
+            col: position.col + 1,
+        });
+    }
+    if position.line >= max_line
+        || !grid[Line(position.line)][Column(position.col)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    {
+        return None;
+    }
+    Some(GridPosition {
+        line: position.line + 1,
+        col: 0,
+    })
+}
+
+fn grid_cell_char(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    position: GridPosition,
+) -> char {
+    let cell = &grid[Line(position.line)][Column(position.col)];
+    if cell
+        .flags
+        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN)
+        || cell.c == '\0'
+        || cell.c.is_control()
+    {
+        ' '
+    } else {
+        cell.c
+    }
+}
+
+fn viewport_link_from_grid_range(
+    start: GridPosition,
+    end: GridPosition,
+    target: String,
+    display_offset: i32,
+    screen_lines: usize,
+    columns: usize,
+) -> Option<DetectedViewportLink> {
+    let viewport_min_line = -display_offset;
+    let viewport_max_line = i32::try_from(screen_lines)
+        .ok()?
+        .checked_sub(1)?
+        .saturating_sub(display_offset);
+    let visible_start_line = start.line.max(viewport_min_line);
+    let visible_end_line = end.line.min(viewport_max_line);
+    if visible_start_line > visible_end_line {
+        return None;
+    }
+
+    Some(DetectedViewportLink {
+        start_row: usize::try_from(visible_start_line.saturating_add(display_offset)).ok()?,
+        start_col: if start.line < visible_start_line {
+            0
+        } else {
+            start.col
+        },
+        end_row: usize::try_from(visible_end_line.saturating_add(display_offset)).ok()?,
+        end_col: if end.line > visible_end_line {
+            columns.saturating_sub(1)
+        } else {
+            end.col
+        },
+        target,
     })
 }
 
@@ -500,7 +736,9 @@ fn has_path_like_structure(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileUrlLruCache, classify_link_token, hyperlink_at_viewport_cell};
+    use super::{
+        FileUrlLruCache, classify_link_token, hyperlink_at_viewport_cell, link_at_viewport_cell,
+    };
     use crate::runtime::TerminalSize;
     use alacritty_terminal::{
         event::VoidListener,
@@ -591,6 +829,45 @@ mod tests {
     fn plain_text_has_no_hyperlink() {
         let term = term_with_input(20, 2, b"https://example.com");
         assert_eq!(hyperlink_at_viewport_cell(&term, 0, 0), None);
+    }
+
+    #[test]
+    fn detected_url_spans_soft_wrapped_rows() {
+        let term = term_with_input(10, 4, b"go https://example.com/path");
+
+        for (row, col) in [(0, 4), (1, 5), (2, 4)] {
+            let link = link_at_viewport_cell(&term, row, col)
+                .expect("each wrapped URL segment should resolve");
+            assert_eq!((link.start_row, link.start_col), (0, 3));
+            assert_eq!((link.end_row, link.end_col), (2, 6));
+            assert_eq!(link.target, "https://example.com/path");
+        }
+    }
+
+    #[test]
+    fn detected_url_does_not_cross_hard_line_break() {
+        let term = term_with_input(20, 3, b"https://a.co\r\nsecond.example");
+
+        let second =
+            link_at_viewport_cell(&term, 1, 3).expect("second line should be its own domain");
+        assert_eq!((second.start_row, second.start_col), (1, 0));
+        assert_eq!((second.end_row, second.end_col), (1, 13));
+        assert_eq!(second.target, "http://second.example");
+    }
+
+    #[test]
+    fn osc8_hyperlink_span_follows_soft_wrap() {
+        let term = term_with_input(
+            5,
+            3,
+            b"\x1b]8;;https://example.com\x1b\\read-more\x1b]8;;\x1b\\",
+        );
+
+        let link = link_at_viewport_cell(&term, 1, 2)
+            .expect("wrapped OSC 8 text should resolve as one link");
+        assert_eq!((link.start_row, link.start_col), (0, 0));
+        assert_eq!((link.end_row, link.end_col), (1, 3));
+        assert_eq!(link.target, "https://example.com");
     }
 
     fn unique_temp_path(file_name: &str) -> PathBuf {

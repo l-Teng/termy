@@ -32,7 +32,10 @@ pub use kitty_graphics::{
     KittyGraphicsApplyResult, KittyGraphicsCommand, KittyGraphicsInterceptor, KittyGraphicsItem,
     KittyGraphicsRenderPlacement, KittyGraphicsScreen, KittyGraphicsState,
 };
-pub use links::{DetectedLink, classify_link_token, find_link_in_line, hyperlink_at_viewport_cell};
+pub use links::{
+    DetectedLink, DetectedViewportLink, classify_link_token, find_link_in_line,
+    hyperlink_at_viewport_cell, link_at_viewport_cell,
+};
 #[cfg(unix)]
 pub use locale::{
     DEFAULT_UTF8_LOCALE, Utf8LocaleOverridePlan, preferred_utf8_locale, utf8_locale_override_plan,

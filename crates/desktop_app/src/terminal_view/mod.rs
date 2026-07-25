@@ -47,9 +47,9 @@ use termy_terminal_ui::{
     TerminalMouseMode, TerminalOptions, TerminalQueryColors, TerminalReplyHost,
     TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, TmuxLaunchTarget,
     TmuxPaneMouseMode, WindowsShell as RuntimeWindowsShell,
-    WorkingDirFallback as RuntimeWorkingDirFallback, find_link_in_line, hyperlink_at_viewport_cell,
-    keystroke_to_input, normalize_working_directory_candidate, resolve_launch_working_directory,
-    resolve_working_directory_path,
+    WorkingDirFallback as RuntimeWorkingDirFallback, hyperlink_at_viewport_cell,
+    keystroke_to_input, link_at_viewport_cell, normalize_working_directory_candidate,
+    resolve_launch_working_directory, resolve_working_directory_path,
 };
 use termy_toast::ToastManager;
 
@@ -823,6 +823,20 @@ impl Terminal {
                 .lock()
                 .ok()
                 .and_then(|terminal| terminal.hyperlink_at(row, col)),
+        }
+    }
+
+    /// The OSC 8 or detected text link under the given viewport cell,
+    /// including links spanning soft-wrapped rows.
+    fn link_at(&self, row: usize, col: usize) -> Option<termy_terminal_ui::DetectedViewportLink> {
+        match self {
+            Self::Tmux(terminal) => {
+                terminal.with_term(|term| link_at_viewport_cell(term, row, col))
+            }
+            Self::Native(terminal) => terminal
+                .lock()
+                .ok()
+                .and_then(|terminal| terminal.link_at(row, col)),
         }
     }
 

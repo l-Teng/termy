@@ -785,8 +785,8 @@ impl TerminalView {
             || "-".to_string(),
             |link| {
                 format!(
-                    "row {} cols {}-{} -> {}",
-                    link.row, link.start_col, link.end_col, link.target
+                    "rows {}:{}-{}:{} -> {}",
+                    link.start_row, link.start_col, link.end_row, link.end_col, link.target
                 )
             },
         );

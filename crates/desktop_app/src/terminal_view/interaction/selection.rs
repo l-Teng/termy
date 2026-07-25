@@ -3,10 +3,29 @@ use alacritty_terminal::grid::Dimensions;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::terminal_view) struct HoveredLink {
-    pub(in crate::terminal_view) row: usize,
+    pub(in crate::terminal_view) start_row: usize,
     pub(in crate::terminal_view) start_col: usize,
+    pub(in crate::terminal_view) end_row: usize,
     pub(in crate::terminal_view) end_col: usize,
     pub(in crate::terminal_view) target: String,
+}
+
+impl HoveredLink {
+    pub(in crate::terminal_view) fn contains(&self, cell: CellPos) -> bool {
+        if cell.row < self.start_row || cell.row > self.end_row {
+            return false;
+        }
+        if self.start_row == self.end_row {
+            return (self.start_col..=self.end_col).contains(&cell.col);
+        }
+        if cell.row == self.start_row {
+            return cell.col >= self.start_col;
+        }
+        if cell.row == self.end_row {
+            return cell.col <= self.end_col;
+        }
+        true
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -722,19 +741,6 @@ impl TerminalView {
         selected_text_from_terminal(terminal, start, end)
     }
 
-    pub(in super::super) fn row_text(&self, row: usize) -> Option<Vec<char>> {
-        let terminal = self.active_terminal()?;
-        let size = terminal.size();
-        let cols = size.cols as usize;
-        let rows = size.rows as usize;
-        if cols == 0 || row >= rows {
-            return None;
-        }
-
-        let line = row_text_from_terminal(terminal, row, cols);
-        Some(line.into_iter().map(|c| c.unwrap_or(' ')).collect())
-    }
-
     fn terminal_selection_char_class(c: char) -> TerminalSelectionCharClass {
         if c.is_whitespace() {
             TerminalSelectionCharClass::Whitespace
@@ -860,19 +866,14 @@ impl TerminalView {
     }
 
     pub(in super::super) fn link_at_cell(&self, cell: CellPos) -> Option<HoveredLink> {
-        // OSC 8 hyperlinks carry an explicit target on the cell; prefer them
-        // over heuristic text detection so link text can differ from the URI.
         let detected = self
             .active_terminal()
-            .and_then(|terminal| terminal.hyperlink_at(cell.row, cell.col))
-            .or_else(|| {
-                let line = self.row_text(cell.row)?;
-                find_link_in_line(&line, cell.col)
-            })?;
+            .and_then(|terminal| terminal.link_at(cell.row, cell.col))?;
 
         Some(HoveredLink {
-            row: cell.row,
+            start_row: detected.start_row,
             start_col: detected.start_col,
+            end_row: detected.end_row,
             end_col: detected.end_col,
             target: detected.target,
         })
@@ -932,6 +933,24 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use termy_terminal_ui::TerminalSize;
+
+    #[test]
+    fn hovered_link_contains_each_cell_in_wrapped_span() {
+        let link = HoveredLink {
+            start_row: 2,
+            start_col: 4,
+            end_row: 4,
+            end_col: 2,
+            target: "https://example.com".to_string(),
+        };
+
+        assert!(!link.contains(CellPos { row: 2, col: 3 }));
+        assert!(link.contains(CellPos { row: 2, col: 4 }));
+        assert!(link.contains(CellPos { row: 3, col: 0 }));
+        assert!(link.contains(CellPos { row: 3, col: 80 }));
+        assert!(link.contains(CellPos { row: 4, col: 2 }));
+        assert!(!link.contains(CellPos { row: 4, col: 3 }));
+    }
 
     fn kitty_placement(
         placement_serial: u64,

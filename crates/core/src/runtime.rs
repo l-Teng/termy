@@ -2528,6 +2528,12 @@ impl Terminal {
         self.with_term(|term| crate::links::hyperlink_at_viewport_cell(term, row, col))
     }
 
+    /// The OSC 8 or detected text link under the given viewport cell,
+    /// including links spanning soft-wrapped rows.
+    pub fn link_at(&self, row: usize, col: usize) -> Option<crate::links::DetectedViewportLink> {
+        self.with_term(|term| crate::links::link_at_viewport_cell(term, row, col))
+    }
+
     /// Access the terminal for reading cell content
     pub fn with_term<R>(&self, f: impl FnOnce(&Term<JsonEventListener>) -> R) -> R {
         let term = self.term.lock();

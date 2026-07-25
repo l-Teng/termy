@@ -1023,7 +1023,7 @@ impl TerminalView {
         cols: usize,
         rows: usize,
         colors: &TerminalColors,
-        hovered_link_range: Option<(usize, usize, usize)>,
+        hovered_link_range: Option<(usize, usize, usize, usize)>,
         font_family: SharedString,
         font_size: Pixels,
         cursor_style: TerminalCursorStyle,
@@ -2971,7 +2971,7 @@ impl Render for TerminalView {
                 let hovered_link_range = if is_active_pane {
                     self.hovered_link
                         .as_ref()
-                        .map(|link| (link.row, link.start_col, link.end_col))
+                        .map(|link| (link.start_row, link.start_col, link.end_row, link.end_col))
                 } else {
                     None
                 };

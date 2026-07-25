@@ -79,7 +79,8 @@ pub struct TerminalGrid {
     pub selection_fg: Hsla,
     pub search_match_bg: Hsla,
     pub search_current_bg: Hsla,
-    pub hovered_link_range: Option<(usize, usize, usize)>,
+    /// Hovered link range as `(start_row, start_col, end_row, end_col)`.
+    pub hovered_link_range: Option<(usize, usize, usize, usize)>,
     pub cursor_cell: Option<(usize, usize)>,
     pub cursor_visible: bool,
     pub font_family: SharedString,
@@ -443,7 +444,7 @@ struct TerminalGridPaintCache {
     style_key: Option<GridPaintStyleKey>,
     last_cursor_cell: Option<(usize, usize)>,
     last_cursor_visible: bool,
-    last_hovered_link_range: Option<(usize, usize, usize)>,
+    last_hovered_link_range: Option<(usize, usize, usize, usize)>,
     /// Per-pass scratch for dirty row indices. Reused to avoid allocating a new
     /// Vec/Arc for every paint pass.
     dirty_rows: Vec<usize>,
@@ -2211,16 +2212,13 @@ impl TerminalGrid {
         }
 
         if cache.last_hovered_link_range != self.hovered_link_range {
-            push_row_if_in_bounds(
-                &mut rows,
-                cache.last_hovered_link_range.map(|(row, _, _)| row),
-                self.rows,
-            );
-            push_row_if_in_bounds(
-                &mut rows,
-                self.hovered_link_range.map(|(row, _, _)| row),
-                self.rows,
-            );
+            for range in [cache.last_hovered_link_range, self.hovered_link_range]
+                .into_iter()
+                .flatten()
+            {
+                let (start_row, _, end_row, _) = range;
+                rows.extend(start_row..=end_row.min(self.rows.saturating_sub(1)));
+            }
         }
 
         if self.rows == 0 || self.cols == 0 {
@@ -2494,8 +2492,17 @@ impl TerminalGrid {
 
     fn cell_underline(&self, row: usize, col: usize, color: Hsla) -> Option<UnderlineStyle> {
         self.hovered_link_range
-            .and_then(|(link_row, start_col, end_col)| {
-                if row == link_row && col >= start_col && col <= end_col {
+            .and_then(|(start_row, start_col, end_row, end_col)| {
+                let in_range = if start_row == end_row {
+                    row == start_row && col >= start_col && col <= end_col
+                } else if row == start_row {
+                    col >= start_col
+                } else if row == end_row {
+                    col <= end_col
+                } else {
+                    row > start_row && row < end_row
+                };
+                if in_range {
                     Some(UnderlineStyle {
                         thickness: px(1.0),
                         color: Some(color),
@@ -2580,14 +2587,14 @@ mod tests {
 
     fn test_grid(
         cells: Vec<CellRenderInfo>,
-        hovered: Option<(usize, usize, usize)>,
+        hovered: Option<(usize, usize, usize, usize)>,
     ) -> TerminalGrid {
         test_grid_rows(vec![cells], hovered)
     }
 
     fn test_grid_rows(
         rows: Vec<Vec<CellRenderInfo>>,
-        hovered: Option<(usize, usize, usize)>,
+        hovered: Option<(usize, usize, usize, usize)>,
     ) -> TerminalGrid {
         let row_count = rows.len();
         let col_count = rows.iter().map(Vec::len).max().unwrap_or(0);
@@ -3065,7 +3072,7 @@ mod tests {
                 test_cell(1, 0, 'b'),
                 test_cell(2, 0, 'c'),
             ],
-            Some((0, 1, 2)),
+            Some((0, 1, 0, 2)),
         );
         let batches = collect_batches(&grid);
         assert_eq!(batches.len(), 2);
@@ -3073,6 +3080,26 @@ mod tests {
         assert!(batches[0].underline.is_none());
         assert_eq!(batches[1].text, "bc");
         assert!(batches[1].underline.is_some());
+    }
+
+    #[test]
+    fn hover_underline_covers_each_row_of_wrapped_link() {
+        let grid = test_grid_rows(
+            vec![
+                vec![test_cell(0, 0, 'a'), test_cell(1, 0, 'b')],
+                vec![test_cell(0, 1, 'c'), test_cell(1, 1, 'd')],
+                vec![test_cell(0, 2, 'e'), test_cell(1, 2, 'f')],
+            ],
+            Some((0, 1, 2, 0)),
+        );
+        let color = test_color(1.0, 1.0, 1.0);
+
+        assert!(grid.cell_underline(0, 0, color).is_none());
+        assert!(grid.cell_underline(0, 1, color).is_some());
+        assert!(grid.cell_underline(1, 0, color).is_some());
+        assert!(grid.cell_underline(1, 1, color).is_some());
+        assert!(grid.cell_underline(2, 0, color).is_some());
+        assert!(grid.cell_underline(2, 1, color).is_none());
     }
 
     #[test]
@@ -3429,18 +3456,36 @@ mod tests {
 
     #[test]
     fn dirty_rows_for_pass_includes_hover_transition_rows() {
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], Some((3, 1, 2)));
+        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], Some((3, 1, 3, 2)));
         grid.rows = 5;
         grid.paint_damage = TerminalGridPaintDamage::None;
         let mut cache = TerminalGridPaintCache {
             style_key: Some(grid.paint_style_key()),
-            last_hovered_link_range: Some((1, 0, 0)),
+            last_hovered_link_range: Some((1, 0, 1, 0)),
             ..Default::default()
         };
         let (full, style_changed, dirty_rows) = grid.dirty_rows_for_pass(&mut cache);
         assert!(!full);
         assert!(!style_changed);
         assert_eq!(&*dirty_rows, &[1usize, 3usize]);
+    }
+
+    #[test]
+    fn dirty_rows_for_pass_includes_every_wrapped_link_row() {
+        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], Some((2, 1, 4, 3)));
+        grid.rows = 6;
+        grid.paint_damage = TerminalGridPaintDamage::None;
+        let mut cache = TerminalGridPaintCache {
+            style_key: Some(grid.paint_style_key()),
+            last_hovered_link_range: Some((0, 0, 1, 2)),
+            ..Default::default()
+        };
+
+        let (full, style_changed, dirty_rows) = grid.dirty_rows_for_pass(&mut cache);
+
+        assert!(!full);
+        assert!(!style_changed);
+        assert_eq!(&*dirty_rows, &[0usize, 1usize, 2usize, 3usize, 4usize]);
     }
 
     #[test]
@@ -3598,7 +3643,7 @@ mod tests {
 
     #[test]
     fn matching_previous_row_ops_rejects_hover_style_mismatches() {
-        let previous_grid = test_grid(vec![test_cell(0, 0, 'a')], Some((0, 0, 0)));
+        let previous_grid = test_grid(vec![test_cell(0, 0, 'a')], Some((0, 0, 0, 0)));
         let next_grid = test_grid(vec![test_cell(0, 0, 'a')], None);
         let cursor_fg = Hsla {
             h: 0.0,
