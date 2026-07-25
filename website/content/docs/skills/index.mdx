@@ -1,0 +1,51 @@
+---
+title: Agent skills
+description: Give your coding agent reliable instructions for migrating Ghostty configs and building Termy plugins.
+---
+
+Termy ships reusable agent skills in the repository's [`skills`](https://github.com/lassejlv/termy/tree/main/skills)
+folder. Each skill combines focused instructions with the scripts, references, and
+templates an agent needs to do the work against Termy's real contracts.
+
+<Cards>
+  <Card
+    title="Ghostty to Termy"
+    description="Convert a Ghostty config and get a compatibility report for settings that cannot move cleanly."
+    href="/docs/skills/ghostty-to-termy"
+  />
+  <Card
+    title="Build Termy plugins"
+    description="Create and validate command, lifecycle, storage, and native UI plugins for Termy v1."
+    href="/docs/skills/build-termy-plugins"
+  />
+</Cards>
+
+## Install a skill
+
+Clone or download the Termy repository, then copy the skill directory—not only its
+`SKILL.md`—into your agent's skills directory. For Codex:
+
+```sh
+mkdir -p ~/.codex/skills
+cp -R skills/ghostty-to-termy ~/.codex/skills/
+cp -R skills/build-termy-plugins ~/.codex/skills/
+```
+
+Restart your agent if it does not discover newly installed skills immediately.
+Other coding agents may use a different skills directory, but should receive the
+complete folder so relative scripts, references, and templates remain available.
+
+## Use a skill
+
+Mention the skill by name and describe the concrete job:
+
+```text
+Use ghostty-to-termy to convert ~/.config/ghostty/config.
+```
+
+```text
+Use build-termy-plugins to create a command-palette plugin that shows Git status.
+```
+
+Review generated configuration and plugin source before installing it. Agent output
+is still code and configuration executed with your user account's access.

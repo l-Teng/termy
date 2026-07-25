@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build Termy Plugins"
+  short_description: "Build fast, safe TypeScript plugins for Termy"
+  default_prompt: "Use $build-termy-plugins to build a production-ready Termy plugin."

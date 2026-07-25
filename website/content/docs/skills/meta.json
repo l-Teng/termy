@@ -1,0 +1,9 @@
+{
+  "title": "Agent skills",
+  "pages": [
+    "index",
+    "ghostty-to-termy",
+    "build-termy-plugins"
+  ],
+  "defaultOpen": false
+}

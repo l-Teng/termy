@@ -1,0 +1,67 @@
+---
+title: Migrate from Ghostty with an agent
+description: Convert a Ghostty configuration into valid Termy settings and review compatibility gaps.
+---
+
+The `ghostty-to-termy` skill gives a coding agent a deterministic converter plus a
+mapping policy based on Termy's configuration reference. It generates both:
+
+- a Termy `config.txt`; and
+- a JSON compatibility report covering exact, approximated, unsupported, and
+  warning entries.
+
+This matters because similarly named Ghostty and Termy settings do not always share
+the same units or behavior.
+
+## Install and run
+
+Install the complete skill folder as described in [Agent skills](/docs/skills), then
+ask your agent:
+
+```text
+Use ghostty-to-termy to convert ~/.config/ghostty/config.
+Show me the generated Termy config and summarize every approximation or unsupported setting.
+Do not replace my live Termy config.
+```
+
+The agent runs the bundled converter, reads its compatibility report, and performs
+a strict structural validation. It should tell you whether validation was only
+structural or also performed by the Termy application.
+
+<Callout type="warn">
+  Conversion does not replace your live `~/.config/termy/config.txt` unless you
+  explicitly ask for that. Keep this boundary when trying the skill for the first
+  time.
+</Callout>
+
+## What converts cleanly
+
+The converter handles common appearance, behavior, color palette, and keybinding
+settings when Termy has a documented equivalent. It also normalizes Ghostty colors
+to Termy's `#RRGGBB` format and emits the `[colors]` section in the correct place.
+
+Some settings are intentionally reported instead of guessed:
+
+- named themes whose actual colors are not available;
+- fallback fonts, font features, shaders, and background images;
+- global or sequenced keybindings and arbitrary text or escape injection;
+- Ghostty-specific window, platform, and quick-terminal behavior; and
+- values whose units or semantics differ between the two terminals.
+
+After conversion, use the [configuration reference](/docs/reference/configuration-reference)
+and [keybinding actions](/docs/reference/actions) to review any manual changes.
+
+## Convert without installing the skill
+
+The converter can also be run directly from a Termy checkout:
+
+```sh
+python3 skills/ghostty-to-termy/scripts/convert_ghostty_to_termy.py \
+  ~/.config/ghostty/config \
+  --output /tmp/termy-config.txt \
+  --report /tmp/termy-compatibility.json \
+  --strict
+```
+
+Inspect both output files before copying the config into Termy's
+[config file location](/docs/getting-started/config-file).
