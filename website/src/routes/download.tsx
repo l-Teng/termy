@@ -21,7 +21,7 @@ import {
 } from '@/lib/github-release';
 
 type DownloadChannel = 'desktop' | 'native';
-type DownloadEdition = 'native-macos';
+type DownloadEdition = 'desktop' | 'native-macos';
 
 type DownloadSearch = {
   edition?: DownloadEdition;
@@ -31,8 +31,8 @@ function channelFromEdition(edition: DownloadEdition | undefined): DownloadChann
   return edition === 'native-macos' ? 'native' : 'desktop';
 }
 
-function editionFromChannel(channel: DownloadChannel): DownloadEdition | undefined {
-  return channel === 'native' ? 'native-macos' : undefined;
+function editionFromChannel(channel: DownloadChannel): DownloadEdition {
+  return channel === 'native' ? 'native-macos' : 'desktop';
 }
 
 const loadDownloadReleases = createServerFn({ method: 'GET' }).handler(
@@ -75,9 +75,12 @@ const loadDownloadReleases = createServerFn({ method: 'GET' }).handler(
 
 export const Route = createFileRoute('/download')({
   head: () => ({ links: marketingFontLinks }),
-  validateSearch: (search: Record<string, unknown>): DownloadSearch => ({
-    edition: search.edition === 'native-macos' ? 'native-macos' : undefined,
-  }),
+  validateSearch: (search: Record<string, unknown>): DownloadSearch => {
+    if (search.edition === 'native-macos' || search.edition === 'desktop') {
+      return { edition: search.edition };
+    }
+    return {};
+  },
   component: DownloadPage,
   loader: () => loadDownloadReleases(),
 });
@@ -87,6 +90,7 @@ function DownloadPage() {
   const { edition } = Route.useSearch();
   const navigate = Route.useNavigate();
   const channel = channelFromEdition(edition);
+  const showChannelTabs = edition !== undefined;
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [pendingDownload, setPendingDownload] = useState<{
     name: string;
@@ -95,12 +99,7 @@ function DownloadPage() {
 
   const setChannel = (next: DownloadChannel) => {
     void navigate({
-      search: (prev) => {
-        const nextEdition = editionFromChannel(next);
-        if (nextEdition) return { ...prev, edition: nextEdition };
-        const { edition: _edition, ...rest } = prev;
-        return rest;
-      },
+      search: (prev) => ({ ...prev, edition: editionFromChannel(next) }),
       replace: true,
     });
   };
@@ -139,27 +138,29 @@ function DownloadPage() {
           Download
         </h1>
 
-        <div
-          className="mt-8 inline-flex w-fit items-center rounded-full border border-white/[0.08] bg-[#14141c]/70 p-1 backdrop-blur-md"
-          role="tablist"
-          aria-label="Download channel"
-        >
-          <ChannelTab
-            id="desktop"
-            active={channel === 'desktop'}
-            onSelect={setChannel}
+        {showChannelTabs && (
+          <div
+            className="mt-8 inline-flex w-fit items-center rounded-full border border-white/[0.08] bg-[#14141c]/70 p-1 backdrop-blur-md"
+            role="tablist"
+            aria-label="Download channel"
           >
-            Desktop
-          </ChannelTab>
-          <ChannelTab
-            id="native"
-            active={channel === 'native'}
-            onSelect={setChannel}
-            badge="beta"
-          >
-            Native macOS
-          </ChannelTab>
-        </div>
+            <ChannelTab
+              id="desktop"
+              active={channel === 'desktop'}
+              onSelect={setChannel}
+            >
+              Desktop
+            </ChannelTab>
+            <ChannelTab
+              id="native"
+              active={channel === 'native'}
+              onSelect={setChannel}
+              badge="beta"
+            >
+              Native macOS
+            </ChannelTab>
+          </div>
+        )}
 
         {channel === 'native' && (
           <p className="mt-5 max-w-2xl text-sm leading-relaxed text-[#787c99]">
