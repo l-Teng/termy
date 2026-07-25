@@ -237,7 +237,7 @@ impl SettingsWindow {
         match section {
             SettingsSection::Appearance => "icons/settings/appearance.svg",
             SettingsSection::Terminal => "icons/settings/terminal.svg",
-            SettingsSection::Ssh => "icons/settings/terminal.svg",
+            SettingsSection::Ssh => "icons/settings/ssh.svg",
             SettingsSection::Tabs => "icons/settings/tabs.svg",
             SettingsSection::ThemeStore => "icons/settings/themes.svg",
             SettingsSection::Plugins => "icons/settings/plugins.svg",

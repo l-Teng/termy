@@ -1779,6 +1779,81 @@ mod tests {
     }
 
     #[test]
+    fn file_drop_point_resolves_inactive_pane_without_active_fallback() {
+        let cols = 6u16;
+        let rows = 4u16;
+        let cell_width = 10.0;
+        let cell_height = 20.0;
+        let make_pane = |id: &str, left: u16| {
+            let terminal = Terminal::new_tmux(
+                TerminalSize {
+                    cols,
+                    rows,
+                    cell_width,
+                    cell_height,
+                },
+                TerminalOptions {
+                    scrollback_history: 128,
+                    ..TerminalOptions::default()
+                },
+            );
+            TerminalPane {
+                id: id.to_string(),
+                left,
+                top: 0,
+                width: cols,
+                height: rows,
+                pane_zoom_steps: 0,
+                degraded: false,
+                tmux_mouse_mode: None,
+                progress_state: ProgressState::default(),
+                content: PaneContent::Terminal(terminal),
+                render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
+                last_alternate_screen: std::cell::Cell::new(false),
+                cached_element_ids: PaneCachedElementIds::new(id),
+            }
+        };
+        let panes = vec![make_pane("%left", 0), make_pane("%right", cols)];
+
+        let inside_right_x = (f32::from(cols) * cell_width) + 1.0;
+        let resolved = resolve_pane_cell_for_position(
+            &panes,
+            Some("%left"),
+            inside_right_x,
+            1.0,
+            0.0,
+            0.0,
+            cell_width,
+            cell_height,
+            0.0,
+            0.0,
+            false,
+        );
+        assert_eq!(
+            resolved,
+            Some(("%right".to_string(), CellPos { col: 0, row: 0 }))
+        );
+
+        let outside_x = f32::from(cols * 2) * cell_width + 1.0;
+        assert_eq!(
+            resolve_pane_cell_for_position(
+                &panes,
+                Some("%left"),
+                outside_x,
+                1.0,
+                0.0,
+                0.0,
+                cell_width,
+                cell_height,
+                0.0,
+                0.0,
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn pane_lookup_uses_shared_layout_origin_when_neighbor_has_local_zoom() {
         let rows = 6u16;
         let base_cell_width = 9.0;

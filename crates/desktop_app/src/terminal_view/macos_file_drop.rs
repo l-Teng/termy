@@ -7,7 +7,7 @@ use cocoa::{
     foundation::{NSArray, NSAutoreleasePool, NSFastEnumeration, NSPoint, NSString, NSUInteger},
 };
 use flume::Sender;
-use gpui::Window;
+use gpui::{Pixels, Point, Window, point, px};
 use objc::{
     class,
     declare::ClassDecl,
@@ -29,7 +29,13 @@ const NS_DRAG_OPERATION_NONE: NSUInteger = 0;
 const NS_DRAG_OPERATION_COPY: NSUInteger = 1;
 static OVERLAY_CLASS: OnceLock<usize> = OnceLock::new();
 
-pub(crate) type NativeDropResult = Result<Vec<PathBuf>, NativeDropError>;
+#[derive(Clone, Debug)]
+pub(crate) struct NativeFileDrop {
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) position: Point<Pixels>,
+}
+
+pub(crate) type NativeDropResult = Result<NativeFileDrop, NativeDropError>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NativeDropError {
@@ -178,13 +184,29 @@ extern "C" fn dragging_updated(this: &Object, _sel: Sel, dragging_info: id) -> N
 extern "C" fn dragging_exited(_this: &Object, _sel: Sel, _dragging_info: id) {}
 
 extern "C" fn perform_drag_operation(this: &Object, _sel: Sel, dragging_info: id) -> BOOL {
-    let result = decode_dragged_paths(dragging_info);
+    let result = decode_dragged_paths(dragging_info).map(|paths| NativeFileDrop {
+        paths,
+        position: drop_position(this, dragging_info),
+    });
     let accepted = result.is_ok();
     if unsafe { state(this) }.sender.send(result).is_err() {
         return NO;
     }
 
     if accepted { YES } else { NO }
+}
+
+fn drop_position(this: &Object, dragging_info: id) -> Point<Pixels> {
+    let window_position: NSPoint = unsafe { msg_send![dragging_info, draggingLocation] };
+    let local_position: NSPoint =
+        unsafe { msg_send![this, convertPoint: window_position fromView: nil] };
+    let bounds = unsafe { NSView::bounds(this as *const Object as id) };
+
+    appkit_coordinates_to_gpui(local_position.x, local_position.y, bounds.size.height)
+}
+
+fn appkit_coordinates_to_gpui(x: f64, y: f64, view_height: f64) -> Point<Pixels> {
+    point(px(x as f32), px((view_height - y) as f32))
 }
 
 fn drag_operation_for_info(_this: &Object, dragging_info: id) -> NSUInteger {
@@ -200,7 +222,7 @@ unsafe fn state(this: &Object) -> &NativeDropState {
     unsafe { &*state_ptr.cast::<NativeDropState>() }
 }
 
-fn decode_dragged_paths(dragging_info: id) -> NativeDropResult {
+fn decode_dragged_paths(dragging_info: id) -> Result<Vec<PathBuf>, NativeDropError> {
     let pasteboard: id = unsafe { msg_send![dragging_info, draggingPasteboard] };
 
     let file_url_paths = decode_file_url_items(pasteboard)?;
@@ -328,4 +350,30 @@ fn nsstring_to_string(value: id) -> Result<String, NativeDropError> {
         .to_str()
         .map_err(|_| NativeDropError::InvalidUtf8)?
         .to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::appkit_coordinates_to_gpui;
+
+    #[test]
+    fn appkit_drop_position_is_converted_to_gpui_coordinates() {
+        let position = appkit_coordinates_to_gpui(25.0, 40.0, 120.0);
+        let x: f32 = position.x.into();
+        let y: f32 = position.y.into();
+
+        assert_eq!(x, 25.0);
+        assert_eq!(y, 80.0);
+    }
+
+    #[test]
+    fn appkit_drop_position_flips_view_edges() {
+        let bottom = appkit_coordinates_to_gpui(0.0, 0.0, 120.0);
+        let top = appkit_coordinates_to_gpui(0.0, 120.0, 120.0);
+        let bottom_y: f32 = bottom.y.into();
+        let top_y: f32 = top.y.into();
+
+        assert_eq!(bottom_y, 120.0);
+        assert_eq!(top_y, 0.0);
+    }
 }

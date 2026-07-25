@@ -47,6 +47,7 @@ macro_rules! tab_strip_icon {
 const SETTINGS_ICONS: &[(&str, &[u8])] = &[
     settings_icon!("appearance"),
     settings_icon!("terminal"),
+    settings_icon!("ssh"),
     settings_icon!("tabs"),
     settings_icon!("themes"),
     settings_icon!("plugins"),

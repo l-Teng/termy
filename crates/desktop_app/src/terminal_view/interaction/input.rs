@@ -48,6 +48,28 @@ fn dropped_paths_to_terminal_paste_input(paths: &[PathBuf]) -> Option<Vec<u8>> {
     Some(text.into_bytes())
 }
 
+fn should_write_drop_to_target(target_is_active: bool, focus_succeeded: bool) -> bool {
+    target_is_active || focus_succeeded
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FileDropTarget {
+    pane_id: String,
+    is_active: bool,
+}
+
+fn classify_file_drop_target(
+    hit_pane_id: Option<String>,
+    active_pane_id: Option<&str>,
+    target_is_terminal: bool,
+) -> Option<FileDropTarget> {
+    let pane_id = hit_pane_id?;
+    target_is_terminal.then(|| FileDropTarget {
+        is_active: active_pane_id == Some(pane_id.as_str()),
+        pane_id,
+    })
+}
+
 fn image_extension(format: gpui::ImageFormat) -> &'static str {
     match format {
         gpui::ImageFormat::Gif => "gif",
@@ -410,6 +432,39 @@ impl TerminalView {
         let _ = self.close_terminal_context_menu(cx);
         self.write_terminal_paste_input(input, cx);
         cx.notify();
+    }
+
+    fn write_dropped_paths_at_position(
+        &mut self,
+        paths: &[PathBuf],
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.overlay_owns_terminal_input() {
+            return;
+        }
+        let Some(input) = dropped_paths_to_terminal_paste_input(paths) else {
+            return;
+        };
+        let hit_pane_id = self
+            .position_to_pane_cell(position, false)
+            .map(|(pane_id, _)| pane_id);
+        let target_is_terminal = hit_pane_id
+            .as_deref()
+            .is_some_and(|pane_id| self.pane_terminal_by_id(pane_id).is_some());
+        let Some(target) =
+            classify_file_drop_target(hit_pane_id, self.active_pane_id(), target_is_terminal)
+        else {
+            return;
+        };
+
+        let focus_succeeded =
+            !target.is_active && self.focus_pane_target(target.pane_id.as_str(), cx);
+        if !should_write_drop_to_target(target.is_active, focus_succeeded) {
+            return;
+        }
+
+        self.write_dropped_paths(&input, cx);
     }
 
     fn maybe_suppress_tab_switch_hint_for_key_down(
@@ -834,14 +889,10 @@ impl TerminalView {
     pub(in super::super) fn handle_file_drop(
         &mut self,
         paths: &ExternalPaths,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let paths_list = paths.paths();
-        let Some(input) = dropped_paths_to_terminal_paste_input(paths_list) else {
-            return;
-        };
-        self.write_dropped_paths(&input, cx);
+        self.write_dropped_paths_at_position(paths.paths(), window.mouse_position(), cx);
     }
 
     #[cfg(target_os = "macos")]
@@ -851,11 +902,8 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         match result {
-            Ok(paths) => {
-                let Some(input) = dropped_paths_to_terminal_paste_input(&paths) else {
-                    return;
-                };
-                self.write_dropped_paths(&input, cx);
+            Ok(drop) => {
+                self.write_dropped_paths_at_position(&drop.paths, drop.position, cx);
             }
             Err(error) => {
                 termy_toast::error(error.to_string());
@@ -867,10 +915,11 @@ impl TerminalView {
 #[cfg(test)]
 mod tests {
     use super::{
-        PendingKeyRelease, PendingKeyReleaseAction, clipboard_item_to_terminal_paste_input,
-        dropped_paths_to_terminal_paste_input, image_extension, kitty_png_clipboard_item,
-        modifier_transition_events, shell_quote_paths, should_defer_key_down_to_ime,
-        should_prepare_terminal_input_write, take_deferred_ime_key_release,
+        FileDropTarget, PendingKeyRelease, PendingKeyReleaseAction, classify_file_drop_target,
+        clipboard_item_to_terminal_paste_input, dropped_paths_to_terminal_paste_input,
+        image_extension, kitty_png_clipboard_item, modifier_transition_events, shell_quote_paths,
+        should_defer_key_down_to_ime, should_prepare_terminal_input_write,
+        should_write_drop_to_target, take_deferred_ime_key_release,
         take_pending_key_release_action, terminal_modifier_transition_events,
     };
     use gpui::{Keystroke, Modifiers};
@@ -964,6 +1013,48 @@ mod tests {
     #[test]
     fn dropped_paths_rejects_empty_input() {
         assert!(dropped_paths_to_terminal_paste_input(&[]).is_none());
+    }
+
+    #[test]
+    fn file_drop_writes_when_target_is_already_active() {
+        assert!(should_write_drop_to_target(true, false));
+    }
+
+    #[test]
+    fn file_drop_writes_after_inactive_target_is_focused() {
+        assert!(should_write_drop_to_target(false, true));
+    }
+
+    #[test]
+    fn file_drop_does_not_fall_back_when_target_focus_fails() {
+        assert!(!should_write_drop_to_target(false, false));
+    }
+
+    #[test]
+    fn file_drop_classifies_active_and_inactive_terminal_targets() {
+        assert_eq!(
+            classify_file_drop_target(Some("%left".to_string()), Some("%left"), true),
+            Some(FileDropTarget {
+                pane_id: "%left".to_string(),
+                is_active: true,
+            })
+        );
+        assert_eq!(
+            classify_file_drop_target(Some("%right".to_string()), Some("%left"), true),
+            Some(FileDropTarget {
+                pane_id: "%right".to_string(),
+                is_active: false,
+            })
+        );
+    }
+
+    #[test]
+    fn file_drop_rejects_missing_and_non_terminal_targets() {
+        assert_eq!(classify_file_drop_target(None, Some("%left"), true), None);
+        assert_eq!(
+            classify_file_drop_target(Some("%browser".to_string()), Some("%left"), false),
+            None
+        );
     }
 
     #[test]
