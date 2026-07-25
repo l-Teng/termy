@@ -1,78 +1,34 @@
 ---
 title: Build plugins with an agent
-description: Create secure, native-feeling Termy v1 plugins with a coding agent.
+description: Build Termy plugins with a coding agent.
 ---
 
-The `build-termy-plugins` skill teaches a coding agent Termy's real v1 plugin
-contract. It includes:
+Install the skill:
 
-- API, performance, and security references;
-- complete command-plugin and native-UI templates; and
-- a verification workflow for Bun syntax, Termy validation, and runtime behavior.
+```sh
+npx skills add lassejlv/termy --skill build-termy-plugins
+```
 
-It covers command-palette commands, typed inputs and settings, lifecycle events,
-storage, keybindings, returned actions, and Termy's allowlisted native JSX views.
-
-## Install and use
-
-Install the complete skill folder as described in [Agent skills](/docs/skills), then
-give the agent a narrow feature request:
+Then ask your agent:
 
 ```text
 Use build-termy-plugins to create a plugin named git-summary.
-Add one command-palette command that runs a fixed Git status command in the active working directory.
-Do not install it yet.
+Add one command that shows Git status. Do not install it yet.
 ```
 
-The agent should create only a `plugin.json` and a `plugin.ts` or `plugin.tsx`
-entrypoint unless local modules genuinely improve the design. Termy provides the
-plugin types globally, so v1 plugins do not need an SDK import, `package.json`,
-dependencies, or a bundler.
-
-Start with the full [plugin guide](/docs/using-termy/plugins) when deciding which
-API surface fits your plugin.
-
-## Capabilities and trust
-
-The skill keeps manifest capabilities minimal:
-
-| Plugin need | Entrypoint | Capability |
-| --- | --- | --- |
-| Command or lifecycle event | `plugin.ts` | none |
-| Managed storage or data paths | `.ts` or `.tsx` | `storage` |
-| Native Termy view | `plugin.tsx` | `native-ui` |
-| Persistent native view | `plugin.tsx` | `storage`, `native-ui` |
+The skill includes Termy's API reference, security rules, templates, and validation
+steps. It supports commands, settings, events, storage, keybindings, and native UI.
 
 <Callout type="warn">
-  Capabilities gate Termy-owned APIs, not operating-system permissions. A plugin
-  is trusted Bun code with your user account's file, network, and process access.
-  Read its source before installing it.
+  Plugins are trusted Bun code with your user account's access. Read the source
+  before installing one.
 </Callout>
 
-The skill directs agents to avoid interpolating untrusted text into shell commands,
-keep event handlers bounded, use secret settings for credentials, paginate dynamic
-native views, and keep network or filesystem work out of hot render paths.
-
-## Verify before installation
-
-For source-only work, the agent can perform a non-installing Bun check:
+When the source is ready, load it in development mode:
 
 ```sh
-plugin_check_dir="$(mktemp -d)"
-bun build ./my-plugin/plugin.ts --target=bun --outdir "$plugin_check_dir"
+termy plugin dev ./git-summary
 ```
 
-This catches syntax and import errors, but does not prove that the manifest,
-ambient Termy types, command palette, tmux behavior, storage, or native GPUI view
-works at runtime.
-
-When you are ready to load the plugin:
-
-```sh
-termy plugin dev ./my-plugin
-```
-
-Development mode validates and watches the source folder. Open the command palette
-after saving to load the newest valid copy, and stop the watcher with `Ctrl C`.
-Follow the [getting started guide](/docs/using-termy/plugins/getting-started) for
-installation and management details.
+See the [plugin guide](/docs/using-termy/plugins) for the full API and installation
+details.
