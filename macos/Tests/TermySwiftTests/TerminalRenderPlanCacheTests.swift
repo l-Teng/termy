@@ -68,13 +68,89 @@ final class TerminalRenderPlanCacheTests: XCTestCase {
     func testTextLineCacheKeysIncludeStyleColorAndBoundedCost() {
         let plain = TextLineCacheKey(bold: false, foregroundPackedValue: 1, text: "abc")
         let bold = TextLineCacheKey(bold: true, foregroundPackedValue: 1, text: "abc")
+        let italic = TextLineCacheKey(
+            bold: false,
+            italic: true,
+            foregroundPackedValue: 1,
+            text: "abc"
+        )
+        let underlined = TextLineCacheKey(
+            bold: false,
+            underline: true,
+            foregroundPackedValue: 1,
+            text: "abc"
+        )
+        let struck = TextLineCacheKey(
+            bold: false,
+            strikethrough: true,
+            foregroundPackedValue: 1,
+            text: "abc"
+        )
         let colored = TextLineCacheKey(bold: false, foregroundPackedValue: 2, text: "abc")
         let longer = TextLineCacheKey(bold: false, foregroundPackedValue: 1, text: String(repeating: "x", count: 200))
 
         XCTAssertNotEqual(plain, bold)
+        XCTAssertNotEqual(plain, italic)
+        XCTAssertNotEqual(plain, underlined)
+        XCTAssertNotEqual(plain, struck)
         XCTAssertNotEqual(plain, colored)
         XCTAssertGreaterThanOrEqual(plain.estimatedCost, 64)
         XCTAssertGreaterThan(longer.estimatedCost, plain.estimatedCost)
+    }
+
+    func testTextSegmentsPreserveSGRAttributes() {
+        let cells = [
+            TerminalCell(
+                col: 0,
+                row: 0,
+                character: "i",
+                foreground: .termyForeground,
+                background: .termyBackground,
+                usesTerminalDefaultBackground: true,
+                renderText: true,
+                bold: false,
+                italic: true
+            ),
+            TerminalCell(
+                col: 1,
+                row: 0,
+                character: "u",
+                foreground: .termyForeground,
+                background: .termyBackground,
+                usesTerminalDefaultBackground: true,
+                renderText: true,
+                bold: false,
+                underline: true
+            ),
+            TerminalCell(
+                col: 2,
+                row: 0,
+                character: "s",
+                foreground: .termyForeground,
+                background: .termyBackground,
+                usesTerminalDefaultBackground: true,
+                renderText: true,
+                bold: false,
+                strikethrough: true
+            )
+        ]
+        let styledFrame = TerminalFrame(
+            cols: 3,
+            rows: 1,
+            cells: cells,
+            cursor: nil,
+            displayOffset: 0,
+            historySize: 0
+        )
+        let cache = TerminalRenderPlanCache()
+
+        cache.update(frame: styledFrame, renderConfig: config, damage: .full)
+
+        let segments = cache.plan.textSegments
+        XCTAssertEqual(segments.count, 3)
+        XCTAssertTrue(segments[0].italic)
+        XCTAssertTrue(segments[1].underline)
+        XCTAssertTrue(segments[2].strikethrough)
     }
 
     func testTextSegmentsTrackCellSpanForDirtyRectClipping() {

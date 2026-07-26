@@ -1,0 +1,117 @@
+{
+  "title": "ANSI italic, underline, and strikethrough are dropped",
+  "project": "Termy",
+  "generated_at": "2026-07-26",
+  "mode": "known-bug",
+  "original_report": "The supplied screenshot reports that Termy renders SGR italic, underline, and strikethrough text as plain text.",
+  "discovery_scope": [
+    "Rust terminal snapshots and GPUI rendering",
+    "C FFI cell contract",
+    "Swift native rendering path"
+  ],
+  "candidates": [],
+  "expected": "SGR 3 text is italic, SGR 4 text is underlined, and SGR 9 text is struck through.",
+  "actual": "All four words render with the same plain style in the installed 0.2.30 build.",
+  "environment": "macOS 26.5.2 arm64; Termy 0.2.30; rustc 1.96.0; Swift 6.2",
+  "reproduction": "The installed pre-fix app and the staged fixed app were each launched with an isolated config and the same shell fixture, which prints plain, italic, underline, and strike using SGR 0, 3, 4, and 9.",
+  "failure_signal": "The pre-fix screenshot shows italic, underline, and strike as plain; the fixed screenshot visibly shows all three requested styles.",
+  "root_cause": "The terminal parser retained the SGR flags, but TermyCell only carried bold into snapshots. Italic, underline, and strike were discarded before both the GPUI and FFI/Swift renderers, and their batching/cache keys therefore could not distinguish styled runs.",
+  "fix_summary": "Propagated italic, underline, and strikethrough through TermyCell, the C ABI, GPUI cell batches, and Swift render plans. Both renderers now select italic fonts and apply underline/strike decorations, with cache keys and row reuse accounting for those attributes.",
+  "why_causal": "The fix restores the exact missing flags at the snapshot boundary and consumes them at both text-rendering endpoints; the same ANSI fixture changes from plain to visibly styled.",
+  "reproduction_files": [
+    {
+      "path": "/Users/lassevestergaard/Documents/dev/termy/outputs/bug-reproducer-before.jpeg",
+      "line": 1,
+      "summary": "Installed 0.2.30 build rendering the isolated ANSI fixture without styles."
+    },
+    {
+      "path": "/Users/lassevestergaard/Documents/dev/termy/outputs/bug-reproducer-after.jpeg",
+      "line": 1,
+      "summary": "Rebuilt app rendering italic, underline, and strike correctly."
+    },
+    {
+      "path": "/Users/lassevestergaard/Documents/dev/termy/crates/core/src/frame.rs",
+      "line": 320,
+      "summary": "Focused red-to-green snapshot regression test."
+    }
+  ],
+  "fix_files": [
+    {
+      "path": "/Users/lassevestergaard/Documents/dev/termy/crates/core/src/frame.rs",
+      "line": 33,
+      "summary": "Preserves SGR text attributes in terminal snapshots."
+    },
+    {
+      "path": "/Users/lassevestergaard/Documents/dev/termy/crates/terminal_ui/src/grid.rs",
+      "line": 24,
+      "summary": "Carries attributes through GPUI batching, cache reuse, fonts, and decorations."
+    },
+    {
+      "path": "/Users/lassevestergaard/Documents/dev/termy/crates/ffi/src/lib.rs",
+      "line": 77,
+      "summary": "Exports the three attributes through the stable C cell layout."
+    },
+    {
+      "path": "/Users/lassevestergaard/Documents/dev/termy/macos/Sources/TermySwift/Views/TerminalRenderPlan.swift",
+      "line": 27,
+      "summary": "Preserves attributes in Swift segments and cache keys."
+    },
+    {
+      "path": "/Users/lassevestergaard/Documents/dev/termy/macos/Sources/TermySwift/Views/TerminalGridView.swift",
+      "line": 679,
+      "summary": "Renders italic fonts plus underline and strike decorations."
+    }
+  ],
+  "checks": [
+    {
+      "name": "Exact red-to-green core reproducer",
+      "status": "passed",
+      "detail": "Same command changed from compile failure on aa566385 to 1 passing test."
+    },
+    {
+      "name": "Rebuilt GPUI app visual fixture",
+      "status": "passed",
+      "detail": "Same isolated fixture visibly renders italic, underline, and strike."
+    },
+    {
+      "name": "Rust workspace check",
+      "status": "passed",
+      "detail": "cargo check --workspace completed successfully."
+    },
+    {
+      "name": "Rust relevant suites",
+      "status": "passed",
+      "detail": "core lib 237, FFI 37, terminal UI 141, and desktop app 692 tests passed."
+    },
+    {
+      "name": "Swift package suite",
+      "status": "passed",
+      "detail": "238 tests passed with 1 environment-only skip."
+    },
+    {
+      "name": "Release app bundle",
+      "status": "passed",
+      "detail": "cargo bundle --release -p termy produced the staged app used for visual verification."
+    },
+    {
+      "name": "Unrelated baseline checks",
+      "status": "warning",
+      "detail": "The existing resize_clear integration test fails independently, and rustfmt flags that untouched file."
+    }
+  ],
+  "reproduce": [
+    "printf '\\033[0mplain \\033[3mitalic\\033[0m \\033[4munderline\\033[0m \\033[9mstrike\\033[0m\\n'",
+    "cargo test -q -p termy_core frame::tests::snapshot_preserves_sgr_text_attributes -- --exact"
+  ],
+  "limitations": [
+    "The full termy_core package run still fails crates/core/tests/resize_clear.rs at resize-to-20; it also fails alone and is unrelated to text attributes.",
+    "cargo fmt --all -- --check reports pre-existing formatting in the untouched resize_clear.rs test."
+  ],
+  "residual_risks": [
+    "Different underline variants are intentionally collapsed to the existing single-underline renderer style."
+  ],
+  "notes": [
+    "The C cell struct remains 20 bytes; the new booleans occupy its previous trailing padding.",
+    "The installed app was used only as the pre-fix baseline and was not overwritten."
+  ]
+}

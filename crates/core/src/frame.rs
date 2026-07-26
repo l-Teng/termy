@@ -33,6 +33,9 @@ pub struct TermyCell {
     pub bg: TermyColor,
     pub uses_terminal_default_bg: bool,
     pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
     pub render_text: bool,
     pub wide_character_spacer: bool,
     pub line_wrapped: bool,
@@ -134,6 +137,9 @@ fn cell_from_renderable_cell(
         bg: color_to_rgba(bg, live_colors, query_colors),
         uses_terminal_default_bg,
         bold: cell.flags.contains(Flags::BOLD),
+        italic: cell.flags.contains(Flags::ITALIC),
+        underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
         render_text: !wide_character_spacer
             && !cell.flags.contains(Flags::HIDDEN)
             && cell.c != '\0'
@@ -308,6 +314,31 @@ mod tests {
             }
         );
         assert!(frame.cells[0].bold);
+    }
+
+    #[test]
+    fn snapshot_preserves_sgr_text_attributes() {
+        let size = TerminalSize {
+            cols: 3,
+            rows: 1,
+            cell_width: 9.0,
+            cell_height: 18.0,
+        };
+        let mut term = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"\x1b[3mI\x1b[0m\x1b[4mU\x1b[0m\x1b[9mS\x1b[0m");
+
+        let frame = snapshot_from_term(&term, size, TerminalQueryColors::default());
+
+        assert!(frame.cells[0].italic);
+        assert!(!frame.cells[0].underline);
+        assert!(!frame.cells[0].strikethrough);
+        assert!(!frame.cells[1].italic);
+        assert!(frame.cells[1].underline);
+        assert!(!frame.cells[1].strikethrough);
+        assert!(!frame.cells[2].italic);
+        assert!(!frame.cells[2].underline);
+        assert!(frame.cells[2].strikethrough);
     }
 
     #[test]

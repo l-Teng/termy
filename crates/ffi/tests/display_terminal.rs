@@ -50,6 +50,42 @@ fn display_terminal_feed_output_lands_in_grid() {
 }
 
 #[test]
+fn display_terminal_preserves_sgr_text_attributes() {
+    let size = termy_size_default();
+    let mut terminal: *mut TermyFfiTerminal = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { termy_display_terminal_new(size, &mut terminal) },
+        TermyFfiStatus::Ok
+    );
+
+    let text = b"\x1b[3mI\x1b[0m\x1b[4mU\x1b[0m\x1b[9mS\x1b[0m";
+    assert_eq!(
+        unsafe { termy_terminal_feed_output(terminal, text.as_ptr(), text.len()) },
+        TermyFfiStatus::Ok
+    );
+
+    let mut frame = TermyFfiFrame::default();
+    assert_eq!(
+        unsafe { termy_terminal_snapshot(terminal, &mut frame) },
+        TermyFfiStatus::Ok
+    );
+
+    let cells = unsafe { std::slice::from_raw_parts(frame.cells_ptr, frame.cells_len) };
+    assert!(cells[0].italic);
+    assert!(!cells[0].underline);
+    assert!(!cells[0].strikethrough);
+    assert!(!cells[1].italic);
+    assert!(cells[1].underline);
+    assert!(!cells[1].strikethrough);
+    assert!(!cells[2].italic);
+    assert!(!cells[2].underline);
+    assert!(cells[2].strikethrough);
+
+    assert_eq!(unsafe { termy_frame_free(&mut frame) }, TermyFfiStatus::Ok);
+    assert_eq!(unsafe { termy_terminal_free(terminal) }, TermyFfiStatus::Ok);
+}
+
+#[test]
 fn display_terminal_palette_tracks_requested_system_appearance() {
     let contents = b"theme_mode = system\ntheme_light = termy-light\ntheme_dark = termy\n";
     let mut config: *mut TermyFfiConfig = std::ptr::null_mut();

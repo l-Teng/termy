@@ -100,6 +100,9 @@ typedef struct {
   bool render_text;
   bool wide_character_spacer;
   bool line_wrapped;
+  bool italic;
+  bool underline;
+  bool strikethrough;
 } TermyFfiCell;
 
 typedef struct {

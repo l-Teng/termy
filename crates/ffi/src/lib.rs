@@ -74,6 +74,9 @@ pub struct TermyFfiCell {
     pub render_text: bool,
     pub wide_character_spacer: bool,
     pub line_wrapped: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
 }
 
 #[repr(C)]
@@ -432,6 +435,9 @@ impl From<TermyCell> for TermyFfiCell {
             render_text: cell.render_text,
             wide_character_spacer: cell.wide_character_spacer,
             line_wrapped: cell.line_wrapped,
+            italic: cell.italic,
+            underline: cell.underline,
+            strikethrough: cell.strikethrough,
         }
     }
 }

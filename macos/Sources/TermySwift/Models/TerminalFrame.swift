@@ -317,6 +317,9 @@ struct TerminalCell: Identifiable, Equatable {
     var usesTerminalDefaultBackground: Bool
     var renderText: Bool
     var bold: Bool
+    var italic: Bool
+    var underline: Bool
+    var strikethrough: Bool
     var wideCharacterSpacer: Bool
     var lineWrapped: Bool
 
@@ -329,6 +332,9 @@ struct TerminalCell: Identifiable, Equatable {
         usesTerminalDefaultBackground: Bool,
         renderText: Bool,
         bold: Bool,
+        italic: Bool = false,
+        underline: Bool = false,
+        strikethrough: Bool = false,
         wideCharacterSpacer: Bool = false,
         lineWrapped: Bool = false
     ) {
@@ -340,6 +346,9 @@ struct TerminalCell: Identifiable, Equatable {
         self.usesTerminalDefaultBackground = usesTerminalDefaultBackground
         self.renderText = renderText
         self.bold = bold
+        self.italic = italic
+        self.underline = underline
+        self.strikethrough = strikethrough
         self.wideCharacterSpacer = wideCharacterSpacer
         self.lineWrapped = lineWrapped
     }
@@ -353,6 +362,9 @@ struct TerminalCell: Identifiable, Equatable {
         usesTerminalDefaultBackground: Bool,
         renderText: Bool,
         bold: Bool,
+        italic: Bool = false,
+        underline: Bool = false,
+        strikethrough: Bool = false,
         wideCharacterSpacer: Bool = false,
         lineWrapped: Bool = false
     ) {
@@ -364,6 +376,9 @@ struct TerminalCell: Identifiable, Equatable {
         self.usesTerminalDefaultBackground = usesTerminalDefaultBackground
         self.renderText = renderText
         self.bold = bold
+        self.italic = italic
+        self.underline = underline
+        self.strikethrough = strikethrough
         self.wideCharacterSpacer = wideCharacterSpacer
         self.lineWrapped = lineWrapped
     }

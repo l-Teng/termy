@@ -93,6 +93,8 @@ final class TerminalGridNSView: NSView {
     private var cachedFontKey: FontKey?
     private var cachedRegularFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     private var cachedBoldFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+    private var cachedItalicFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    private var cachedBoldItalicFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
     private var nsColorCache: [UInt32: NSColor] = [:]
     private var alphaColorCache: [UInt64: NSColor] = [:]
     private var kittyGraphicsImageCache: [TerminalKittyGraphicsImageKey: NSImage] = [:]
@@ -674,6 +676,8 @@ final class TerminalGridNSView: NSView {
         syncFonts()
         let regularFont = cachedRegularFont
         let boldFont = cachedBoldFont
+        let italicFont = cachedItalicFont
+        let boldItalicFont = cachedBoldItalicFont
         let baselineOffset = max(0, (renderConfig.cellHeight - regularFont.ascender + regularFont.descender) / 2)
             + regularFont.ascender
 
@@ -698,7 +702,12 @@ final class TerminalGridNSView: NSView {
                 guard segmentRect.intersects(dirtyRect) else {
                     continue
                 }
-                let font = segment.bold ? boldFont : regularFont
+                let font = switch (segment.bold, segment.italic) {
+                case (false, false): regularFont
+                case (true, false): boldFont
+                case (false, true): italicFont
+                case (true, true): boldItalicFont
+                }
                 // Snap the glyph origin to device pixels so baselines land on
                 // consistent pixel rows, matching the pixel-aligned backgrounds.
                 let point = CGPoint(
@@ -710,6 +719,8 @@ final class TerminalGridNSView: NSView {
                 let line = cachedLine(
                     text: segment.text,
                     bold: segment.bold,
+                    underline: segment.underline,
+                    strikethrough: segment.strikethrough,
                     foreground: segment.foreground,
                     font: font,
                     cacheKey: segment.lineCacheKey
@@ -735,6 +746,8 @@ final class TerminalGridNSView: NSView {
     private func cachedLine(
         text: String,
         bold: Bool,
+        underline: Bool,
+        strikethrough: Bool,
         foreground: TerminalRGBA,
         font: NSFont,
         cacheKey: TextLineCacheKey
@@ -742,13 +755,20 @@ final class TerminalGridNSView: NSView {
         if let box = lineCache.object(forKey: cacheKey) {
             return box.line
         }
-        let attributed = NSAttributedString(
-            string: text,
-            attributes: [
-                .font: font,
-                .foregroundColor: cachedNSColor(foreground)
-            ]
-        )
+        let color = cachedNSColor(foreground)
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color
+        ]
+        if underline {
+            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            attributes[.underlineColor] = color
+        }
+        if strikethrough {
+            attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+            attributes[.strikethroughColor] = color
+        }
+        let attributed = NSAttributedString(string: text, attributes: attributes)
         let line = CTLineCreateWithAttributedString(attributed)
         lineCache.setObject(TextLineBox(line: line), forKey: cacheKey)
         return line
@@ -763,8 +783,10 @@ final class TerminalGridNSView: NSView {
             return
         }
         cachedFontKey = key
-        cachedRegularFont = terminalFont(weight: .regular)
-        cachedBoldFont = terminalFont(weight: .semibold)
+        cachedRegularFont = terminalFont(weight: .regular, italic: false)
+        cachedBoldFont = terminalFont(weight: .semibold, italic: false)
+        cachedItalicFont = terminalFont(weight: .regular, italic: true)
+        cachedBoldItalicFont = terminalFont(weight: .semibold, italic: true)
         lineCache.removeAll()
     }
 
@@ -812,12 +834,17 @@ final class TerminalGridNSView: NSView {
         return renderPlan.rows[lower...upper]
     }
 
-    private func terminalFont(weight: NSFont.Weight) -> NSFont {
+    private func terminalFont(weight: NSFont.Weight, italic: Bool) -> NSFont {
         let family = renderConfig.fontFamily.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseFont: NSFont
         if !family.isEmpty, let font = NSFont(name: family, size: renderConfig.fontSize) {
-            return weight == .semibold ? NSFontManager.shared.convertWeight(true, of: font) : font
+            baseFont = weight == .semibold ? NSFontManager.shared.convertWeight(true, of: font) : font
+        } else {
+            baseFont = NSFont.monospacedSystemFont(ofSize: renderConfig.fontSize, weight: weight)
         }
-        return NSFont.monospacedSystemFont(ofSize: renderConfig.fontSize, weight: weight)
+        return italic
+            ? NSFontManager.shared.convert(baseFont, toHaveTrait: .italicFontMask)
+            : baseFont
     }
 
     private func drawHoveredLink(in dirtyRect: NSRect, dirtyBounds: DirtyGridBounds) {

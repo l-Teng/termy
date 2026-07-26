@@ -4,8 +4,9 @@ use crate::render_metrics::{
     increment_shaped_line_cache_miss, terminal_ui_render_metrics_enabled,
 };
 use gpui::{
-    App, Bounds, Element, Font, FontFeatures, FontWeight, Hsla, IntoElement, PathBuilder, Pixels,
-    ShapedLine, SharedString, Size, TextAlign, TextRun, UnderlineStyle, Window, point, px, quad,
+    App, Bounds, Element, Font, FontFeatures, FontStyle, FontWeight, Hsla, IntoElement,
+    PathBuilder, Pixels, ShapedLine, SharedString, Size, StrikethroughStyle, TextAlign, TextRun,
+    UnderlineStyle, Window, point, px, quad,
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 use termy_core::TerminalCursorStyle;
@@ -20,6 +21,9 @@ pub struct CellRenderInfo {
     pub bg: Hsla,
     pub uses_terminal_default_bg: bool,
     pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
     pub render_text: bool,
     pub selected: bool,
     /// Part of the current (focused) search match
@@ -342,6 +346,8 @@ struct TextBatch {
     /// shaping are cheap refcount bumps instead of heap copies.
     text: SharedString,
     bold: bool,
+    italic: bool,
+    strikethrough: bool,
     fg: Hsla,
     underline: Option<UnderlineStyle>,
     cell_len: usize,
@@ -459,6 +465,8 @@ struct TerminalGridPaintCache {
     /// Cached Font objects, rebuilt only when style_key changes.
     cached_font_normal: Option<Font>,
     cached_font_bold: Option<Font>,
+    cached_font_italic: Option<Font>,
+    cached_font_bold_italic: Option<Font>,
 }
 
 impl TerminalGridPaintCache {
@@ -489,6 +497,8 @@ impl TerminalGridPaintCache {
 #[derive(Clone, Copy)]
 struct TextBatchKey {
     bold: bool,
+    italic: bool,
+    strikethrough: bool,
     fg: Hsla,
 }
 
@@ -499,6 +509,8 @@ struct TextBatchBuilder {
     row: usize,
     text: String,
     bold: bool,
+    italic: bool,
+    strikethrough: bool,
     fg: Hsla,
     underline: Option<UnderlineStyle>,
     cell_len: usize,
@@ -519,6 +531,8 @@ impl TextBatchBuilder {
             row,
             text,
             bold: key.bold,
+            italic: key.italic,
+            strikethrough: key.strikethrough,
             fg: key.fg,
             underline,
             cell_len: 1,
@@ -535,6 +549,8 @@ impl TextBatchBuilder {
         self.row == row
             && self.start_col + self.cell_len == col
             && self.bold == key.bold
+            && self.italic == key.italic
+            && self.strikethrough == key.strikethrough
             && self.fg == key.fg
             && self.underline == *underline
     }
@@ -550,6 +566,8 @@ impl TextBatchBuilder {
             row: self.row,
             text: SharedString::from(self.text),
             bold: self.bold,
+            italic: self.italic,
+            strikethrough: self.strikethrough,
             fg: self.fg,
             underline: self.underline,
             cell_len: self.cell_len,
@@ -1570,6 +1588,8 @@ fn text_batches_match_without_row(lhs: &TextBatch, rhs: &TextBatch) -> bool {
     lhs.start_col == rhs.start_col
         && lhs.text == rhs.text
         && lhs.bold == rhs.bold
+        && lhs.italic == rhs.italic
+        && lhs.strikethrough == rhs.strikethrough
         && lhs.fg == rhs.fg
         && lhs.underline == rhs.underline
         && lhs.cell_len == rhs.cell_len
@@ -1941,9 +1961,11 @@ impl TerminalGrid {
                 continue;
             }
 
-            let underline = self.cell_underline(cell.row, cell.col, fg);
+            let underline = self.cell_underline(cell.row, cell.col, fg, cell.underline);
             let key = TextBatchKey {
                 bold: cell.bold,
+                italic: cell.italic,
+                strikethrough: cell.strikethrough,
                 fg,
             };
 
@@ -2033,6 +2055,8 @@ impl TerminalGrid {
         cx: &mut App,
         font_normal: &Font,
         font_bold: &Font,
+        font_italic: &Font,
+        font_bold_italic: &Font,
     ) {
         for span in &row_ops.background_spans {
             if span.start_col >= span.end_col_exclusive {
@@ -2080,14 +2104,22 @@ impl TerminalGrid {
                     } else {
                         increment_shaped_line_cache_miss();
                         increment_shape_line_calls();
-                        let font = if batch.bold { font_bold } else { font_normal };
+                        let font = match (batch.bold, batch.italic) {
+                            (false, false) => font_normal,
+                            (true, false) => font_bold,
+                            (false, true) => font_italic,
+                            (true, true) => font_bold_italic,
+                        };
                         let run = TextRun {
                             len: batch.text.len(),
                             font: font.clone(),
                             color: batch.fg,
                             background_color: None,
                             underline: batch.underline,
-                            strikethrough: None,
+                            strikethrough: batch.strikethrough.then_some(StrikethroughStyle {
+                                thickness: px(1.0),
+                                color: Some(batch.fg),
+                            }),
                         };
                         let t_shape = terminal_ui_render_metrics_enabled().then(Instant::now);
                         row_ops.shaped_lines[index] =
@@ -2410,13 +2442,29 @@ impl TerminalGrid {
             });
             cache.cached_font_bold = Some(Font {
                 family: self.font_family.clone(),
+                features: terminal_font_features.clone(),
+                weight: FontWeight::BOLD,
+                ..Default::default()
+            });
+            cache.cached_font_italic = Some(Font {
+                family: self.font_family.clone(),
+                features: terminal_font_features.clone(),
+                weight: FontWeight::NORMAL,
+                style: FontStyle::Italic,
+                ..Default::default()
+            });
+            cache.cached_font_bold_italic = Some(Font {
+                family: self.font_family.clone(),
                 features: terminal_font_features,
                 weight: FontWeight::BOLD,
+                style: FontStyle::Italic,
                 ..Default::default()
             });
         }
         let font_normal = cache.cached_font_normal.clone().unwrap();
         let font_bold = cache.cached_font_bold.clone().unwrap();
+        let font_italic = cache.cached_font_italic.clone().unwrap();
+        let font_bold_italic = cache.cached_font_bold_italic.clone().unwrap();
 
         let cursor_fg = Hsla {
             h: 0.0,
@@ -2460,6 +2508,8 @@ impl TerminalGrid {
                 cx,
                 &font_normal,
                 &font_bold,
+                &font_italic,
+                &font_bold_italic,
             );
         }
 
@@ -2472,7 +2522,10 @@ impl TerminalGrid {
     }
 
     fn cell_is_drawable_text(cell: &CellRenderInfo) -> bool {
-        cell.render_text && cell.char != ' ' && cell.char != '\0' && !cell.char.is_control()
+        cell.render_text
+            && (cell.char != ' ' || cell.underline || cell.strikethrough)
+            && cell.char != '\0'
+            && !cell.char.is_control()
     }
 
     fn cell_fg_color(&self, cell: &CellRenderInfo, cursor_fg: Hsla, highlight_fg: Hsla) -> Hsla {
@@ -2490,28 +2543,32 @@ impl TerminalGrid {
         }
     }
 
-    fn cell_underline(&self, row: usize, col: usize, color: Hsla) -> Option<UnderlineStyle> {
-        self.hovered_link_range
-            .and_then(|(start_row, start_col, end_row, end_col)| {
-                let in_range = if start_row == end_row {
-                    row == start_row && col >= start_col && col <= end_col
-                } else if row == start_row {
-                    col >= start_col
-                } else if row == end_row {
-                    col <= end_col
-                } else {
-                    row > start_row && row < end_row
-                };
-                if in_range {
-                    Some(UnderlineStyle {
-                        thickness: px(1.0),
-                        color: Some(color),
-                        wavy: false,
-                    })
-                } else {
-                    None
-                }
-            })
+    fn cell_underline(
+        &self,
+        row: usize,
+        col: usize,
+        color: Hsla,
+        terminal_underlined: bool,
+    ) -> Option<UnderlineStyle> {
+        let hovered =
+            self.hovered_link_range
+                .is_some_and(|(start_row, start_col, end_row, end_col)| {
+                    let in_range = if start_row == end_row {
+                        row == start_row && col >= start_col && col <= end_col
+                    } else if row == start_row {
+                        col >= start_col
+                    } else if row == end_row {
+                        col <= end_col
+                    } else {
+                        row > start_row && row < end_row
+                    };
+                    in_range
+                });
+        (terminal_underlined || hovered).then_some(UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(color),
+            wavy: false,
+        })
     }
 
     fn push_pending_text_batch(current: &mut Option<TextBatchBuilder>, ops: &mut Vec<TextDrawOp>) {
@@ -2578,6 +2635,9 @@ mod tests {
             bg: test_color(0.0, 0.0, 0.0),
             uses_terminal_default_bg: false,
             bold: false,
+            italic: false,
+            underline: false,
+            strikethrough: false,
             render_text: true,
             selected: false,
             search_current: false,
@@ -3065,6 +3125,30 @@ mod tests {
     }
 
     #[test]
+    fn batches_preserve_sgr_text_attributes() {
+        let mut italic = test_cell(0, 0, 'i');
+        let mut underlined = test_cell(1, 0, 'u');
+        let mut struck = test_cell(2, 0, 's');
+        italic.italic = true;
+        underlined.underline = true;
+        struck.strikethrough = true;
+
+        let grid = test_grid(vec![italic, underlined, struck], None);
+        let batches = collect_batches(&grid);
+
+        assert_eq!(batches.len(), 3);
+        assert!(batches[0].italic);
+        assert!(batches[0].underline.is_none());
+        assert!(!batches[0].strikethrough);
+        assert!(!batches[1].italic);
+        assert!(batches[1].underline.is_some());
+        assert!(!batches[1].strikethrough);
+        assert!(!batches[2].italic);
+        assert!(batches[2].underline.is_none());
+        assert!(batches[2].strikethrough);
+    }
+
+    #[test]
     fn batches_split_on_hover_underline_boundary() {
         let grid = test_grid(
             vec![
@@ -3094,12 +3178,13 @@ mod tests {
         );
         let color = test_color(1.0, 1.0, 1.0);
 
-        assert!(grid.cell_underline(0, 0, color).is_none());
-        assert!(grid.cell_underline(0, 1, color).is_some());
-        assert!(grid.cell_underline(1, 0, color).is_some());
-        assert!(grid.cell_underline(1, 1, color).is_some());
-        assert!(grid.cell_underline(2, 0, color).is_some());
-        assert!(grid.cell_underline(2, 1, color).is_none());
+        assert!(grid.cell_underline(0, 0, color, false).is_none());
+        assert!(grid.cell_underline(0, 1, color, false).is_some());
+        assert!(grid.cell_underline(1, 0, color, false).is_some());
+        assert!(grid.cell_underline(1, 1, color, false).is_some());
+        assert!(grid.cell_underline(2, 0, color, false).is_some());
+        assert!(grid.cell_underline(2, 1, color, false).is_none());
+        assert!(grid.cell_underline(2, 1, color, true).is_some());
     }
 
     #[test]
@@ -3826,6 +3911,8 @@ mod tests {
                 'a',
                 TextBatchKey {
                     bold: false,
+                    italic: false,
+                    strikethrough: false,
                     fg: Hsla::transparent_black(),
                 },
                 None,

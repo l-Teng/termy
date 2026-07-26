@@ -14,6 +14,8 @@ const C_CONTRACT_SOURCE: &str = r#"
 
 _Static_assert(TERMY_FFI_OK == 0, "status enum starts at OK");
 _Static_assert(TERMY_FFI_PANICKED == 8, "panic status is stable");
+_Static_assert(sizeof(TermyFfiCell) == 20, "cell ABI size is stable");
+_Static_assert(offsetof(TermyFfiCell, italic) > offsetof(TermyFfiCell, line_wrapped), "text attributes use trailing cell padding");
 _Static_assert(offsetof(TermyFfiFrame, cells_ptr) < offsetof(TermyFfiFrame, cursor), "frame cell storage precedes cursor");
 _Static_assert(offsetof(TermyFfiFrameUpdate, damage_kind) < offsetof(TermyFfiFrameUpdate, spans_ptr), "frame update damage metadata precedes spans");
 _Static_assert(offsetof(TermyFfiEventBatch, has_more) > offsetof(TermyFfiEventBatch, events_capacity), "event batch has_more follows vector storage");

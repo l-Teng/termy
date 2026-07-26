@@ -24,11 +24,17 @@ struct TerminalTextSegment: Equatable {
     var text: String
     var foreground: TerminalRGBA
     var bold: Bool
+    var italic: Bool
+    var underline: Bool
+    var strikethrough: Bool
     var lineCacheKey: TextLineCacheKey
 }
 
 struct TextLineCacheKey: Hashable {
     var bold: Bool
+    var italic: Bool = false
+    var underline: Bool = false
+    var strikethrough: Bool = false
     var foregroundPackedValue: UInt32
     var text: String
 
@@ -182,6 +188,9 @@ final class TerminalRenderPlanCache {
         var text = ""
         var textForeground: TerminalRGBA?
         var textBold = false
+        var textItalic = false
+        var textUnderline = false
+        var textStrikethrough = false
         var textStartCol = 0
         var textCols = 0
 
@@ -204,8 +213,14 @@ final class TerminalRenderPlanCache {
                 text: text,
                 foreground: foreground,
                 bold: textBold,
+                italic: textItalic,
+                underline: textUnderline,
+                strikethrough: textStrikethrough,
                 lineCacheKey: TextLineCacheKey(
                     bold: textBold,
+                    italic: textItalic,
+                    underline: textUnderline,
+                    strikethrough: textStrikethrough,
                     foregroundPackedValue: foreground.packedValue,
                     text: text
                 )
@@ -238,6 +253,9 @@ final class TerminalRenderPlanCache {
                 flushTextSegment()
                 textForeground = nil
                 textBold = false
+                textItalic = false
+                textUnderline = false
+                textStrikethrough = false
                 continue
             }
 
@@ -255,6 +273,9 @@ final class TerminalRenderPlanCache {
                 flushTextSegment()
                 textForeground = nil
                 textBold = false
+                textItalic = false
+                textUnderline = false
+                textStrikethrough = false
                 blockGlyphs.append(TerminalBlockGlyph(
                     row: row,
                     col: cell.col,
@@ -270,6 +291,9 @@ final class TerminalRenderPlanCache {
                 flushTextSegment()
                 textForeground = nil
                 textBold = false
+                textItalic = false
+                textUnderline = false
+                textStrikethrough = false
                 strokeGlyphs.append(TerminalStrokeGlyph(
                     row: row,
                     col: cell.col,
@@ -282,10 +306,21 @@ final class TerminalRenderPlanCache {
 
             let foreground = cell.foreground
             let bold = cell.bold
-            if textForeground != foreground || textBold != bold {
+            let italic = cell.italic
+            let underline = cell.underline
+            let strikethrough = cell.strikethrough
+            if textForeground != foreground
+                || textBold != bold
+                || textItalic != italic
+                || textUnderline != underline
+                || textStrikethrough != strikethrough
+            {
                 flushTextSegment()
                 textForeground = foreground
                 textBold = bold
+                textItalic = italic
+                textUnderline = underline
+                textStrikethrough = strikethrough
                 textStartCol = cell.col
             }
             text.append(cell.character)

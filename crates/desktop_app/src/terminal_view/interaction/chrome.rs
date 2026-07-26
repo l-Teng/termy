@@ -56,9 +56,20 @@ impl TerminalView {
 
     pub(in super::super) fn window_titlebar_height_for(
         _sidebar_tabs: bool,
-        _show_tab_strip_chrome: bool,
+        show_tab_strip_chrome: bool,
     ) -> f32 {
-        Self::titlebar_height()
+        Self::window_titlebar_height_for_platform(cfg!(target_os = "macos"), show_tab_strip_chrome)
+    }
+
+    fn window_titlebar_height_for_platform(
+        preserve_native_titlebar: bool,
+        show_tab_strip_chrome: bool,
+    ) -> f32 {
+        if preserve_native_titlebar || show_tab_strip_chrome {
+            Self::titlebar_height()
+        } else {
+            0.0
+        }
     }
 
     fn terminal_content_top_inset_for(
@@ -110,6 +121,22 @@ mod tests {
     fn window_titlebar_height_keeps_horizontal_strip_height() {
         assert_eq!(
             TerminalView::window_titlebar_height_for(false, true),
+            TerminalView::titlebar_height()
+        );
+    }
+
+    #[test]
+    fn linux_and_windows_titlebar_height_collapses_when_tab_strip_hidden() {
+        assert_eq!(
+            TerminalView::window_titlebar_height_for_platform(false, false),
+            0.0
+        );
+    }
+
+    #[test]
+    fn macos_titlebar_height_is_preserved_when_tab_strip_hidden() {
+        assert_eq!(
+            TerminalView::window_titlebar_height_for_platform(true, false),
             TerminalView::titlebar_height()
         );
     }

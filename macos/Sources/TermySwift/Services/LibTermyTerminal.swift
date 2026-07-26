@@ -856,6 +856,9 @@ final class LibTermyTerminal {
             usesTerminalDefaultBackground: ffiCell.uses_terminal_default_bg,
             renderText: ffiCell.render_text,
             bold: ffiCell.bold,
+            italic: ffiCell.italic,
+            underline: ffiCell.underline,
+            strikethrough: ffiCell.strikethrough,
             wideCharacterSpacer: ffiCell.wide_character_spacer,
             lineWrapped: ffiCell.line_wrapped
         )

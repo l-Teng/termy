@@ -196,6 +196,23 @@ struct CellColorTransform {
     desaturate: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CellTextAttributes {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+}
+
+fn cell_text_attributes(flags: Flags) -> CellTextAttributes {
+    CellTextAttributes {
+        bold: flags.contains(Flags::BOLD),
+        italic: flags.contains(Flags::ITALIC),
+        underline: flags.intersects(Flags::ALL_UNDERLINES),
+        strikethrough: flags.contains(Flags::STRIKEOUT),
+    }
+}
+
 impl CellColorTransform {
     fn is_active(self) -> bool {
         self.fg_blend > f32::EPSILON
@@ -703,6 +720,7 @@ impl TerminalView {
         context: PaneCellBuildContext<'_>,
     ) -> CellRenderInfo {
         let resolved_colors = resolve_cell_colors(cell_content, context);
+        let text_attributes = cell_text_attributes(cell_content.flags);
 
         let (search_current, search_match) = if let Some(results) = context.pane_search_results {
             let is_current = results.is_current_match(term_line, col);
@@ -719,7 +737,10 @@ impl TerminalView {
             fg: resolved_colors.fg.into(),
             bg: resolved_colors.bg.into(),
             uses_terminal_default_bg: resolved_colors.uses_terminal_default_bg,
-            bold: cell_content.flags.contains(Flags::BOLD),
+            bold: text_attributes.bold,
+            italic: text_attributes.italic,
+            underline: text_attributes.underline,
+            strikethrough: text_attributes.strikethrough,
             render_text: !cell_content.flags.intersects(
                 Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN,
             ),
@@ -812,6 +833,9 @@ impl TerminalView {
             bg: default_bg.into(),
             uses_terminal_default_bg: true,
             bold: false,
+            italic: false,
+            underline: false,
+            strikethrough: false,
             render_text: false,
             selected: false,
             search_current: false,
@@ -3845,6 +3869,9 @@ mod tests {
             bg: gpui::Hsla::transparent_black(),
             uses_terminal_default_bg: false,
             bold: false,
+            italic: false,
+            underline: false,
+            strikethrough: false,
             render_text: true,
             selected: false,
             search_current: false,
@@ -3905,6 +3932,17 @@ mod tests {
             flags,
             ..alacritty_terminal::term::cell::Cell::default()
         }
+    }
+
+    #[test]
+    fn cell_text_attributes_preserve_sgr_flags() {
+        let attributes =
+            cell_text_attributes(Flags::BOLD | Flags::ITALIC | Flags::UNDERLINE | Flags::STRIKEOUT);
+
+        assert!(attributes.bold);
+        assert!(attributes.italic);
+        assert!(attributes.underline);
+        assert!(attributes.strikethrough);
     }
 
     fn tmux_test_pane(id: &str, left: u16, top: u16, cols: u16, rows: u16) -> TerminalPane {
