@@ -88,12 +88,6 @@ impl TabStripGeometry {
 }
 
 impl TerminalView {
-    #[cfg(target_os = "windows")]
-    fn horizontal_action_rail_width_for_platform(_: f32) -> f32 {
-        0.0
-    }
-
-    #[cfg(not(target_os = "windows"))]
     fn horizontal_action_rail_width_for_platform(max_row_width: f32) -> f32 {
         TABBAR_ACTION_RAIL_WIDTH.min(max_row_width)
     }
@@ -217,10 +211,10 @@ impl TerminalView {
         })
     }
 
-    // Runtime always lays out the tabs viewport at full width (content_width =
-    // None) so the action rail stays right-anchored; only the Windows tests
-    // exercise the content-width-clamped path.
-    #[cfg(all(test, target_os = "windows"))]
+    // Windows keeps the action rail directly after the tabs so the remaining
+    // titlebar space stays available for window dragging before the native
+    // caption buttons. Other platforms keep the rail right-anchored.
+    #[cfg(any(test, target_os = "windows"))]
     pub(crate) fn tab_strip_layout_for_viewport_with_left_inset_and_content_width(
         viewport_width: f32,
         left_inset_width: f32,
@@ -395,7 +389,6 @@ mod tests {
         assert!(geometry.button_end_x <= geometry.action_rail_end_x());
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn button_shrinks_to_narrow_action_rail() {
         let viewport_width =
@@ -411,19 +404,10 @@ mod tests {
         assert!(geometry.button_end_x <= geometry.action_rail_end_x());
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn action_rail_keeps_positive_width_in_standard_viewport() {
+    fn action_rail_keeps_positive_width_in_standard_viewport_on_every_platform() {
         let snapshot = TerminalView::tab_strip_layout_for_viewport_width(1280.0);
         assert!(snapshot.geometry.action_rail_width > 0.0);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn action_rail_is_hidden_on_windows() {
-        let snapshot = TerminalView::tab_strip_layout_for_viewport_width(1280.0);
-        assert_float_eq(snapshot.geometry.action_rail_width, 0.0);
-        assert_float_eq(snapshot.geometry.gutter_width, 0.0);
     }
 
     #[test]
@@ -438,12 +422,7 @@ mod tests {
     #[test]
     fn gutter_divider_is_present_and_fixed() {
         let snapshot = TerminalView::tab_strip_layout_for_viewport_width(1280.0);
-        let expected_width = if cfg!(target_os = "windows") {
-            0.0
-        } else {
-            TAB_STRIP_RAIL_GUTTER_WIDTH
-        };
-        assert_float_eq(snapshot.geometry.gutter_width, expected_width);
+        assert_float_eq(snapshot.geometry.gutter_width, TAB_STRIP_RAIL_GUTTER_WIDTH);
     }
 
     #[test]
@@ -476,9 +455,8 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
-    fn fitting_windows_content_turns_extra_space_into_trailing_drag_region() {
+    fn fitting_content_places_action_rail_before_trailing_drag_region() {
         let left_inset_width = TerminalView::titlebar_left_padding_for_platform();
         let content_width = 192.0;
         let snapshot =
@@ -490,12 +468,18 @@ mod tests {
         let geometry = snapshot.geometry;
 
         assert_float_eq(geometry.tabs_viewport_width, content_width);
-        assert_float_eq(geometry.action_rail_width, 0.0);
-        assert_float_eq(geometry.gutter_width, 0.0);
+        assert_float_eq(geometry.action_rail_width, TABBAR_ACTION_RAIL_WIDTH);
+        assert_float_eq(geometry.gutter_width, TAB_STRIP_RAIL_GUTTER_WIDTH);
         assert!(
             geometry.right_inset_width > TerminalView::titlebar_right_padding_for_platform(),
             "expected leftover titlebar slack to move into the trailing drag region",
         );
-        assert_float_eq(geometry.row_end_x, geometry.row_start_x + content_width);
+        assert_float_eq(
+            geometry.row_end_x,
+            geometry.row_start_x
+                + content_width
+                + TAB_STRIP_RAIL_GUTTER_WIDTH
+                + TABBAR_ACTION_RAIL_WIDTH,
+        );
     }
 }

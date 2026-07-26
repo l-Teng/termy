@@ -963,7 +963,6 @@ mod tests {
         assert!(geometry.button_start_y >= TOP_STRIP_CONTENT_OFFSET_Y);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tab_strip_geometry_clamps_action_rail_for_narrow_viewport() {
         let viewport_width =
@@ -975,14 +974,6 @@ mod tests {
         assert_float_eq(geometry.tabs_viewport_width, 0.0);
         assert!(geometry.button_start_x >= geometry.action_rail_start_x);
         assert!(geometry.button_end_x <= geometry.action_rail_end_x());
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn tab_strip_geometry_hides_action_rail_on_windows() {
-        let geometry = TerminalView::tab_strip_geometry_for_viewport_width(1280.0);
-        assert_float_eq(geometry.action_rail_width, 0.0);
-        assert_float_eq(geometry.gutter_width, 0.0);
     }
 
     #[test]
@@ -1015,7 +1006,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tab_strip_geometry_detects_new_tab_button_hit_bounds() {
         let geometry = TerminalView::tab_strip_geometry_for_viewport_width(960.0);

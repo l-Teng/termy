@@ -381,6 +381,28 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn windows_action_rail_before_trailing_slack_stays_interactive() {
+        let geometry = windows_horizontal_geometry_with_extra_slack();
+        let x = (geometry.button_start_x + geometry.button_end_x) * 0.5;
+        let y = (geometry.button_start_y + geometry.button_end_y) * 0.5;
+
+        assert!(geometry.action_rail_width > 0.0);
+        assert!(geometry.right_inset_width > TerminalView::titlebar_right_padding_for_platform());
+        assert_eq!(
+            TerminalView::horizontal_titlebar_pointer_target_for_geometry(
+                x,
+                y,
+                true,
+                geometry,
+                [120.0],
+                0.0,
+            ),
+            HorizontalTitlebarPointerTarget::InteractiveChrome
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn windows_extra_right_inset_slack_stays_draggable() {
         let geometry = windows_horizontal_geometry_with_extra_slack();
         let caption_width = geometry
