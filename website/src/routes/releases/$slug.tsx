@@ -4,7 +4,6 @@ import {
   MarketingPageShell,
   marketingFontLinks,
   marketingMono,
-  marketingPanelClass,
 } from '@/components/marketing-page-shell';
 import {
   fetchGitHubReleaseByTag,
@@ -36,7 +35,7 @@ function ReleaseDetail() {
 
   return (
     <MarketingPageShell>
-      <main className="mx-auto flex w-full max-w-4xl flex-col px-6 pt-16 pb-20 md:pt-20">
+      <main className="mx-auto flex w-full max-w-[40rem] flex-col px-6 pt-16 pb-20 md:pt-20">
         <Link
           to="/releases"
           className="text-xs text-[#787c99] hover:text-white"
@@ -48,21 +47,35 @@ function ReleaseDetail() {
         <article className="mt-10">
           <time
             dateTime={release.publishedAt}
-            className="text-xs text-[#7aa2f7]"
+            className="text-xs text-[#787c99]"
             style={{ fontFamily: marketingMono }}
           >
             {formatReleaseDate(release.publishedAt)}
           </time>
-          <h1 className="mt-3 text-balance text-3xl font-medium leading-tight tracking-tight text-[#e8eeff] md:text-4xl" style={{ fontFamily: marketingMono }}>
-            {release.name}
+          <h1
+            className="mt-3 text-4xl font-medium leading-none tracking-tight text-[#e8eeff] md:text-5xl"
+            style={{ fontFamily: marketingMono }}
+          >
+            {release.tagName}
           </h1>
-          <div className={`${marketingPanelClass} prose prose-invert prose-sm mt-10 max-w-none px-6 py-8 text-[#c0caf5] sm:px-9 sm:py-10`}>
-            <Markdown text={release.body || '_No release notes were provided._'} />
+
+          <div className="release-notes prose prose-invert mt-10 max-w-none">
+            <Markdown
+              text={release.body || '_No release notes were provided._'}
+            />
           </div>
         </article>
 
-        <div className="mt-8 flex flex-wrap gap-6 text-xs text-[#787c99]" style={{ fontFamily: marketingMono }}>
-          <a href={release.htmlUrl} target="_blank" rel="noreferrer" className="hover:text-white">
+        <div
+          className="mt-8 flex flex-wrap gap-x-6 gap-y-2 text-xs text-[#787c99]"
+          style={{ fontFamily: marketingMono }}
+        >
+          <a
+            href={release.htmlUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="hover:text-white"
+          >
             View on GitHub ↗
           </a>
           <a href={release.tarballUrl} className="hover:text-white">

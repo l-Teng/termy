@@ -184,6 +184,88 @@ html:not(.dark) .marketing-theme .prose :where(h1, h2, h3, h4, strong, code) {
   color: #18233d;
 }
 
+.marketing-theme .release-notes {
+  --tw-prose-body: #a9b1d6;
+  --tw-prose-headings: #e8eeff;
+  --tw-prose-links: #7aa2f7;
+  --tw-prose-bold: #c0caf5;
+  --tw-prose-counters: #787c99;
+  --tw-prose-bullets: #565f89;
+  --tw-prose-hr: rgba(255, 255, 255, 0.08);
+  --tw-prose-quotes: #a9b1d6;
+  --tw-prose-quote-borders: #7aa2f7;
+  --tw-prose-code: #c0caf5;
+  --tw-prose-pre-code: #c0caf5;
+  --tw-prose-pre-bg: #16161e;
+  --tw-prose-th-borders: rgba(255, 255, 255, 0.08);
+  --tw-prose-td-borders: rgba(255, 255, 255, 0.06);
+  color: #a9b1d6;
+  font-size: 0.9375rem;
+  line-height: 1.7;
+}
+
+.marketing-theme .release-notes :where(h1, h2, h3, h4) {
+  color: #e8eeff;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.marketing-theme .release-notes :where(h2) {
+  margin-top: 1.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 1.75rem;
+  font-size: 1.125rem;
+  line-height: 1.55;
+}
+
+.marketing-theme .release-notes :where(h2):first-child {
+  margin-top: 0;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.marketing-theme .release-notes :where(a) {
+  color: #787c99;
+  text-decoration: none;
+}
+
+.marketing-theme .release-notes :where(a):hover {
+  color: #ffffff;
+}
+
+.marketing-theme .release-notes :where(p, li) {
+  color: #a9b1d6;
+}
+
+html:not(.dark) .marketing-theme .release-notes {
+  --tw-prose-body: #66718d;
+  --tw-prose-headings: #18233d;
+  --tw-prose-links: #416fc7;
+  --tw-prose-bold: #34405c;
+  --tw-prose-hr: rgba(48, 68, 108, 0.14);
+  color: #66718d;
+}
+
+html:not(.dark) .marketing-theme .release-notes :where(h1, h2, h3, h4) {
+  color: #18233d;
+}
+
+html:not(.dark) .marketing-theme .release-notes :where(h2) {
+  border-top-color: rgba(48, 68, 108, 0.14);
+}
+
+html:not(.dark) .marketing-theme .release-notes :where(a) {
+  color: #66718d;
+}
+
+html:not(.dark) .marketing-theme .release-notes :where(a):hover {
+  color: #18233d;
+}
+
+html:not(.dark) .marketing-theme .release-notes :where(p, li) {
+  color: #66718d;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .marketing-theme {
     transition: none;
