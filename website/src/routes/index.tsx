@@ -228,55 +228,50 @@ function Starfield() {
   );
 }
 
+const navLinkClass =
+  'text-sm text-[#a9b1d6] transition-colors hover:text-[#c0caf5]';
+
 function SiteNav() {
-  const pill =
-    'flex items-center rounded-full border border-white/[0.08] bg-[#14141c]/70 backdrop-blur-md';
   return (
-    <header className="flex w-full flex-wrap items-center justify-center gap-3 px-6 pt-7 sm:gap-4">
-      <Link
-        to="/"
-        className="flex items-center gap-2.5 rounded-full border border-[#7aa2f7]/40 bg-[#16161e]/80 py-2.5 pr-5 pl-4 shadow-[inset_0_0_18px_rgba(122,162,247,0.18),0_0_24px_rgba(122,162,247,0.12)] backdrop-blur-md"
-      >
-        <span
-          className="text-sm font-bold text-[#7aa2f7]"
-          style={{ fontFamily: MONO }}
-        >
-          ❯_
-        </span>
-        <span className="text-[15px] font-medium tracking-tight">termy</span>
-      </Link>
+    <header className="flex w-full justify-center px-6 pt-2">
+      <div className="flex w-full max-w-6xl items-center justify-between py-5">
+        <Link to="/" className="flex min-w-0 flex-1 items-center gap-2.5">
+          <span
+            className="text-[15px] font-bold text-[#7aa2f7]"
+            style={{ fontFamily: MONO }}
+          >
+            ❯_
+          </span>
+          <span className="text-[15px] font-medium tracking-tight">termy</span>
+        </Link>
 
-      <nav className={`${pill} px-2 py-1 text-sm text-[#c0caf5]`}>
-        <Link
-          to="/download"
-          className="rounded-full px-4 py-2 transition-colors hover:text-white"
-        >
-          Download
-        </Link>
-        <Link
-          to="/docs/$"
-          params={{ _splat: '' }}
-          className="rounded-full px-4 py-2 transition-colors hover:text-white"
-        >
-          Docs
-        </Link>
-        <Link
-          to="/releases"
-          className="rounded-full px-4 py-2 transition-colors hover:text-white"
-        >
-          Releases
-        </Link>
-        <a
-          href="https://github.com/lassejlv/termy"
-          target="_blank"
-          rel="noreferrer"
-          className="rounded-full px-4 py-2 transition-colors hover:text-white"
-        >
-          GitHub
-        </a>
-      </nav>
+        <nav className="hidden items-center gap-8 sm:flex">
+          <Link to="/docs/$" params={{ _splat: '' }} className={navLinkClass}>
+            Docs
+          </Link>
+          <Link to="/releases" className={navLinkClass}>
+            Releases
+          </Link>
+          <a
+            href="https://github.com/lassejlv/termy"
+            target="_blank"
+            rel="noreferrer"
+            className={navLinkClass}
+          >
+            GitHub
+          </a>
+        </nav>
 
-      <ThemeToggle />
+        <div className="flex flex-1 items-center justify-end gap-2">
+          <ThemeToggle />
+          <Link
+            to="/download"
+            className="rounded-lg border border-white/[0.12] bg-white/[0.06] px-4 py-2 text-sm font-medium text-[#c0caf5] transition-colors hover:bg-white/[0.1]"
+          >
+            Download
+          </Link>
+        </div>
+      </div>
     </header>
   );
 }
@@ -293,15 +288,8 @@ function Hero() {
         className="right-[max(1rem,calc(50%-46rem))] top-10 rotate-2"
       />
 
-      <p
-        className="text-sm text-[#7aa2f7]"
-        style={{ fontFamily: MONO }}
-      >
-        $ termy
-      </p>
-
       <h1
-        className="mt-4 text-4xl font-medium leading-[1.1] tracking-tight text-balance sm:text-5xl md:text-6xl"
+        className="text-4xl font-medium leading-[1.1] tracking-tight text-balance sm:text-5xl md:text-6xl"
         style={{ fontFamily: MONO }}
       >
         <span className="block text-[#e8eeff]">The terminal,</span>
@@ -513,7 +501,7 @@ const SIDEBAR_ITEMS = [
 function SettingsWindow() {
   return (
     <div
-      className="absolute -right-2 bottom-[-56px] hidden w-[520px] overflow-hidden rounded-xl border border-white/[0.1] bg-[#1a1b26] shadow-[0_30px_90px_rgba(0,0,0,0.65),0_0_50px_rgba(61,89,161,0.1)] lg:block xl:-right-8"
+      className="absolute right-6 bottom-6 hidden w-[520px] overflow-hidden rounded-xl border border-white/[0.1] bg-[#1a1b26] shadow-[0_30px_90px_rgba(0,0,0,0.65),0_0_50px_rgba(61,89,161,0.1)] lg:block"
       style={{ fontFamily: MONO }}
     >
       <div className="flex">

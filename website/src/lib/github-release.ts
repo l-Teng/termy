@@ -156,6 +156,35 @@ export function assetArch(name: string): string | null {
   return null;
 }
 
+/** Short human label for a release asset (Download page rows). */
+export function assetLabel(name: string): string {
+  const lower = name.toLowerCase();
+  const arch = assetArch(name);
+  const platform = assetPlatform(name);
+
+  if (platform === 'macos') {
+    if (arch === 'arm64') return 'Apple Silicon';
+    if (arch === 'x64') return 'Intel';
+    return 'macOS';
+  }
+
+  if (platform === 'linux') {
+    if (lower.includes('appimage')) return 'AppImage';
+    if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) return 'Tarball';
+    if (lower.endsWith('.deb')) return 'Debian';
+    if (lower.endsWith('.rpm')) return 'RPM';
+    return 'Linux';
+  }
+
+  if (platform === 'windows') {
+    if (lower.endsWith('.msi')) return 'MSI';
+    if (lower.includes('setup') || lower.endsWith('.exe')) return 'Installer';
+    return 'Windows';
+  }
+
+  return name;
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   let size = bytes / 1024;

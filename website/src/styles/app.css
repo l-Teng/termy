@@ -109,6 +109,10 @@ html:not(.dark) .marketing-theme .text-\[\#c0caf5\] {
   color: #34405c;
 }
 
+html:not(.dark) .marketing-theme .text-\[\#a9b1d6\] {
+  color: #66718d;
+}
+
 html:not(.dark) .marketing-theme .text-\[\#787c99\] {
   color: #66718d;
 }
@@ -147,8 +151,12 @@ html:not(.dark) .marketing-theme [class*='divide-white/'] {
   border-color: rgba(48, 68, 108, 0.13);
 }
 
+html:not(.dark) .marketing-theme [class*='bg-white/'] {
+  background-color: rgba(48, 68, 108, 0.08);
+}
+
 html:not(.dark) .marketing-theme [class*='hover:bg-white/']:hover {
-  background-color: rgba(65, 111, 199, 0.07);
+  background-color: rgba(65, 111, 199, 0.1);
 }
 
 html:not(.dark) .marketing-theme [class*='hover:text-white']:hover,

@@ -41,97 +41,71 @@ export function ThemeToggle() {
     return () => observer.disconnect();
   }, []);
 
-  const selectTheme = (nextTheme: 'light' | 'dark') => {
-    setCurrentTheme(nextTheme);
-    setTheme(nextTheme);
-  };
+  const nextTheme = theme === 'dark' ? 'light' : 'dark';
 
   return (
-    <div
-      className="relative flex items-center rounded-full border border-white/[0.08] bg-[#14141c]/70 p-1.5 backdrop-blur-md"
-      role="group"
-      aria-label="Color theme"
+    <button
+      type="button"
+      aria-label={nextTheme === 'light' ? 'Switch to light theme' : 'Switch to dark theme'}
+      onClick={() => {
+        setCurrentTheme(nextTheme);
+        setTheme(nextTheme);
+      }}
+      className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-white/[0.04] text-[#c0caf5] transition-colors hover:bg-white/[0.08] active:scale-[0.96]"
     >
-      <span
-        aria-hidden
-        className={`pointer-events-none absolute left-1.5 size-8 rounded-full bg-[#24283b] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08),0_3px_10px_rgba(0,0,0,0.24)] transition-transform duration-300 motion-reduce:transition-none ${
-          theme === 'dark' ? 'translate-x-8' : 'translate-x-0'
-        }`}
-        style={{ transitionTimingFunction: 'cubic-bezier(0.23, 1, 0.32, 1)' }}
-      />
-      <button
-        type="button"
-        aria-label="Switch to light theme"
-        aria-pressed={theme === 'light'}
-        onClick={() => selectTheme('light')}
-        className={`relative z-10 flex size-8 items-center justify-center rounded-full transition-colors duration-200 active:scale-[0.96] ${
-          theme === 'light' ? 'text-[#f4c76b]' : 'text-[#565f89] hover:text-[#c0caf5]'
-        }`}
-      >
-        <Sun
-          className={`size-4 transition-[transform,opacity] duration-300 motion-reduce:transition-none ${
-            theme === 'light' ? 'rotate-0 opacity-100' : '-rotate-45 opacity-60'
-          }`}
-        />
-      </button>
-      <button
-        type="button"
-        aria-label="Switch to dark theme"
-        aria-pressed={theme === 'dark'}
-        onClick={() => selectTheme('dark')}
-        className={`relative z-10 flex size-8 items-center justify-center rounded-full transition-colors duration-200 active:scale-[0.96] ${
-          theme === 'dark' ? 'text-[#c0caf5]' : 'text-[#565f89] hover:text-[#c0caf5]'
-        }`}
-      >
-        <Moon
-          className={`size-4 transition-[transform,opacity] duration-300 motion-reduce:transition-none ${
-            theme === 'dark' ? 'rotate-0 opacity-100' : 'rotate-45 opacity-60'
-          }`}
-        />
-      </button>
-    </div>
+      {theme === 'dark' ? (
+        <Moon className="size-4" />
+      ) : (
+        <Sun className="size-4 text-[#f4c76b]" />
+      )}
+    </button>
   );
 }
 
+const navLinkClass =
+  'text-sm text-[#a9b1d6] transition-colors hover:text-[#c0caf5]';
+
 function MarketingNav() {
-  const pill =
-    'flex items-center rounded-full border border-white/[0.08] bg-[#14141c]/70 backdrop-blur-md';
-
   return (
-    <header className="relative z-20 flex w-full flex-wrap items-center justify-center gap-3 px-6 pt-7 sm:gap-4">
-      <Link
-        to="/"
-        className="flex items-center gap-2.5 rounded-full border border-[#7aa2f7]/40 bg-[#16161e]/80 py-2.5 pr-5 pl-4 shadow-[inset_0_0_18px_rgba(122,162,247,0.18),0_0_24px_rgba(122,162,247,0.12)] backdrop-blur-md"
-      >
-        <img src="/termy-icon.svg" alt="" className="h-5 w-5" />
-        <span className="text-[15px] font-medium tracking-tight">termy</span>
-      </Link>
+    <header className="relative z-20 flex w-full justify-center px-6 pt-2">
+      <div className="flex w-full max-w-6xl items-center justify-between py-5">
+        <Link to="/" className="flex min-w-0 flex-1 items-center gap-2.5">
+          <span
+            className="text-[15px] font-bold text-[#7aa2f7]"
+            style={{ fontFamily: marketingMono }}
+          >
+            ❯_
+          </span>
+          <span className="text-[15px] font-medium tracking-tight">termy</span>
+        </Link>
 
-      <nav className={`${pill} px-2 py-1 text-sm text-[#c0caf5]`}>
-        <Link to="/download" className="rounded-full px-4 py-2 hover:text-white">
-          Download
-        </Link>
-        <Link
-          to="/docs/$"
-          params={{ _splat: '' }}
-          className="rounded-full px-4 py-2 hover:text-white"
-        >
-          Docs
-        </Link>
-        <Link to="/releases" className="rounded-full px-4 py-2 hover:text-white">
-          Releases
-        </Link>
-        <a
-          href="https://github.com/lassejlv/termy"
-          target="_blank"
-          rel="noreferrer"
-          className="rounded-full px-4 py-2 hover:text-white"
-        >
-          GitHub
-        </a>
-      </nav>
+        <nav className="hidden items-center gap-8 sm:flex">
+          <Link to="/docs/$" params={{ _splat: '' }} className={navLinkClass}>
+            Docs
+          </Link>
+          <Link to="/releases" className={navLinkClass}>
+            Releases
+          </Link>
+          <a
+            href="https://github.com/lassejlv/termy"
+            target="_blank"
+            rel="noreferrer"
+            className={navLinkClass}
+          >
+            GitHub
+          </a>
+        </nav>
 
-      <ThemeToggle />
+        <div className="flex flex-1 items-center justify-end gap-2">
+          <ThemeToggle />
+          <Link
+            to="/download"
+            className="rounded-lg border border-white/[0.12] bg-white/[0.06] px-4 py-2 text-sm font-medium text-[#c0caf5] transition-colors hover:bg-white/[0.1]"
+          >
+            Download
+          </Link>
+        </div>
+      </div>
     </header>
   );
 }

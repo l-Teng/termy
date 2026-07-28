@@ -7,10 +7,10 @@ import {
   marketingFontLinks,
   marketingLinkClass,
   marketingMono,
-  marketingPanelClass,
 } from '@/components/marketing-page-shell';
 import {
   assetArch,
+  assetLabel,
   fetchLatestGitHubRelease,
   fetchLatestNativeMacosRelease,
   formatBytes,
@@ -127,12 +127,9 @@ function DownloadPage() {
 
   return (
     <MarketingPageShell>
-      <main className="mx-auto flex w-full max-w-4xl flex-col px-6 pt-20 pb-24 md:pt-28">
-        <p className="text-sm text-[#7aa2f7]" style={{ fontFamily: marketingMono }}>
-          $ termy install
-        </p>
+      <main className="mx-auto flex w-full max-w-[40rem] flex-col px-6 pt-16 pb-20 md:pt-20">
         <h1
-          className="mt-3 text-4xl font-medium leading-none tracking-tight text-[#e8eeff] md:text-5xl"
+          className="text-4xl font-medium leading-none tracking-tight text-[#e8eeff] md:text-5xl"
           style={{ fontFamily: marketingMono }}
         >
           Download
@@ -196,9 +193,7 @@ function DownloadPage() {
           </p>
         )}
 
-        <div
-          className={`${marketingPanelClass} mt-12 divide-y divide-white/[0.07] px-5 sm:px-7`}
-        >
+        <div className="mt-12">
           <AssetPanel
             channel={channel}
             error={error}
@@ -432,22 +427,23 @@ function AssetPanel({
   }
 
   return (
-    <>
+    <div className="divide-y divide-white/[0.08]">
       {groups.map((group) => (
-        <section key={group.id} className="py-7">
+        <section key={group.id} className="py-7 first:pt-2 last:pb-2">
           <h2
-            className="text-base font-medium text-[#e8eeff]"
+            className="text-[11px] font-medium tracking-[0.12em] text-[#565f89] uppercase"
             style={{ fontFamily: marketingMono }}
           >
             {group.title}
           </h2>
-          <ul className="mt-3 divide-y divide-white/[0.06]">
+          <ul className="mt-3">
             {group.assets.map((asset) => {
               const arch = assetArch(asset.name);
               return (
                 <li key={asset.id}>
                   <a
                     href={asset.downloadUrl}
+                    title={asset.name}
                     onClick={(event) => {
                       if (
                         group.id === 'macos' &&
@@ -457,24 +453,21 @@ function AssetPanel({
                         onMacDownload(asset.name, asset.downloadUrl);
                       }
                     }}
-                    className="group -mx-2 flex items-center gap-3 rounded-lg px-2 py-3.5 transition-colors hover:bg-white/[0.04]"
+                    className="group flex items-center gap-4 py-3 transition-colors hover:text-white"
                   >
-                    <span
-                      className="min-w-0 flex-1 break-all text-sm text-[#c0caf5]"
-                      style={{ fontFamily: marketingMono }}
-                    >
-                      {asset.name}
+                    <span className="min-w-0 flex-1 text-[15px] font-medium text-[#c0caf5] transition-colors group-hover:text-white">
+                      {assetLabel(asset.name)}
                     </span>
                     {arch && (
                       <span
-                        className="hidden shrink-0 text-[10px] text-[#565f89] sm:inline"
+                        className="hidden w-12 shrink-0 text-xs text-[#565f89] sm:block"
                         style={{ fontFamily: marketingMono }}
                       >
                         {arch}
                       </span>
                     )}
                     <span
-                      className="shrink-0 text-xs text-[#787c99] tabular-nums"
+                      className="w-14 shrink-0 text-right text-xs text-[#787c99] tabular-nums"
                       style={{ fontFamily: marketingMono }}
                     >
                       {formatBytes(asset.size)}
@@ -486,6 +479,6 @@ function AssetPanel({
           </ul>
         </section>
       ))}
-    </>
+    </div>
   );
 }
