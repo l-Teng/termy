@@ -60,20 +60,14 @@ const clientLoader = browserCollections.docs.createClientLoader({
   ) {
     return (
       <DocsPage toc={toc} className="docs-theme-page">
-        <p
-          className="mb-0 text-sm text-[#7aa2f7]"
-          style={{ fontFamily: marketingMono }}
-        >
-          $ termy docs
-        </p>
         <DocsTitle
-          className="mt-1 text-3xl leading-tight tracking-tight md:text-4xl"
+          className="text-3xl leading-tight tracking-tight text-[#e8eeff] md:text-4xl"
           style={{ fontFamily: marketingMono }}
         >
           {frontmatter.title}
         </DocsTitle>
         {frontmatter.description ? (
-          <DocsDescription className="mb-0 text-balance text-fd-muted-foreground">
+          <DocsDescription className="mb-0 text-balance text-[#787c99]">
             {frontmatter.description}
           </DocsDescription>
         ) : null}

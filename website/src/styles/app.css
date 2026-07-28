@@ -241,6 +241,18 @@ html:not(.dark) .marketing-theme .prose :where(h1, h2, h3, h4, strong, code) {
     #0d0f17;
 }
 
+html:not(.dark) .docs-theme .text-\[\#7aa2f7\] {
+  color: #416fc7;
+}
+
+html:not(.dark) .docs-theme .text-\[\#e8eeff\] {
+  color: #18233d;
+}
+
+html:not(.dark) .docs-theme .text-\[\#787c99\] {
+  color: #66718d;
+}
+
 .docs-theme #nd-sidebar {
   background: color-mix(in srgb, var(--color-fd-card) 92%, transparent);
   border-color: var(--color-fd-border);
@@ -249,7 +261,26 @@ html:not(.dark) .marketing-theme .prose :where(h1, h2, h3, h4, strong, code) {
 }
 
 .dark .docs-theme #nd-sidebar {
+  background: rgba(22, 22, 30, 0.77);
   box-shadow: 18px 0 70px rgba(0, 0, 0, 0.2);
+}
+
+.docs-theme #nd-sidebar a,
+.docs-theme #nd-sidebar button {
+  font-family: system-ui, sans-serif;
+  border-radius: 0.5rem;
+}
+
+.docs-theme #nd-sidebar [data-active='true'],
+.docs-theme #nd-sidebar a[aria-current='page'],
+.docs-theme #nd-sidebar a[data-active='true'] {
+  background: rgba(122, 162, 247, 0.14);
+  color: #e8eeff;
+  font-weight: 500;
+}
+
+.dark .docs-theme #nd-sidebar a:not([data-active='true']):not([aria-current='page']) {
+  color: #a9b1d6;
 }
 
 .docs-theme #nd-subnav,
@@ -261,6 +292,12 @@ html:not(.dark) .marketing-theme .prose :where(h1, h2, h3, h4, strong, code) {
 
 .docs-theme #nd-toc {
   color: var(--color-fd-muted-foreground);
+  font-family: system-ui, sans-serif;
+}
+
+.docs-theme #nd-toc a[data-active='true'],
+.docs-theme #nd-toc [data-active='true'] {
+  color: #7aa2f7;
 }
 
 .docs-theme #nd-page {
@@ -273,13 +310,18 @@ html:not(.dark) .marketing-theme .prose :where(h1, h2, h3, h4, strong, code) {
 }
 
 .dark .docs-theme #nd-page {
+  background: rgba(22, 22, 30, 0.74);
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.3);
 }
 
 .docs-theme-page > h1 {
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   font-weight: 500;
-  color: var(--color-fd-foreground);
+  color: #e8eeff;
+}
+
+html:not(.dark) .docs-theme-page > h1 {
+  color: #18233d;
 }
 
 .docs-theme-body :is(h1, h2, h3, h4) {
@@ -289,9 +331,7 @@ html:not(.dark) .marketing-theme .prose :where(h1, h2, h3, h4, strong, code) {
 }
 
 .docs-theme-body :is(code, pre, kbd),
-.docs-theme-actions,
-.docs-theme #nd-sidebar button,
-.docs-theme #nd-toc {
+.docs-theme-actions {
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
