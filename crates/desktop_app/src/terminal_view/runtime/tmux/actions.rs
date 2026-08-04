@@ -572,8 +572,8 @@ mod tests {
         should_refresh_search_after_tmux_pane_focus,
     };
     use crate::terminal_view::{
-        PaneCachedElementIds, PaneContent, Terminal, TerminalOptions, TerminalPane,
-        TerminalPaneRenderCache, TerminalSize, TerminalTab,
+        PaneCachedElementIds, Terminal, TerminalOptions, TerminalPane, TerminalPaneRenderCache,
+        TerminalSize, TerminalTab,
     };
     use std::cell::{Cell, RefCell};
     use termy_terminal_ui::{CommandLifecycle, ProgressState};
@@ -596,10 +596,7 @@ mod tests {
             degraded: false,
             tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
-            content: PaneContent::Terminal(Terminal::new_tmux(
-                TerminalSize::default(),
-                TerminalOptions::default(),
-            )),
+            terminal: Terminal::new_tmux(TerminalSize::default(), TerminalOptions::default()),
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),
             last_alternate_screen: Cell::new(false),
             cached_element_ids: PaneCachedElementIds::new("%1"),
@@ -614,10 +611,7 @@ mod tests {
             degraded: false,
             tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
-            content: PaneContent::Terminal(Terminal::new_tmux(
-                TerminalSize::default(),
-                TerminalOptions::default(),
-            )),
+            terminal: Terminal::new_tmux(TerminalSize::default(), TerminalOptions::default()),
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),
             last_alternate_screen: Cell::new(false),
             cached_element_ids: PaneCachedElementIds::new("%2"),

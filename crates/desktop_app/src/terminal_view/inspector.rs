@@ -366,7 +366,7 @@ impl TerminalView {
         tab.panes
             .iter()
             .filter_map(|pane| {
-                let terminal = pane.maybe_terminal()?;
+                let terminal = pane.terminal();
                 let size = terminal.size();
                 let (display_offset, history_size) = terminal.scroll_state();
                 Some(InspectorPaneSnapshot {

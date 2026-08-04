@@ -72,6 +72,10 @@ pub(super) enum CommandPaletteItemKind {
         value: serde_json::Value,
         icon: PluginIcon,
     },
+    SshHost {
+        host_id: String,
+    },
+    ManageSshHosts,
     Theme(String),
     TmuxSessionAttachOrSwitch {
         session_name: String,
@@ -189,6 +193,37 @@ impl CommandPaletteItem {
             status_hint: Some("Copy".to_string()),
             tmux_status_hint: None,
             kind: CommandPaletteItemKind::AppInfoEntry { label, value },
+        }
+    }
+
+    pub(super) fn ssh_host(host: &termy_ssh_core::SshHost, enabled: bool) -> Self {
+        Self {
+            title: format!("Connect to {}", host.display_name),
+            keywords: format!(
+                "ssh connect remote host server {} {} {} {}",
+                host.display_name, host.hostname, host.username, host.port
+            ),
+            enabled,
+            status_hint: if enabled {
+                Some(format!("{}@{}", host.username, host.hostname))
+            } else {
+                Some("native runtime required".to_string())
+            },
+            tmux_status_hint: None,
+            kind: CommandPaletteItemKind::SshHost {
+                host_id: host.id.clone(),
+            },
+        }
+    }
+
+    pub(super) fn manage_ssh_hosts() -> Self {
+        Self {
+            title: "Manage SSH Hosts…".to_string(),
+            keywords: "ssh manage hosts add edit remove settings remote server".to_string(),
+            enabled: true,
+            status_hint: None,
+            tmux_status_hint: None,
+            kind: CommandPaletteItemKind::ManageSshHosts,
         }
     }
 
@@ -1116,36 +1151,6 @@ mod tests {
         assert_eq!(
             ranked_actions_with_recents(&items, "close", &recents).first(),
             Some(&CommandAction::CloseTab)
-        );
-    }
-
-    #[test]
-    fn unavailable_rows_sink_below_runnable_ones() {
-        let items = vec![
-            CommandPaletteItem::command_with_state(
-                "New Browser Tab",
-                "tab",
-                CommandAction::NewBrowserTab,
-                false,
-                Some("Disabled"),
-            ),
-            command_item("Rename Tab", "tab", CommandAction::RenameTab),
-            command_item("New Tab", "tab", CommandAction::NewTab),
-        ];
-
-        // "New Browser Tab" is the strongest match for "new" but is disabled,
-        // so it still lands last.
-        assert_eq!(
-            ranked_actions(&items, "new"),
-            vec![CommandAction::NewTab, CommandAction::NewBrowserTab]
-        );
-        assert_eq!(
-            ranked_actions(&items, "tab").last(),
-            Some(&CommandAction::NewBrowserTab)
-        );
-        assert_eq!(
-            ranked_actions(&items, "").last(),
-            Some(&CommandAction::NewBrowserTab)
         );
     }
 

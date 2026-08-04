@@ -129,6 +129,13 @@ fn removed_notification_settings_are_ignored_without_diagnostics() {
 }
 
 #[test]
+fn removed_browser_tabs_setting_is_ignored_without_diagnostics() {
+    let report = parse_report("browser_tabs_enabled = true\n");
+
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
 fn non_color_sections_do_not_mutate_root_keys() {
     let defaults = AppConfig::default();
     let report = parse_report(
@@ -377,7 +384,6 @@ fn bool_root_setting_value(config: &AppConfig, setting: RootSettingId) -> Option
         RootSettingId::AutoHideTabbar => Some(config.auto_hide_tabbar),
         RootSettingId::SidebarEnabled => Some(config.sidebar_enabled),
         RootSettingId::SidebarWidth => None,
-        RootSettingId::BrowserTabsEnabled => Some(config.browser_tabs_enabled),
         RootSettingId::ShowTermyInTitlebar => Some(config.show_termy_in_titlebar),
         RootSettingId::MacosOptionAsAlt => Some(config.macos_option_as_alt),
         RootSettingId::CursorBlink => Some(config.cursor_blink),

@@ -123,10 +123,10 @@ impl TerminalView {
 
     pub(in super::super) fn tab_is_busy(tab: &TerminalTab) -> bool {
         tab.running_process
-            || tab.panes.iter().any(|pane| {
-                pane.maybe_terminal()
-                    .is_some_and(Terminal::alternate_screen_mode)
-            })
+            || tab
+                .panes
+                .iter()
+                .any(|pane| pane.terminal().alternate_screen_mode())
     }
 
     fn tab_title_for_warning(

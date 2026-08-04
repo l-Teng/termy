@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn shorter_title_wins_equal_matches() {
         let short = score("New Tab", "new").expect("short match");
-        let long = score("New Browser Tab Somewhere", "new").expect("long match");
+        let long = score("New Terminal Tab Somewhere", "new").expect("long match");
         assert!(short > long, "short {short} should outrank long {long}");
     }
 

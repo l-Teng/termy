@@ -129,7 +129,6 @@ extension SettingsSectionModel {
         "onboarding_complete",
         "sidebar_enabled",
         "sidebar_width",
-        "browser_tabs_enabled",
         "native_tab_placement",
     ]
 }

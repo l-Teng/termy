@@ -1,5 +1,4 @@
 use super::*;
-use crate::terminal_view::browser::BrowserEditAction;
 use std::env;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,14 +187,12 @@ fn overlay_owns_terminal_input_state(
     search_open: bool,
     renaming_tab: Option<usize>,
     renaming_workspace: Option<usize>,
-    browser_url_editing: bool,
 ) -> bool {
     command_palette_open
         || plugin_ui_open
         || search_open
         || renaming_tab.is_some()
         || renaming_workspace.is_some()
-        || browser_url_editing
 }
 
 fn terminal_modifier_transition_events(
@@ -249,7 +246,6 @@ impl TerminalView {
             self.search_open,
             self.renaming_tab,
             self.renaming_workspace,
-            self.browser_url_editing(),
         )
     }
 
@@ -696,9 +692,6 @@ impl TerminalView {
                 if self.copy_active_inline_input_selection(cx) {
                     return true;
                 }
-                if self.forward_edit_action_to_active_browser(BrowserEditAction::Copy) {
-                    return true;
-                }
                 if self.clear_stale_kitty_image_state() {
                     cx.notify();
                 }
@@ -721,9 +714,6 @@ impl TerminalView {
             }
             CommandAction::Paste => {
                 if self.paste_clipboard_into_active_inline_input(cx) {
-                    return true;
-                }
-                if self.forward_edit_action_to_active_browser(BrowserEditAction::Paste) {
                     return true;
                 }
                 if let Some(item) = cx.read_from_clipboard() {
@@ -749,7 +739,7 @@ impl TerminalView {
                 if self.select_all_in_active_inline_input(cx) {
                     return true;
                 }
-                self.forward_edit_action_to_active_browser(BrowserEditAction::SelectAll)
+                false
             }
             _ => false,
         }
@@ -788,21 +778,6 @@ impl TerminalView {
             if self.search_open {
                 if self.handle_search_key_down(key, event.keystroke.modifiers.shift, cx) {
                     self.remember_consumed_key_release(key);
-                }
-                return;
-            }
-
-            if self.browser_url_editing() {
-                match key {
-                    "enter" => {
-                        self.commit_browser_url(cx);
-                        self.remember_consumed_key_release(key);
-                    }
-                    "escape" => {
-                        self.cancel_browser_url_edit(cx);
-                        self.remember_consumed_key_release(key);
-                    }
-                    _ => {}
                 }
                 return;
             }
@@ -1053,7 +1028,7 @@ mod tests {
     fn file_drop_rejects_missing_and_non_terminal_targets() {
         assert_eq!(classify_file_drop_target(None, Some("%left"), true), None);
         assert_eq!(
-            classify_file_drop_target(Some("%browser".to_string()), Some("%left"), false),
+            classify_file_drop_target(Some("%pane".to_string()), Some("%left"), false),
             None
         );
     }

@@ -59,10 +59,6 @@ impl TerminalView {
                     &mut fingerprint,
                     pane.pane_zoom_steps as u16 as u64,
                 );
-                Self::mix_terminal_resize_fingerprint(
-                    &mut fingerprint,
-                    u64::from(pane.is_browser()),
-                );
             }
         }
         fingerprint
@@ -141,9 +137,7 @@ impl TerminalView {
             return;
         };
         for pane in &tab.panes {
-            let Some(terminal) = pane.maybe_terminal() else {
-                continue;
-            };
+            let terminal = pane.terminal();
             let alternate_screen = terminal.alternate_screen_mode();
             let previous = pane.last_alternate_screen.replace(alternate_screen);
             if alternate_screen && !previous {
@@ -572,9 +566,7 @@ impl TerminalView {
                     cell_width: pane_cell_size.width.into(),
                     cell_height: pane_cell_size.height.into(),
                 };
-                let Some(terminal) = pane.maybe_terminal() else {
-                    continue;
-                };
+                let terminal = pane.terminal();
                 let current = terminal.size();
                 let needs_resize = current.cols != next_size.cols
                     || current.rows != next_size.rows
@@ -601,10 +593,11 @@ impl TerminalView {
             content_top_inset,
             backend_mode,
         );
-        let has_inactive_terminal = self.tabs.iter().enumerate().any(|(tab_index, tab)| {
-            tab_index != self.active_tab
-                && tab.panes.iter().any(|pane| pane.maybe_terminal().is_some())
-        });
+        let has_inactive_terminal = self
+            .tabs
+            .iter()
+            .enumerate()
+            .any(|(tab_index, tab)| tab_index != self.active_tab && !tab.panes.is_empty());
         if apply_deferred_inactive_resize {
             self.deferred_inactive_resize = if needs_throttle_follow_up {
                 DeferredTerminalResize::Ready {
@@ -648,7 +641,7 @@ mod tests {
             degraded: false,
             tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
-            content: PaneContent::Terminal(test_terminal()),
+            terminal: test_terminal(),
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),
             last_alternate_screen: Cell::new(false),
             cached_element_ids: PaneCachedElementIds::new(id),

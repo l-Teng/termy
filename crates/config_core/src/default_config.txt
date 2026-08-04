@@ -73,8 +73,6 @@ auto_hide_tabbar = true
 sidebar_enabled = false
 # Width of the left workspace sidebar in pixels
 sidebar_width = 200
-# Enable embedded browser tabs (macOS only)
-browser_tabs_enabled = false
 # Show or hide the termy branding in the titlebar
 show_termy_in_titlebar = true
 # Preset shell used for new sessions on Windows

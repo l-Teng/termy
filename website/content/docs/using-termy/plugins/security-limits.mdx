@@ -30,14 +30,18 @@ when the plugin is loaded.
 
 ## Workers, timeouts, and processes
 
-Termy keeps one external Bun host warm and isolates each plugin in its own Worker.
-Commands, events, and native views use execution timeouts; a crash or timeout is
-contained to the failed Worker.
+Termy uses one external Bun host and isolates each plugin in its own Worker.
+Lifecycle subscribers keep the host warm; eventless plugins restart it on demand
+after idle suspension. Commands, events, and native views use execution timeouts;
+a crash or timeout is contained to the failed Worker.
 
 Subprocesses started by plugin code can outlive that Worker, so the plugin must stop
 its own child processes when cancellation matters. If the shared host transport
 exits, Termy rebuilds it and reloads Workers on the next refresh without taking down
 the app.
+
+Persist durable state through `context.storage` or managed files. Module globals
+may reset when an eventless host sleeps.
 
 The default handler timeout is 10 seconds. A command or view may set `timeoutMs`
 from 100 to 30,000 milliseconds.

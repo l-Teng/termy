@@ -43,7 +43,6 @@ enum InlineInputTarget {
     RenameTab,
     RenameWorkspace,
     Search,
-    BrowserUrl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -982,8 +981,7 @@ impl TerminalView {
             InlineInputTarget::CommandPalette => InlineInputNotifyTarget::Overlay,
             InlineInputTarget::RenameTab
             | InlineInputTarget::RenameWorkspace
-            | InlineInputTarget::Search
-            | InlineInputTarget::BrowserUrl => InlineInputNotifyTarget::Parent,
+            | InlineInputTarget::Search => InlineInputNotifyTarget::Parent,
         }
     }
 
@@ -1011,8 +1009,6 @@ impl TerminalView {
             Some(InlineInputTarget::RenameTab)
         } else if self.renaming_workspace.is_some() {
             Some(InlineInputTarget::RenameWorkspace)
-        } else if self.browser_url_editing() {
-            Some(InlineInputTarget::BrowserUrl)
         } else {
             None
         }
@@ -1069,9 +1065,6 @@ impl TerminalView {
             InlineInputTarget::Search => Some(&self.search_input),
             InlineInputTarget::RenameTab => Some(&self.rename_input),
             InlineInputTarget::RenameWorkspace => Some(&self.workspace_rename_input),
-            InlineInputTarget::BrowserUrl => {
-                self.active_browser_state().map(|state| &state.url_input)
-            }
         }
     }
 
@@ -1081,15 +1074,6 @@ impl TerminalView {
             InlineInputTarget::Search => Some(&mut self.search_input),
             InlineInputTarget::RenameTab => Some(&mut self.rename_input),
             InlineInputTarget::RenameWorkspace => Some(&mut self.workspace_rename_input),
-            InlineInputTarget::BrowserUrl => self
-                .tabs
-                .get_mut(self.active_tab)
-                .and_then(|tab| {
-                    tab.active_pane_index()
-                        .and_then(|index| tab.panes.get_mut(index))
-                })
-                .and_then(TerminalPane::browser_state_mut)
-                .map(|state| &mut state.url_input),
         }
     }
 
@@ -1154,20 +1138,6 @@ impl TerminalView {
                 mutate(&mut self.workspace_rename_input);
                 self.enforce_workspace_rename_limit();
                 self.notify_for_inline_input_target(InlineInputTarget::RenameWorkspace, cx);
-            }
-            Some(InlineInputTarget::BrowserUrl) => {
-                if let Some(state) = self
-                    .tabs
-                    .get_mut(self.active_tab)
-                    .and_then(|tab| {
-                        tab.active_pane_index()
-                            .and_then(|index| tab.panes.get_mut(index))
-                    })
-                    .and_then(TerminalPane::browser_state_mut)
-                {
-                    mutate(&mut state.url_input);
-                }
-                self.notify_for_inline_input_target(InlineInputTarget::BrowserUrl, cx);
             }
             None => {}
         }
@@ -1405,7 +1375,7 @@ impl TerminalView {
     pub(super) fn ime_cursor_bounds(&self) -> Option<Bounds<Pixels>> {
         let geometry = self.terminal_viewport_geometry()?;
         let pane = self.active_pane_ref()?;
-        let terminal = pane.maybe_terminal()?;
+        let terminal = pane.terminal();
         let size = terminal.size();
         let cell_width: f32 = size.cell_width;
         let cell_height: f32 = size.cell_height;
@@ -1540,7 +1510,7 @@ impl EntityInputHandler for TerminalView {
         let cursor = self.ime_cursor_bounds()?;
         let cell_width: f32 = self
             .active_pane_ref()
-            .and_then(TerminalPane::maybe_terminal)
+            .map(TerminalPane::terminal)
             .map(|terminal| terminal.size().cell_width)
             .unwrap_or_default();
         Some(ime_candidate_bounds(

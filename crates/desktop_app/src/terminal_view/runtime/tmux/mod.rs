@@ -91,7 +91,7 @@ impl TerminalPane {
             degraded,
             tmux_mouse_mode: Some(state.mouse_mode),
             progress_state: ProgressState::default(),
-            content: PaneContent::Terminal(terminal),
+            terminal,
             render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
             last_alternate_screen: std::cell::Cell::new(false),
             cached_element_ids,

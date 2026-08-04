@@ -1,5 +1,5 @@
 use crate::config;
-use crate::settings_view::SettingsWindow;
+use crate::settings_view::{SettingsSection, SettingsWindow};
 use crate::terminal_view::TerminalView;
 use crate::terminal_view::initial_window_background_appearance;
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
@@ -115,10 +115,38 @@ pub(crate) fn open_new_tab_in_main_window(
 }
 
 pub(crate) fn open_settings_window(cx: &mut App) -> Result<(), String> {
+    open_settings_window_with_section(None, cx)
+}
+
+pub(crate) fn open_settings_section(section: SettingsSection, cx: &mut App) -> Result<(), String> {
+    open_settings_window_with_section(Some(section), cx)
+}
+
+fn open_settings_window_with_section(
+    section: Option<SettingsSection>,
+    cx: &mut App,
+) -> Result<(), String> {
     // Key-repeat and repeated action dispatch should raise the existing settings window,
     // not spawn duplicate windows.
-    if focus_existing_window::<SettingsWindow>(cx) {
+    if section.is_none() && focus_existing_window::<SettingsWindow>(cx) {
         return Ok(());
+    }
+    if let Some(settings_window) = cx
+        .windows()
+        .into_iter()
+        .find_map(|handle| handle.downcast::<SettingsWindow>())
+    {
+        let Some(section) = section else {
+            // A failed focus can happen during a re-entrant settings update. The
+            // existing window still owns the action, so do not create another.
+            return Ok(());
+        };
+        return settings_window
+            .update(cx, |view, window, cx| {
+                view.set_active_section(section, window, cx);
+                window.activate_window();
+            })
+            .map_err(|error| format!("Failed to focus settings window: {error}"));
     }
     // If a settings window still exists after a failed focus attempt (for example,
     // during a re-entrant update), do not open a duplicate.
@@ -164,7 +192,15 @@ pub(crate) fn open_settings_window(cx: &mut App) -> Result<(), String> {
             window_min_size: Some(minimum_window_size),
             ..Default::default()
         },
-        |window, cx| cx.new(|cx| SettingsWindow::new(window, cx)),
+        |window, cx| {
+            cx.new(|cx| {
+                let mut view = SettingsWindow::new(window, cx);
+                if let Some(section) = section {
+                    view.set_active_section(section, window, cx);
+                }
+                view
+            })
+        },
     )
     .map(|_| ())
     .map_err(|error| format!("Failed to open settings window: {error}"))

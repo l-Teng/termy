@@ -319,7 +319,7 @@ mod tests {
             degraded: false,
             tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
-            content: PaneContent::Terminal(test_terminal()),
+            terminal: test_terminal(),
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),
             last_alternate_screen: Cell::new(false),
             cached_element_ids: PaneCachedElementIds::new(id),

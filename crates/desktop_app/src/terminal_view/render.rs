@@ -2353,15 +2353,6 @@ impl TerminalView {
                 ));
         }
 
-        if self.browser_tabs_available() {
-            panel = panel.child(menu_row(
-                "new-tab-menu-browser",
-                "New Browser Tab",
-                cx,
-                |view, cx| view.add_browser_tab(cx),
-            ));
-        }
-
         if !self.saved_ssh_hosts.is_empty() {
             panel = panel
                 .child(div().mx(px(8.0)).my(px(4.0)).h(px(1.0)).bg(panel_border))
@@ -2903,6 +2894,16 @@ impl TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let frame_now = Instant::now();
+        if !self.launch_probe_scheduled
+            && self
+                .tabs
+                .get(self.active_tab)
+                .and_then(TerminalTab::active_terminal)
+                .is_some()
+        {
+            self.launch_probe_scheduled = true;
+            crate::launch_probe::record_after_next_frame(window);
+        }
         self.record_debug_overlay_frame();
         let view_build_started_at =
             (self.show_debug_overlay || self.inspector_collects_render_stats()).then(Instant::now);
@@ -2996,46 +2997,6 @@ impl Render for TerminalView {
                 .iter()
                 .zip(active_pane_font_sizes.iter().copied())
             {
-                if pane.is_browser() {
-                    let Some(pane_layout) =
-                        self.terminal_pane_layout(active_tab, pane, content_bounds)
-                    else {
-                        continue;
-                    };
-                    let pane_left = pane_layout.content_frame.origin_x;
-                    let pane_top = pane_layout.content_frame.origin_y;
-                    let pane_width = pane_layout.content_frame.width;
-                    let pane_height = pane_layout.content_frame.height;
-                    let pane_id = pane.id.clone();
-                    let chrome = self.render_browser_chrome(pane_id, &colors, &ui_font_family, cx);
-                    let fallback = pane.browser_state().and_then(|state| {
-                        state.webview_creation_error().map(|error| {
-                            self.render_browser_fallback(
-                                pane.id.clone(),
-                                error,
-                                &colors,
-                                &ui_font_family,
-                                cx,
-                            )
-                        })
-                    });
-                    pane_layers.push(
-                        div()
-                            .id(pane.cached_element_ids.pane.clone())
-                            .absolute()
-                            .left(px(pane_left))
-                            .top(px(pane_top))
-                            .w(px(pane_width))
-                            .h(px(pane_height))
-                            .cursor_text()
-                            .bg(terminal_surface_bg)
-                            .child(chrome)
-                            .children(fallback)
-                            .into_any_element(),
-                    );
-                    continue;
-                }
-
                 let terminal = pane.terminal();
                 let terminal_size = terminal.size();
                 let cols = terminal_size.cols as usize;
@@ -3552,8 +3513,6 @@ impl Render for TerminalView {
         let workspace_sidebar_edge_peek = self
             .workspace_sidebar_edge_peek_enabled()
             .then(|| self.render_workspace_sidebar_edge_peek_target(cx));
-        self.sync_browser_tab_titles();
-        self.sync_browser_webviews(window, cx);
         let hidden_titlebar_branding = Self::should_render_hidden_titlebar_branding(
             self.auto_hide_tabbar,
             self.tabs.len(),
@@ -4105,13 +4064,13 @@ mod tests {
             degraded: false,
             tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
-            content: PaneContent::Terminal(Terminal::new_tmux(
+            terminal: Terminal::new_tmux(
                 size,
                 TerminalOptions {
                     scrollback_history: 128,
                     ..TerminalOptions::default()
                 },
-            )),
+            ),
             render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
             last_alternate_screen: std::cell::Cell::new(false),
             cached_element_ids: PaneCachedElementIds::new(id),

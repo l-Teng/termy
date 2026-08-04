@@ -4,9 +4,9 @@ Termy plugins add commands to the command palette with a small `plugin.json` man
 
 ## Requirements
 
-Plugins run in a persistent external [Bun](https://bun.sh/) host. Install Bun before opening the command palette with plugins present, or set `TERMY_BUN_PATH` to the absolute path of a Bun executable.
+Plugins run in an external [Bun](https://bun.sh/) host. Install Bun before opening the command palette with plugins present, or set `TERMY_BUN_PATH` to the absolute path of a Bun executable.
 
-A command handler is normal Bun code, not a restricted expression language. It can use async functions, `fetch`, `Bun.*`, Node-compatible standard-library APIs, files, subprocesses, network requests, and local relative TypeScript imports. Returned actions are the typed bridge back into Termy's native command palette, terminal, clipboard, browser, and toast UI.
+A command handler is normal Bun code, not a restricted expression language. It can use async functions, `fetch`, `Bun.*`, Node-compatible standard-library APIs, files, subprocesses, network requests, and local relative TypeScript imports. Returned actions are the typed bridge back into Termy's native command palette, terminal, clipboard, system-browser, and toast UI.
 
 Termy resolves Bun in this order:
 
@@ -17,7 +17,7 @@ Termy resolves Bun in this order:
 5. `/opt/homebrew/bin/bun`
 6. `/usr/local/bin/bun`
 
-Termy starts one long-lived Bun host and gives each plugin its own Worker. This keeps command invocation warm while allowing a timed-out or failed plugin Worker to be stopped without taking down the terminal UI.
+Termy starts one Bun host and gives each plugin its own Worker. Plugins with lifecycle subscriptions keep that host warm so events stay ordered. Eventless plugins keep their validated catalog in Rust while Bun sleeps, then restart on demand for a command or native view. A timed-out or failed Worker can still be stopped without taking down the terminal UI. Persist state through `context.storage` or managed data files instead of relying on module globals to survive an idle restart.
 
 ## Plugin directory
 
@@ -180,9 +180,9 @@ When the command palette opens, Termy fingerprints each manifest and plugin sour
 plugins/.termy-cache/bundles/<plugin-id>/<content-hash>.mjs
 ```
 
-The bundle includes local relative TypeScript imports. An unchanged plugin reuses its cached bundle; a changed manifest or source tree produces a new hash and bundle, then Termy imports it in that plugin's warm Worker.
+The bundle includes local relative TypeScript imports. An unchanged plugin reuses its cached bundle; a changed manifest or source tree produces a new hash and bundle, then Termy imports it when that plugin's Worker starts.
 
-Termy deliberately does not use `bun build --compile`. A compiled plugin executable embeds the Bun runtime in every plugin artifact, multiplying disk and startup overhead. Cached `.mjs` bundles share the one persistent Bun host while still avoiding repeated transpilation.
+Termy deliberately does not use `bun build --compile`. A compiled plugin executable embeds the Bun runtime in every plugin artifact, multiplying disk and startup overhead. Cached `.mjs` bundles share one on-demand Bun host while still avoiding repeated transpilation.
 
 ## Inputs
 
@@ -296,7 +296,7 @@ type PluginContext = {
   };
   readonly activePane?: {
     readonly index: number;
-    readonly kind: "terminal" | "browser";
+    readonly kind: "terminal";
   };
   readonly platform: "macos" | "linux" | "windows";
   readonly appVersion: string;

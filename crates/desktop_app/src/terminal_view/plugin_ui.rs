@@ -1489,7 +1489,6 @@ impl TerminalView {
         self.close_search(cx);
         self.cancel_rename_tab(cx);
         self.cancel_rename_workspace(cx);
-        self.cancel_browser_url_edit(cx);
         let _ = self.close_terminal_context_menu(cx);
         let _ = self.close_tab_context_menu(cx);
         let _ = self.close_new_tab_menu(cx);
@@ -1551,6 +1550,7 @@ impl TerminalView {
             return false;
         }
         self.plugin_ui = None;
+        self.plugin_runtime.suspend_if_eventless();
         cx.notify();
         self.notify_overlay(cx);
         true
@@ -1560,6 +1560,7 @@ impl TerminalView {
         if self.plugin_ui.take().is_none() {
             return;
         }
+        self.plugin_runtime.suspend_if_eventless();
         self.focus_handle.focus(window, cx);
         cx.notify();
         self.notify_overlay(cx);

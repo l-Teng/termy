@@ -115,7 +115,9 @@ impl AssetSource for EmbeddedAssets {
                 }
             }
         }
-        Ok(None)
+        // App icons win; the design system supplies whatever it ships that the
+        // app does not already embed.
+        Ok(termy_ui::icon_bytes(trimmed).map(Cow::Borrowed))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {

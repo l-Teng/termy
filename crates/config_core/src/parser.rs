@@ -88,7 +88,7 @@ impl AppConfig {
 
             if in_colors_section
                 && root_setting_from_key(key).is_none()
-                && !is_removed_notification_key(key)
+                && !is_ignored_removed_root_key(key)
             {
                 match apply_color_entry(&mut config.colors, key, value) {
                     Ok(()) => {}
@@ -185,7 +185,7 @@ impl AppConfig {
                 Ok(None) => {}
             }
 
-            if is_removed_notification_key(key) {
+            if is_ignored_removed_root_key(key) {
                 continue;
             }
 
@@ -581,13 +581,6 @@ impl AppConfig {
                         config.sidebar_width = parsed.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
                     }
                 }
-                RootSettingId::BrowserTabsEnabled => {
-                    if let Some(parsed) =
-                        parse_bool_field(&mut diagnostics, line_number, key, value)
-                    {
-                        config.browser_tabs_enabled = parsed;
-                    }
-                }
                 RootSettingId::ShowTermyInTitlebar => {
                     if let Some(parsed) =
                         parse_bool_field(&mut diagnostics, line_number, key, value)
@@ -962,10 +955,13 @@ pub fn parse_theme_id(value: &str) -> Option<ThemeId> {
     }
 }
 
-fn is_removed_notification_key(key: &str) -> bool {
+fn is_ignored_removed_root_key(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
-        "notifications_enabled" | "notification_min_duration" | "notify_only_unfocused"
+        "browser_tabs_enabled"
+            | "notifications_enabled"
+            | "notification_min_duration"
+            | "notify_only_unfocused"
     )
 }
 

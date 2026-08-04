@@ -202,7 +202,6 @@ Related UI option:
 ## Configurable Actions
 
 - `new_tab`
-- `new_browser_tab`
 - `close_tab`
 - `close_pane_or_tab`
 - `move_tab_left`

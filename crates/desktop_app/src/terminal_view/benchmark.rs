@@ -168,6 +168,10 @@ impl BenchmarkSession {
         });
     }
 
+    pub fn command(&self) -> &str {
+        &self.config.command
+    }
+
     pub fn record_view_wakeup(&mut self) {
         self.counters.view_wake_signals = self.counters.view_wake_signals.saturating_add(1);
     }

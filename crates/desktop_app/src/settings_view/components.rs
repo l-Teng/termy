@@ -41,90 +41,75 @@ impl SettingsWindow {
         // out of sight until they apply.
         let can_reset = self.section_has_non_default_values(section);
 
-        div()
-            .flex()
-            .items_end()
-            .justify_between()
-            .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_size(px(SECTION_TITLE_SIZE))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(text_primary)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(SECTION_SUBTITLE_SIZE))
-                            .text_color(text_muted)
-                            .child(subtitle),
-                    ),
-            )
-            .children(can_reset.then(|| {
-                let is_section_hovered = self.hovered_reset_section == Some(section);
-                let tooltip_bg = self.bg_elevated();
-                let tooltip_border = self.border_color();
-                let tooltip_fg = self.text_primary();
-                div()
-                    .id(SharedString::from(format!("reset-section-{section:?}")))
-                    .relative()
-                    .px_2()
-                    .py(px(5.0))
-                    .rounded(px(SETTINGS_BUTTON_RADIUS))
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(text_muted)
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg).text_color(text_primary))
-                    .on_hover(cx.listener(move |view, hovering: &bool, _window, cx| {
-                        if *hovering {
-                            view.hovered_reset_section = Some(section);
-                        } else if view.hovered_reset_section == Some(section) {
-                            view.hovered_reset_section = None;
-                        }
-                        cx.notify();
-                    }))
-                    .child("Reset section")
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.confirm_reset_section_to_defaults(section, cx);
-                    }))
-                    .when(is_section_hovered, move |s| {
-                        s.child(
-                            deferred(
-                                div()
-                                    .absolute()
-                                    .top_full()
-                                    .right_0()
-                                    .mt(px(6.0))
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .rounded(px(6.0))
-                                    .bg(tooltip_bg)
-                                    .border_1()
-                                    .border_color(tooltip_border)
-                                    .text_size(px(11.0))
-                                    .text_color(tooltip_fg)
-                                    .whitespace_nowrap()
-                                    .child("Reset all settings in this section"),
-                            )
-                            .with_priority(20),
+        let reset_button = can_reset.then(|| {
+            let is_section_hovered = self.hovered_reset_section == Some(section);
+            let tooltip_bg = self.bg_elevated();
+            let tooltip_border = self.border_color();
+            let tooltip_fg = self.text_primary();
+            div()
+                .id(SharedString::from(format!("reset-section-{section:?}")))
+                .relative()
+                .px_2()
+                .py(px(5.0))
+                .rounded(px(SETTINGS_BUTTON_RADIUS))
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(text_muted)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover_bg).text_color(text_primary))
+                .on_hover(cx.listener(move |view, hovering: &bool, _window, cx| {
+                    if *hovering {
+                        view.hovered_reset_section = Some(section);
+                    } else if view.hovered_reset_section == Some(section) {
+                        view.hovered_reset_section = None;
+                    }
+                    cx.notify();
+                }))
+                .child("Reset section")
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.confirm_reset_section_to_defaults(section, cx);
+                }))
+                .when(is_section_hovered, move |s| {
+                    s.child(
+                        deferred(
+                            div()
+                                .absolute()
+                                .top_full()
+                                .right_0()
+                                .mt(px(6.0))
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(px(6.0))
+                                .bg(tooltip_bg)
+                                .border_1()
+                                .border_color(tooltip_border)
+                                .text_size(px(11.0))
+                                .text_color(tooltip_fg)
+                                .whitespace_nowrap()
+                                .child("Reset all settings in this section"),
                         )
-                    })
-            }))
+                        .with_priority(20),
+                    )
+                })
+        });
+
+        // Title and subtitle come from the design system; the reset affordance
+        // keeps its hover, tooltip, and confirmation flow here because that is
+        // app behavior, not presentation.
+        let mut header = termy_ui::SectionHeader::new(title).subtitle(subtitle);
+        if let Some(reset_button) = reset_button {
+            header = header.action(reset_button);
+        }
+        header
     }
 
+    /// Group caption for the few surfaces that build their own card instead of
+    /// going through `render_settings_group`. Styled to match the label
+    /// `termy_ui::SettingsGroup` draws, so both kinds of group read the same.
     pub(super) fn render_group_header(&self, title: impl Into<SharedString>) -> impl IntoElement {
-        // Quiet, slightly inset caption above each card — mirrors the muted
-        // sentence-case group labels in native macOS grouped settings.
         div()
-            .pl(px(2.0))
             .text_size(px(GROUP_TITLE_SIZE))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(self.text_muted())
             .child(title.into())
     }

@@ -55,7 +55,6 @@ use termy_toast::ToastManager;
 
 mod appearance;
 mod benchmark;
-mod browser;
 mod command_palette;
 mod constants;
 mod inline_input;
@@ -882,7 +881,7 @@ struct TerminalPane {
     pane_zoom_steps: i16,
     degraded: bool,
     tmux_mouse_mode: Option<TmuxPaneMouseMode>,
-    content: PaneContent,
+    terminal: Terminal,
     // Progress reported by this pane's shell via OSC 9;4; the tab strip shows
     // the per-tab aggregate (TerminalTab::aggregate_progress_state).
     progress_state: ProgressState,
@@ -892,12 +891,6 @@ struct TerminalPane {
     last_alternate_screen: Cell<bool>,
     /// Pre-computed element IDs to avoid per-frame `format!()` allocations.
     cached_element_ids: PaneCachedElementIds,
-}
-
-#[allow(clippy::large_enum_variant)]
-enum PaneContent {
-    Terminal(Terminal),
-    Browser(Box<browser::BrowserTabState>),
 }
 
 /// Pre-computed GPUI element IDs for a terminal pane, avoiding `format!()`
@@ -944,67 +937,19 @@ impl TerminalPane {
             degraded: false,
             tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
-            content: PaneContent::Terminal(terminal),
+            terminal,
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),
             last_alternate_screen: Cell::new(false),
             cached_element_ids,
-        }
-    }
-
-    fn new_browser(id: String, left: u16, top: u16, width: u16, height: u16, url: &str) -> Self {
-        let cached_element_ids = PaneCachedElementIds::new(&id);
-        Self {
-            id,
-            left,
-            top,
-            width,
-            height,
-            pane_zoom_steps: 0,
-            degraded: false,
-            tmux_mouse_mode: None,
-            content: PaneContent::Browser(Box::new(browser::BrowserTabState::new(url))),
-            progress_state: ProgressState::default(),
-            render_cache: RefCell::new(TerminalPaneRenderCache::default()),
-            last_alternate_screen: Cell::new(false),
-            cached_element_ids,
-        }
-    }
-
-    fn maybe_terminal(&self) -> Option<&Terminal> {
-        match &self.content {
-            PaneContent::Terminal(terminal) => Some(terminal),
-            PaneContent::Browser(_) => None,
-        }
-    }
-
-    fn maybe_terminal_mut(&mut self) -> Option<&mut Terminal> {
-        match &mut self.content {
-            PaneContent::Terminal(terminal) => Some(terminal),
-            PaneContent::Browser(_) => None,
         }
     }
 
     fn terminal(&self) -> &Terminal {
-        self.maybe_terminal()
-            .expect("terminal-only path received a browser pane")
+        &self.terminal
     }
 
-    fn browser_state(&self) -> Option<&browser::BrowserTabState> {
-        match &self.content {
-            PaneContent::Browser(state) => Some(state),
-            PaneContent::Terminal(_) => None,
-        }
-    }
-
-    fn browser_state_mut(&mut self) -> Option<&mut browser::BrowserTabState> {
-        match &mut self.content {
-            PaneContent::Browser(state) => Some(state),
-            PaneContent::Terminal(_) => None,
-        }
-    }
-
-    fn is_browser(&self) -> bool {
-        matches!(self.content, PaneContent::Browser(_))
+    fn terminal_mut(&mut self) -> &mut Terminal {
+        &mut self.terminal
     }
 }
 
@@ -1106,7 +1051,7 @@ impl TerminalTab {
     fn active_terminal(&self) -> Option<&Terminal> {
         self.active_pane_index()
             .and_then(|index| self.panes.get(index))
-            .and_then(TerminalPane::maybe_terminal)
+            .map(TerminalPane::terminal)
     }
 
     fn active_pane_id(&self) -> Option<&str> {
@@ -1153,7 +1098,6 @@ pub struct TerminalView {
     workspace_drag: Option<workspaces::WorkspaceDragState>,
     renaming_workspace: Option<usize>,
     workspace_rename_input: InlineInputState,
-    browser_tabs_enabled: bool,
     native_pane_zoom_snapshots: HashMap<TabId, NativePaneZoomSnapshot>,
     native_pane_layout_trees: HashMap<TabId, NativePaneLayoutTree>,
     next_tab_id: TabId,
@@ -1270,6 +1214,7 @@ pub struct TerminalView {
     plugin_lifecycle: PluginLifecycleState,
     plugin_refresh_in_flight: bool,
     plugin_last_error: Option<String>,
+    launch_probe_scheduled: bool,
     command_palette: CommandPaletteState,
     simple_mode: bool,
     last_viewport_size_px: Option<(i32, i32)>,
@@ -2463,7 +2408,7 @@ impl TerminalView {
             .iter()
             .flat_map(|tab| tab.panes.iter())
             .find(|pane| pane.id == pane_id)
-            .and_then(TerminalPane::maybe_terminal)
+            .map(TerminalPane::terminal)
     }
 
     fn is_active_pane_id(&self, pane_id: &str) -> bool {
@@ -3147,26 +3092,17 @@ impl TerminalView {
             f32::from(pane.width) * layout_cell_width,
             f32::from(pane.height) * layout_cell_height,
         )?;
-        let (content_width, content_height) = if let Some(terminal) = pane.maybe_terminal() {
-            let terminal_size = terminal.size();
-            if terminal_size.cols == 0 || terminal_size.rows == 0 {
-                return None;
-            }
-            let cell_width: f32 = terminal_size.cell_width;
-            let cell_height: f32 = terminal_size.cell_height;
-            if cell_width <= f32::EPSILON || cell_height <= f32::EPSILON {
-                return None;
-            }
-            (
-                f32::from(terminal_size.cols) * cell_width,
-                f32::from(terminal_size.rows) * cell_height,
-            )
-        } else {
-            (
-                (frame.width - (content_padding_x * 2.0)).max(0.0),
-                (frame.height - (content_padding_y * 2.0)).max(0.0),
-            )
-        };
+        let terminal_size = pane.terminal().size();
+        if terminal_size.cols == 0 || terminal_size.rows == 0 {
+            return None;
+        }
+        let cell_width: f32 = terminal_size.cell_width;
+        let cell_height: f32 = terminal_size.cell_height;
+        if cell_width <= f32::EPSILON || cell_height <= f32::EPSILON {
+            return None;
+        }
+        let content_width = f32::from(terminal_size.cols) * cell_width;
+        let content_height = f32::from(terminal_size.rows) * cell_height;
         let content_frame = TerminalContentRect::new(
             frame.origin_x + content_padding_x,
             frame.origin_y + content_padding_y,
@@ -3235,7 +3171,7 @@ impl TerminalView {
         let tab = self.active_tab_ref()?;
         let pane_index = tab.active_pane_index()?;
         let pane = tab.panes.get(pane_index)?;
-        pane.maybe_terminal()?;
+        pane.terminal();
         self.terminal_pane_layout(tab, pane, content_bounds)
     }
 
@@ -3243,7 +3179,7 @@ impl TerminalView {
         let tab = self.active_tab_ref()?;
         let pane_index = tab.active_pane_index()?;
         let pane = tab.panes.get(pane_index)?;
-        let terminal = pane.maybe_terminal()?;
+        let terminal = pane.terminal();
         let layout_cell_size = self.layout_cell_size();
         let layout_cell_width: f32 = layout_cell_size.width.into();
         let layout_cell_height: f32 = layout_cell_size.height.into();
@@ -3598,8 +3534,8 @@ impl TerminalView {
                 std::process::exit(1);
             }
         };
-        if benchmark_config.is_some() && RuntimeKind::from_app_config(&config) == RuntimeKind::Tmux
-        {
+        let configured_runtime_kind = RuntimeKind::from_app_config(&config);
+        if benchmark_config.is_some() && configured_runtime_kind == RuntimeKind::Tmux {
             eprintln!("Termy startup blocked: benchmark mode requires native runtime");
             std::process::exit(1);
         }
@@ -3617,19 +3553,36 @@ impl TerminalView {
             Self::predicted_prompt_seed_title(&tab_title, predicted_prompt_cwd.as_deref());
         let initial_cols = TerminalSize::default().cols;
         let initial_rows = TerminalSize::default().rows;
-        let (runtime, initial_snapshot, native_terminal) = Self::runtime_startup_from_app_config(
-            &config,
-            &event_wakeup_tx,
-            &native_terminal_wakeup_router,
-            configured_working_dir.as_deref(),
-            &tab_shell_integration,
-            &terminal_runtime,
-            benchmark_config
-                .as_ref()
-                .map(|config| config.command.as_str()),
-            initial_cols,
-            initial_rows,
-        );
+        let startup_native_session = if configured_runtime_kind == RuntimeKind::Native {
+            match Self::load_startup_native_session(&config) {
+                Ok(session) => session,
+                Err(error) => {
+                    log::error!("Failed to preload native tab workspace: {error}");
+                    termy_toast::error("Failed to load saved native tabs");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let defer_native_terminal = startup_native_session
+            .as_ref()
+            .is_some_and(|startup| startup.session.is_some());
+        let (runtime, initial_snapshot, mut native_terminal) =
+            Self::runtime_startup_from_app_config(
+                &config,
+                &event_wakeup_tx,
+                &native_terminal_wakeup_router,
+                configured_working_dir.as_deref(),
+                &tab_shell_integration,
+                &terminal_runtime,
+                benchmark_config
+                    .as_ref()
+                    .map(|config| config.command.as_str()),
+                initial_cols,
+                initial_rows,
+                defer_native_terminal,
+            );
         let resolved_runtime_kind = runtime.kind();
 
         let plugin_runtime = PluginRuntime::new(config_path.as_deref());
@@ -3646,7 +3599,6 @@ impl TerminalView {
             workspace_drag: None,
             renaming_workspace: None,
             workspace_rename_input: InlineInputState::new(String::new()),
-            browser_tabs_enabled: config.browser_tabs_enabled,
             native_pane_zoom_snapshots: HashMap::new(),
             native_pane_layout_trees: HashMap::new(),
             next_tab_id: 1,
@@ -3759,6 +3711,7 @@ impl TerminalView {
             plugin_lifecycle: PluginLifecycleState::new(window_handle),
             plugin_refresh_in_flight: false,
             plugin_last_error: None,
+            launch_probe_scheduled: false,
             command_palette: CommandPaletteState::new(config.command_palette_show_keybinds),
             simple_mode: config.simple_mode,
             last_viewport_size_px: None,
@@ -3820,17 +3773,42 @@ impl TerminalView {
             termy_toast::warning(TMUX_UNSUPPORTED_WINDOWS_TOAST);
         }
         let restored_native_workspace = if resolved_runtime_kind == RuntimeKind::Native {
-            match view.restore_persisted_native_workspace(cx) {
-                Ok(restored) => restored,
-                Err(error) => {
-                    log::error!("Failed to restore native tab workspace: {error}");
-                    termy_toast::error("Failed to restore saved native tabs");
-                    false
+            match startup_native_session {
+                Some(startup) => {
+                    let _ = view.workspace_store.set(Some(startup.store));
+                    match startup.session {
+                        Some(session) => match view.restore_stored_session(session, cx) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                log::error!("Failed to restore native tab workspace: {error}");
+                                termy_toast::error("Failed to restore saved native tabs");
+                                false
+                            }
+                        },
+                        None => false,
+                    }
                 }
+                None => false,
             }
         } else {
             false
         };
+        if resolved_runtime_kind == RuntimeKind::Native
+            && !restored_native_workspace
+            && native_terminal.is_none()
+        {
+            native_terminal = Some(Self::start_native_terminal(
+                &view.native_terminal_wakeup_router,
+                view.configured_working_dir.as_deref(),
+                &view.tab_shell_integration,
+                &view.terminal_runtime,
+                view.benchmark_session
+                    .as_ref()
+                    .map(|session| session.command()),
+                initial_cols,
+                initial_rows,
+            ));
+        }
 
         match initial_snapshot {
             Some(initial_snapshot) => view.apply_tmux_snapshot(initial_snapshot),
@@ -3944,7 +3922,7 @@ impl TerminalView {
         }
 
         #[cfg(not(test))]
-        view.schedule_plugin_refresh(cx);
+        view.schedule_initial_plugin_refresh(cx);
         view.sync_native_terminal_wakeup_interest();
         view.appearance_subscription =
             Some(cx.observe_window_appearance(window, |view, window, cx| {
@@ -3999,9 +3977,7 @@ impl TerminalView {
         self.clear_pane_render_caches();
         for tab in &self.tabs {
             for pane in &tab.panes {
-                if let Some(terminal) = pane.maybe_terminal() {
-                    terminal.set_query_colors(query_colors);
-                }
+                pane.terminal().set_query_colors(query_colors);
             }
         }
         cx.notify();
@@ -4063,7 +4039,6 @@ impl TerminalView {
         let workspace_sidebar_changed =
             workspace_sidebar_enabled_changed || workspace_sidebar_width_changed;
         self.workspace_sidebar_enabled = config.sidebar_enabled;
-        self.browser_tabs_enabled = config.browser_tabs_enabled;
         if !self.workspace_sidebar_enabled {
             self.workspace_sidebar_collapsed = false;
             self.workspace_sidebar_peek_visible = false;
@@ -4218,10 +4193,9 @@ impl TerminalView {
                 inactive_options.unwrap_or(active_options)
             };
             for pane in &tab.panes {
-                if let Some(terminal) = pane.maybe_terminal() {
-                    terminal.set_term_options(options);
-                    terminal.set_query_colors(self.terminal_runtime.query_colors);
-                }
+                pane.terminal().set_term_options(options);
+                pane.terminal()
+                    .set_query_colors(self.terminal_runtime.query_colors);
             }
         }
 
@@ -4444,9 +4418,7 @@ impl TerminalView {
                 if ready_terminal_ids.is_empty() {
                     break 'ready_tabs;
                 }
-                let Some(terminal) = self.tabs[tab_index].panes[pane_index].maybe_terminal() else {
-                    continue;
-                };
+                let terminal = self.tabs[tab_index].panes[pane_index].terminal();
                 let Some(wakeup_id) = terminal.wakeup_id() else {
                     continue;
                 };

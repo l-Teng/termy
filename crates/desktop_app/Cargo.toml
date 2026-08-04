@@ -1,6 +1,6 @@
 [package]
 name = "termy"
-version = "0.2.31"
+version = "0.2.32"
 edition = "2024"
 
 [package.metadata.bundle]
@@ -54,6 +54,7 @@ termy_auto_update = { path = "../auto_update" }
 termy_auto_update_ui = { path = "../auto_update_ui" }
 termy_themes = { path = "../themes" }
 termy_terminal_ui = { path = "../terminal_ui" }
+termy_ui = { path = "../ui" }
 termy_toast = { path = "../toast_sdk" }
 termy_search = { path = "../search" }
 termy_ssh_core = { path = "../ssh_core" }
@@ -71,10 +72,9 @@ libsqlite3-sys = "0.30.1"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Pin core-text to 21.0.0 to avoid core-graphics version conflict on macOS.
 core-text = "=21.0.0"
-cocoa = "0.26"
+cocoa = "=0.26.0"
 objc = "0.2"
 raw-window-handle = "0.6"
-wry = "0.53"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"

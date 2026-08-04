@@ -393,22 +393,6 @@ define_commands!(
             MenuActionRole::Normal
         ))
     ),
-    (
-        NewBrowserTab,
-        TERMINAL_CONTEXT,
-        Some(palette(
-            "New Browser Tab",
-            "create browser web tab",
-            CommandPaletteVisibility::Always
-        )),
-        Some(menu(
-            MenuRoot::File,
-            0,
-            "New Browser Tab",
-            MenuVisibility::Always,
-            MenuActionRole::Normal
-        ))
-    ),
     (CloseTab, TERMINAL_CONTEXT, None, None),
     (
         ClosePaneOrTab,
@@ -1294,9 +1278,9 @@ mod tests {
             .map(|entry| entry.section)
             .collect::<Vec<_>>();
         #[cfg(not(target_os = "windows"))]
-        assert_eq!(sections, [0, 0, 0, 1, 1, 1, 1, 1]);
+        assert_eq!(sections, [0, 0, 1, 1, 1, 1, 1]);
         #[cfg(target_os = "windows")]
-        assert_eq!(sections, [0, 0, 0, 1]);
+        assert_eq!(sections, [0, 0, 1]);
     }
 
     #[test]
@@ -1438,8 +1422,6 @@ mod tests {
         let caps = CommandCapabilities {
             tmux_runtime_active: false,
             install_cli_available: true,
-            browser_tabs_enabled: true,
-            browser_tabs_supported: true,
         };
         let availability = CommandAction::ResizePaneLeft.availability(caps);
         assert!(availability.enabled);

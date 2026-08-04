@@ -50,7 +50,8 @@ plugin loads. Interactive CLI installs require confirmation; automation uses
 
 ## Worker and timeout model
 
-- Termy keeps one external Bun host warm.
+- Termy uses one external Bun host. Lifecycle subscribers keep it warm; eventless
+  plugins restart it on demand after idle suspension.
 - Each plugin runs in its own Worker.
 - A crash or timeout is contained to the failed Worker.
 - If the host transport exits, Termy rebuilds it and reloads Workers at the next
@@ -61,6 +62,8 @@ plugin loads. Interactive CLI installs require confirmation; automation uses
 - A command or view may set `timeoutMs` from 100 through 30,000 milliseconds.
 - A child process may outlive its Worker. Stop it explicitly when cancellation
   matters.
+- Persist durable state through `context.storage` or managed files; module globals
+  may be reset when an eventless host sleeps.
 
 Do not increase a timeout to hide slow architecture. Move expensive work out of hot
 render/event paths, cache stable results, bound I/O, and give the user progress or a

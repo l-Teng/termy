@@ -154,6 +154,52 @@ impl SettingsWindow {
         c
     }
 
+    /// Projects this window's live chrome colors onto the shared design-system
+    /// tokens.
+    ///
+    /// Every value comes from the helpers above rather than from
+    /// `termy_ui::Tokens::from_palette`, because those helpers already fold in
+    /// background opacity, the opacity preview, and the chrome-contrast profile.
+    /// Deriving tokens from the raw palette instead would paint opaque surfaces
+    /// and quietly drop the window's translucency.
+    pub(super) fn ui_tokens(&self) -> termy_ui::Tokens {
+        termy_ui::Tokens {
+            bg_window: self.bg_primary(),
+            bg_panel: self.bg_secondary(),
+            // Cards in this window ride the elevated surface, not `bg_card()`,
+            // which is the panel fill behind them.
+            bg_card: self.bg_elevated(),
+            bg_input: self.bg_input(),
+            bg_hover: self.bg_hover(),
+            bg_overlay: self.bg_elevated(),
+
+            border: self.border_color(),
+            card_border: self.card_border_color(),
+            row_separator: self.row_separator_color(),
+
+            text_primary: self.text_primary(),
+            text_secondary: self.text_secondary(),
+            text_muted: self.text_muted(),
+            text_on_accent: self.contrasting_text_for_fill(self.accent(), self.bg_card()),
+
+            accent: self.accent(),
+            accent_soft: self.sidebar_selection_bg(),
+
+            success: self.colors.ansi[2],
+            warning: self.colors.ansi[3],
+            danger: self.colors.ansi[1],
+        }
+    }
+
+    /// Publishes the tokens the kit's components read, skipping the write when
+    /// nothing changed so a repaint does not churn the global.
+    pub(super) fn sync_ui_tokens(&self, cx: &mut Context<Self>) {
+        let tokens = self.ui_tokens();
+        if cx.try_global::<termy_ui::Tokens>() != Some(&tokens) {
+            termy_ui::set_tokens(tokens, cx);
+        }
+    }
+
     pub(super) fn settings_scrollbar_style(&self) -> ScrollbarPaintStyle {
         let mut track = self.colors.foreground;
         track.a = self.scaled_chrome_neutral_alpha(SETTINGS_SCROLLBAR_TRACK_ALPHA);

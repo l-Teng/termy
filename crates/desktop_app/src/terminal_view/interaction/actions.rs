@@ -47,8 +47,6 @@ impl TerminalView {
         CommandCapabilities {
             tmux_runtime_active: self.runtime_uses_tmux(),
             install_cli_available: self.install_cli_available(),
-            browser_tabs_enabled: self.browser_tabs_enabled,
-            browser_tabs_supported: Self::browser_tabs_supported(),
         }
     }
 
@@ -102,21 +100,6 @@ impl TerminalView {
                 }
                 Some(CommandUnavailableReason::InstallCliAlreadyInstalled) => {
                     termy_toast::info("CLI is already installed");
-                    self.notify_overlay(cx);
-                    return;
-                }
-                Some(CommandUnavailableReason::BrowserTabsDisabled) => {
-                    termy_toast::info("Enable Browser Tabs in Settings to use this command");
-                    self.notify_overlay(cx);
-                    return;
-                }
-                Some(CommandUnavailableReason::BrowserTabsUnsupported) => {
-                    termy_toast::info(Self::browser_tabs_unsupported_message());
-                    self.notify_overlay(cx);
-                    return;
-                }
-                Some(CommandUnavailableReason::BrowserTabsUnavailableInTmux) => {
-                    termy_toast::info("Browser tabs are not available with the tmux runtime");
                     self.notify_overlay(cx);
                     return;
                 }
@@ -199,7 +182,6 @@ impl TerminalView {
             }
             CommandAction::RenameTab
             | CommandAction::NewTab
-            | CommandAction::NewBrowserTab
             | CommandAction::CloseTab
             | CommandAction::ClosePaneOrTab
             | CommandAction::MoveTabLeft

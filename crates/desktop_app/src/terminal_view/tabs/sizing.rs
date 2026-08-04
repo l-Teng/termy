@@ -41,9 +41,7 @@ impl TerminalView {
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let tab_visible = tab_index == self.active_tab;
             for pane in &tab.panes {
-                if let Some(terminal) = pane.maybe_terminal() {
-                    terminal.set_wakeup_enabled(tab_visible);
-                }
+                pane.terminal().set_wakeup_enabled(tab_visible);
             }
         }
 
@@ -54,18 +52,14 @@ impl TerminalView {
         for workspace in &self.workspaces {
             for tab in &workspace.tabs {
                 for pane in &tab.panes {
-                    if let Some(terminal) = pane.maybe_terminal() {
-                        terminal.set_wakeup_enabled(false);
-                    }
+                    pane.terminal().set_wakeup_enabled(false);
                 }
             }
         }
 
         for snapshot in self.native_pane_zoom_snapshots.values() {
             for pane in &snapshot.other_panes {
-                if let Some(terminal) = pane.maybe_terminal() {
-                    terminal.set_wakeup_enabled(false);
-                }
+                pane.terminal().set_wakeup_enabled(false);
             }
         }
     }

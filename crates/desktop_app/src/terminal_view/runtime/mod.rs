@@ -149,6 +149,35 @@ impl TerminalView {
         }
     }
 
+    pub(super) fn start_native_terminal(
+        native_terminal_wakeup_router: &NativeTerminalWakeupRouter,
+        configured_working_dir: Option<&str>,
+        tab_shell_integration: &TabTitleShellIntegration,
+        terminal_runtime: &TerminalRuntimeConfig,
+        startup_command: Option<&str>,
+        initial_cols: u16,
+        initial_rows: u16,
+    ) -> Terminal {
+        match Terminal::new_native(
+            TerminalSize {
+                cols: initial_cols,
+                rows: initial_rows,
+                ..TerminalSize::default()
+            },
+            configured_working_dir,
+            Some(native_terminal_wakeup_router),
+            Some(tab_shell_integration),
+            Some(terminal_runtime),
+            startup_command,
+        ) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                eprintln!("Termy startup blocked: failed to start native runtime: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     pub(super) fn runtime_startup_from_app_config(
         config: &AppConfig,
         event_wakeup_tx: &Sender<()>,
@@ -159,26 +188,18 @@ impl TerminalView {
         startup_command: Option<&str>,
         initial_cols: u16,
         initial_rows: u16,
+        defer_native_terminal: bool,
     ) -> (RuntimeState, Option<TmuxSnapshot>, Option<Terminal>) {
         let start_native = || {
-            let native_terminal = match Terminal::new_native(
-                TerminalSize {
-                    cols: initial_cols,
-                    rows: initial_rows,
-                    ..TerminalSize::default()
-                },
+            let native_terminal = Self::start_native_terminal(
+                native_terminal_wakeup_router,
                 configured_working_dir,
-                Some(native_terminal_wakeup_router),
-                Some(tab_shell_integration),
-                Some(terminal_runtime),
+                tab_shell_integration,
+                terminal_runtime,
                 startup_command,
-            ) {
-                Ok(terminal) => terminal,
-                Err(error) => {
-                    eprintln!("Termy startup blocked: failed to start native runtime: {error}");
-                    std::process::exit(1);
-                }
-            };
+                initial_cols,
+                initial_rows,
+            );
             (RuntimeState::Native, None, Some(native_terminal))
         };
 
@@ -238,6 +259,7 @@ impl TerminalView {
                     None,
                 )
             }
+            RuntimeKind::Native if defer_native_terminal => (RuntimeState::Native, None, None),
             RuntimeKind::Native => start_native(),
         }
     }

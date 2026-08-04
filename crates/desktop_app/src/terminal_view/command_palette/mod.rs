@@ -190,9 +190,6 @@ impl TerminalView {
         match reason {
             CommandUnavailableReason::RequiresTmuxRuntime => "tmux required",
             CommandUnavailableReason::InstallCliAlreadyInstalled => "Installed",
-            CommandUnavailableReason::BrowserTabsDisabled => "Disabled",
-            CommandUnavailableReason::BrowserTabsUnsupported => "Unsupported",
-            CommandUnavailableReason::BrowserTabsUnavailableInTmux => "Native runtime",
         }
     }
 
@@ -249,6 +246,13 @@ impl TerminalView {
             CommandPaletteMode::Commands => {
                 let mut items =
                     Self::command_palette_command_items_for_state(self.command_capabilities());
+                items.push(CommandPaletteItem::manage_ssh_hosts());
+                let ssh_enabled = self.runtime_kind() == RuntimeKind::Native;
+                items.extend(
+                    self.saved_ssh_hosts
+                        .iter()
+                        .map(|host| CommandPaletteItem::ssh_host(host, ssh_enabled)),
+                );
                 items.extend(self.command_palette_plugin_items());
                 items
             }
@@ -608,6 +612,9 @@ impl TerminalView {
             && let Err(error) = self.reload_saved_layout_palette_items()
         {
             termy_toast::error(format!("Failed to load saved layouts: {error}"));
+        }
+        if mode == CommandPaletteMode::Commands {
+            self.reload_saved_ssh_hosts();
         }
         let items = self.command_palette_items_for_mode(mode, cx);
         if mode == CommandPaletteMode::PluginInputs && self.plugin_input_uses_free_text() {
@@ -1143,6 +1150,29 @@ impl TerminalView {
             CommandPaletteItemKind::PluginInputOption { value, .. } => {
                 self.submit_plugin_input_value(value, window, cx);
             }
+            CommandPaletteItemKind::SshHost { host_id } => {
+                if !item.enabled {
+                    termy_toast::info(
+                        item.status_hint
+                            .unwrap_or_else(|| "SSH host is unavailable".to_string()),
+                    );
+                    self.notify_overlay(cx);
+                    return;
+                }
+                self.close_command_palette(cx);
+                self.add_ssh_tab(&host_id, cx);
+            }
+            CommandPaletteItemKind::ManageSshHosts => {
+                self.close_command_palette(cx);
+                if let Err(error) = crate::app_actions::open_settings_section(
+                    crate::settings_view::SettingsSection::Ssh,
+                    cx,
+                ) {
+                    log::error!("{error}");
+                    termy_toast::error(error);
+                    self.notify_overlay(cx);
+                }
+            }
             CommandPaletteItemKind::Theme(theme_id) => {
                 self.select_theme_from_palette(theme_id.as_str(), cx);
             }
@@ -1587,15 +1617,6 @@ impl TerminalView {
             Some(CommandUnavailableReason::InstallCliAlreadyInstalled) => {
                 "CLI is already installed"
             }
-            Some(CommandUnavailableReason::BrowserTabsDisabled) => {
-                "Enable Browser Tabs in Settings to use this command"
-            }
-            Some(CommandUnavailableReason::BrowserTabsUnsupported) => {
-                TerminalView::browser_tabs_unsupported_message()
-            }
-            Some(CommandUnavailableReason::BrowserTabsUnavailableInTmux) => {
-                "Browser tabs are not available with the tmux runtime"
-            }
             None => "Command is currently unavailable",
         }
     }
@@ -1664,7 +1685,6 @@ impl TerminalView {
                 self.notify_overlay(cx);
             }
             CommandAction::NewTab => termy_toast::success("Opened new tab"),
-            CommandAction::NewBrowserTab => termy_toast::success("Opened browser tab"),
             CommandAction::CloseTab => termy_toast::info("Closed active tab"),
             CommandAction::ClosePaneOrTab => termy_toast::info("Closed active pane or tab"),
             CommandAction::ZoomIn => termy_toast::info("Zoomed in"),
@@ -1926,8 +1946,6 @@ mod tests {
         CommandCapabilities {
             tmux_runtime_active: tmux_enabled,
             install_cli_available,
-            browser_tabs_enabled: true,
-            browser_tabs_supported: true,
         }
     }
 

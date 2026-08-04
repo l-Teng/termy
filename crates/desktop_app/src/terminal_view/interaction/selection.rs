@@ -343,7 +343,7 @@ fn pane_cell_for_position(
     clamp: bool,
     allow_clamp_outside: bool,
 ) -> Option<CellPos> {
-    let terminal = pane.maybe_terminal()?;
+    let terminal = pane.terminal();
     let size = terminal.size();
     if size.cols == 0 || size.rows == 0 {
         return None;
@@ -513,7 +513,7 @@ impl TerminalView {
         let (pane_id, cell) = self.position_to_pane_cell(position, false)?;
         let tab = self.tabs.get(self.active_tab)?;
         let pane = tab.panes.iter().find(|pane| pane.id == pane_id)?;
-        let terminal = pane.maybe_terminal()?;
+        let terminal = pane.terminal();
         let size = terminal.size();
         let cell_width = size.cell_width;
         let cell_height = size.cell_height;
@@ -630,7 +630,7 @@ impl TerminalView {
     ) -> Option<SelectionPos> {
         let tab = self.tabs.get(self.active_tab)?;
         let pane = tab.panes.iter().find(|pane| pane.id == pane_id)?;
-        let (display_offset, _) = pane.maybe_terminal()?.scroll_state();
+        let (display_offset, _) = pane.terminal().scroll_state();
         Self::selection_pos_for_cell_with_display_offset(cell, display_offset)
     }
 
@@ -645,9 +645,7 @@ impl TerminalView {
         let Some(pane) = tab.panes.iter().find(|pane| pane.id == pane_id) else {
             return false;
         };
-        let Some(terminal) = pane.maybe_terminal() else {
-            return false;
-        };
+        let terminal = pane.terminal();
         let cols = usize::from(terminal.size().cols);
         if cols == 0 || cell.col >= cols {
             return false;
@@ -1623,7 +1621,7 @@ mod tests {
                 degraded: false,
                 tmux_mouse_mode: None,
                 progress_state: ProgressState::default(),
-                content: PaneContent::Terminal(left_terminal),
+                terminal: left_terminal,
                 render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
                 last_alternate_screen: std::cell::Cell::new(false),
                 cached_element_ids: PaneCachedElementIds::new("%left"),
@@ -1638,7 +1636,7 @@ mod tests {
                 degraded: false,
                 tmux_mouse_mode: None,
                 progress_state: ProgressState::default(),
-                content: PaneContent::Terminal(right_terminal),
+                terminal: right_terminal,
                 render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
                 last_alternate_screen: std::cell::Cell::new(false),
                 cached_element_ids: PaneCachedElementIds::new("%right"),
@@ -1708,7 +1706,7 @@ mod tests {
                 degraded: false,
                 tmux_mouse_mode: None,
                 progress_state: ProgressState::default(),
-                content: PaneContent::Terminal(left_terminal),
+                terminal: left_terminal,
                 render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
                 last_alternate_screen: std::cell::Cell::new(false),
                 cached_element_ids: PaneCachedElementIds::new("%left"),
@@ -1723,7 +1721,7 @@ mod tests {
                 degraded: false,
                 tmux_mouse_mode: None,
                 progress_state: ProgressState::default(),
-                content: PaneContent::Terminal(right_terminal),
+                terminal: right_terminal,
                 render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
                 last_alternate_screen: std::cell::Cell::new(false),
                 cached_element_ids: PaneCachedElementIds::new("%right"),
@@ -1807,7 +1805,7 @@ mod tests {
                 degraded: false,
                 tmux_mouse_mode: None,
                 progress_state: ProgressState::default(),
-                content: PaneContent::Terminal(terminal),
+                terminal,
                 render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
                 last_alternate_screen: std::cell::Cell::new(false),
                 cached_element_ids: PaneCachedElementIds::new(id),
@@ -1894,7 +1892,7 @@ mod tests {
                 degraded: false,
                 tmux_mouse_mode: None,
                 progress_state: ProgressState::default(),
-                content: PaneContent::Terminal(left_terminal),
+                terminal: left_terminal,
                 render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
                 last_alternate_screen: std::cell::Cell::new(false),
                 cached_element_ids: PaneCachedElementIds::new("%left"),
@@ -1909,7 +1907,7 @@ mod tests {
                 degraded: false,
                 tmux_mouse_mode: None,
                 progress_state: ProgressState::default(),
-                content: PaneContent::Terminal(right_terminal),
+                terminal: right_terminal,
                 render_cache: std::cell::RefCell::new(TerminalPaneRenderCache::default()),
                 last_alternate_screen: std::cell::Cell::new(false),
                 cached_element_ids: PaneCachedElementIds::new("%right"),

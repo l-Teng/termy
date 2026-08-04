@@ -1,4 +1,4 @@
-//! Persistent Bun runtime for trusted local Termy TypeScript plugins.
+//! On-demand Bun runtime for trusted local Termy TypeScript plugins.
 
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -1407,7 +1407,7 @@ impl PluginRuntime {
     }
 
     pub fn refresh_if_changed(&self) -> PluginRefresh {
-        match self.refresh_if_changed_inner() {
+        match self.refresh_if_changed_inner(false) {
             Ok(refresh) => refresh,
             Err(error) => PluginRefresh {
                 changed: false,
@@ -1416,7 +1416,30 @@ impl PluginRuntime {
         }
     }
 
-    fn refresh_if_changed_inner(&self) -> Result<PluginRefresh, String> {
+    /// Stop the external Bun host when the loaded catalog has no lifecycle
+    /// subscribers. Commands and native views remain available from the Rust
+    /// catalog and restart the host on demand.
+    pub fn suspend_if_eventless(&self) -> bool {
+        let has_event_subscribers = !self
+            .inner
+            .catalog
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .events
+            .is_empty();
+        if has_event_subscribers {
+            return false;
+        }
+        self.inner
+            .host
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .connection
+            .take()
+            .is_some()
+    }
+
+    fn refresh_if_changed_inner(&self, require_host: bool) -> Result<PluginRefresh, String> {
         let Some(plugins_dir) = self.inner.plugins_dir.as_deref() else {
             return Ok(PluginRefresh::default());
         };
@@ -1438,24 +1461,27 @@ impl PluginRuntime {
                 catalog.revisions.clone(),
             )
         };
-        let host_needs_restart = if discovered.sources.is_empty() {
-            false
+        let (host_available, host_failed) = if discovered.sources.is_empty() {
+            (false, false)
         } else {
             let mut host = self
                 .inner
                 .host
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let needs_restart = host
+            let failed = host
                 .connection
                 .as_ref()
-                .is_none_or(|connection| connection.is_failed());
-            if needs_restart {
+                .is_some_and(|connection| connection.is_failed());
+            if failed {
                 host.connection.take();
             }
-            needs_restart
+            (host.connection.is_some(), failed)
         };
-        if previous_fingerprint == Some(discovered.fingerprint) && !host_needs_restart {
+        if previous_fingerprint == Some(discovered.fingerprint)
+            && !host_failed
+            && (!require_host || host_available)
+        {
             return Ok(PluginRefresh::default());
         }
         if previous_fingerprint != Some(discovered.fingerprint) {
@@ -1886,6 +1912,25 @@ impl PluginRuntime {
     }
 
     fn next_host_request(&self) -> Result<(u64, Arc<HostConnection>), String> {
+        {
+            let mut host = self
+                .inner
+                .host
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(connection) = host
+                .connection
+                .as_ref()
+                .filter(|connection| !connection.is_failed())
+                .map(Arc::clone)
+            {
+                let request_id = host.next_id();
+                return Ok((request_id, connection));
+            }
+            host.connection.take();
+        }
+        self.refresh_if_changed_inner(true)?;
+
         let mut host = self
             .inner
             .host

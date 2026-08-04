@@ -1,10 +1,10 @@
 # termy_plugin_runtime
 
-Persistent Bun runtime for trusted local plugins.
+On-demand Bun runtime for trusted local plugins.
 
 ## Owner
 
-This crate owns plugin discovery, manifest capability validation and gating, command, lifecycle-event, and native-view dispatch, descriptor/action/document validation, the read-only invocation context contract, managed TypeScript and JSX declarations, the persistent Bun host, per-plugin Worker lifecycle, protocol limits, timeouts, and warm reload caching.
+This crate owns plugin discovery, manifest capability validation and gating, command, lifecycle-event, and native-view dispatch, descriptor/action/document validation, the read-only invocation context contract, managed TypeScript and JSX declarations, the on-demand Bun host, per-plugin Worker lifecycle, protocol limits, timeouts, and bundle caching.
 
 It returns typed commands, actions, and allowlisted UI document nodes to callers. Command-palette presentation, GPUI rendering/state, built-in command execution, terminal tabs, toasts, and settings remain owned by `crates/desktop_app/`.
 

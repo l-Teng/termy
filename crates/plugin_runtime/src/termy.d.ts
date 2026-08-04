@@ -133,7 +133,7 @@ type TermyPluginContext<
   };
   readonly activePane?: {
     readonly index: number;
-    readonly kind: "terminal" | "browser";
+    readonly kind: "terminal";
   };
   readonly platform: "macos" | "linux" | "windows";
   readonly appVersion: string;

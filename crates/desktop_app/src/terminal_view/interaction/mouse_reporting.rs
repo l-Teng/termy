@@ -178,7 +178,7 @@ impl TerminalView {
             .iter()
             .flat_map(|tab| tab.panes.iter())
             .find(|pane| pane.id == pane_id)?;
-        let terminal = pane.maybe_terminal()?;
+        let terminal = pane.terminal();
         eprintln!(
             "TERMY_MOUSE_DEBUG click pane={} cached={:?} parser={:?}",
             pane.id,

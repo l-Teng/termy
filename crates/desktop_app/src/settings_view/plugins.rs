@@ -32,6 +32,7 @@ impl SettingsWindow {
             Err(error) => (None, Some(error)),
         };
         let settings = runtime.plugin_settings_snapshot();
+        runtime.suspend_if_eventless();
         let mut inventory_errors = inventory_errors;
         inventory_errors.extend(refresh.errors);
         inventory_errors.extend(settings.errors);

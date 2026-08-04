@@ -2,8 +2,7 @@ use std::path::PathBuf;
 
 use termy_command_core::{
     CommandCapabilities, CommandId, CommandUnavailableReason, KeybindLineRef,
-    browser_tabs_supported, default_resolved_keybinds, parse_keybind_directives_from_iter,
-    resolve_keybinds,
+    default_resolved_keybinds, parse_keybind_directives_from_iter, resolve_keybinds,
 };
 use termy_config_core::{AppConfig, config_path};
 use termy_theme_core::{ANSI_COLOR_NAMES, ThemeColors, format_hex, parse_theme_colors_json};
@@ -14,11 +13,7 @@ pub fn config_file_path() -> Result<PathBuf, String> {
 
 pub fn list_action_lines() -> Vec<String> {
     let config = load_config_for_providers();
-    action_lines_for_capabilities(
-        config.tmux_enabled,
-        detect_install_cli_available(),
-        config.browser_tabs_enabled,
-    )
+    action_lines_for_capabilities(config.tmux_enabled, detect_install_cli_available())
 }
 
 pub fn list_keybind_lines() -> Vec<String> {
@@ -27,7 +22,6 @@ pub fn list_keybind_lines() -> Vec<String> {
         &config.keybind_lines,
         config.tmux_enabled,
         detect_install_cli_available(),
-        config.browser_tabs_enabled,
     )
 }
 
@@ -127,38 +121,11 @@ pub fn load_config_for_providers() -> AppConfig {
 
 #[cfg(test)]
 fn action_lines_for_tmux_enabled(tmux_enabled: bool) -> Vec<String> {
-    action_lines_for_capabilities(
-        tmux_enabled,
-        detect_install_cli_available(),
-        AppConfig::default().browser_tabs_enabled,
-    )
+    action_lines_for_capabilities(tmux_enabled, detect_install_cli_available())
 }
 
-fn action_lines_for_capabilities(
-    tmux_enabled: bool,
-    install_cli_available: bool,
-    browser_tabs_enabled: bool,
-) -> Vec<String> {
-    action_lines_for_capabilities_with_browser_support(
-        tmux_enabled,
-        install_cli_available,
-        browser_tabs_enabled,
-        browser_tabs_supported(),
-    )
-}
-
-fn action_lines_for_capabilities_with_browser_support(
-    tmux_enabled: bool,
-    install_cli_available: bool,
-    browser_tabs_enabled: bool,
-    browser_tabs_supported: bool,
-) -> Vec<String> {
-    let capabilities = command_capabilities(
-        tmux_enabled,
-        install_cli_available,
-        browser_tabs_enabled,
-        browser_tabs_supported,
-    );
+fn action_lines_for_capabilities(tmux_enabled: bool, install_cli_available: bool) -> Vec<String> {
+    let capabilities = command_capabilities(tmux_enabled, install_cli_available);
 
     CommandId::all()
         .map(|id| {
@@ -244,26 +211,15 @@ fn keybind_lines_for_tmux_enabled(
     lines: &[termy_config_core::KeybindConfigLine],
     tmux_enabled: bool,
 ) -> Vec<String> {
-    keybind_lines_for_capabilities(
-        lines,
-        tmux_enabled,
-        detect_install_cli_available(),
-        AppConfig::default().browser_tabs_enabled,
-    )
+    keybind_lines_for_capabilities(lines, tmux_enabled, detect_install_cli_available())
 }
 
 fn keybind_lines_for_capabilities(
     lines: &[termy_config_core::KeybindConfigLine],
     tmux_enabled: bool,
     install_cli_available: bool,
-    browser_tabs_enabled: bool,
 ) -> Vec<String> {
-    let capabilities = command_capabilities(
-        tmux_enabled,
-        install_cli_available,
-        browser_tabs_enabled,
-        browser_tabs_supported(),
-    );
+    let capabilities = command_capabilities(tmux_enabled, install_cli_available);
 
     resolve_keybinds_for_lines(lines)
         .into_iter()
@@ -297,17 +253,10 @@ fn detect_install_cli_available() -> bool {
     !termy_cli_install_core::is_cli_installed()
 }
 
-fn command_capabilities(
-    tmux_enabled: bool,
-    install_cli_available: bool,
-    browser_tabs_enabled: bool,
-    browser_tabs_supported: bool,
-) -> CommandCapabilities {
+fn command_capabilities(tmux_enabled: bool, install_cli_available: bool) -> CommandCapabilities {
     CommandCapabilities {
         tmux_runtime_active: tmux_enabled,
         install_cli_available,
-        browser_tabs_enabled,
-        browser_tabs_supported,
     }
 }
 
@@ -405,9 +354,9 @@ fn list_fonts_impl() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        action_lines_for_capabilities, action_lines_for_capabilities_with_browser_support,
-        action_lines_for_tmux_enabled, keybind_lines_for_capabilities,
-        keybind_lines_for_tmux_enabled, list_theme_lines, resolve_keybinds_for_lines,
+        action_lines_for_capabilities, action_lines_for_tmux_enabled,
+        keybind_lines_for_capabilities, keybind_lines_for_tmux_enabled, list_theme_lines,
+        resolve_keybinds_for_lines,
     };
     use termy_command_core::{
         CommandId, KeybindLineRef, default_resolved_keybinds, parse_keybind_directives_from_iter,
@@ -450,7 +399,7 @@ mod tests {
 
     #[test]
     fn list_actions_reports_install_cli_unavailable_when_probe_is_false() {
-        let actions = action_lines_for_capabilities(true, false, false);
+        let actions = action_lines_for_capabilities(true, false);
         let install_cli_line = actions
             .iter()
             .find(|line| line.starts_with(CommandId::InstallCli.config_name()))
@@ -461,56 +410,8 @@ mod tests {
     }
 
     #[test]
-    fn list_actions_reports_browser_tabs_unavailable_when_setting_is_false() {
-        let actions = action_lines_for_capabilities_with_browser_support(false, true, false, true);
-        let browser_tab_line = actions
-            .iter()
-            .find(|line| line.starts_with(CommandId::NewBrowserTab.config_name()))
-            .expect("missing new_browser_tab action metadata");
-        assert!(browser_tab_line.contains("available=false"));
-        assert!(browser_tab_line.contains("tmux_required=false"));
-        assert!(browser_tab_line.contains("restart_required=false"));
-    }
-
-    #[test]
-    fn list_actions_reports_browser_tabs_unavailable_when_platform_is_unsupported() {
-        let actions = action_lines_for_capabilities_with_browser_support(false, true, true, false);
-        let browser_tab_line = actions
-            .iter()
-            .find(|line| line.starts_with(CommandId::NewBrowserTab.config_name()))
-            .expect("missing new_browser_tab action metadata");
-        assert!(browser_tab_line.contains("available=false"));
-        assert!(browser_tab_line.contains("tmux_required=false"));
-        assert!(browser_tab_line.contains("restart_required=false"));
-    }
-
-    #[test]
-    fn list_actions_reports_browser_tabs_unavailable_when_tmux_runtime_is_active() {
-        let actions = action_lines_for_capabilities_with_browser_support(true, true, true, true);
-        let browser_tab_line = actions
-            .iter()
-            .find(|line| line.starts_with(CommandId::NewBrowserTab.config_name()))
-            .expect("missing new_browser_tab action metadata");
-        assert!(browser_tab_line.contains("available=false"));
-        assert!(browser_tab_line.contains("tmux_required=false"));
-        assert!(browser_tab_line.contains("restart_required=false"));
-    }
-
-    #[test]
-    fn list_actions_reports_browser_tabs_available_when_native_supported_and_setting_is_true() {
-        let actions = action_lines_for_capabilities_with_browser_support(false, true, true, true);
-        let browser_tab_line = actions
-            .iter()
-            .find(|line| line.starts_with(CommandId::NewBrowserTab.config_name()))
-            .expect("missing new_browser_tab action metadata");
-        assert!(browser_tab_line.contains("available=true"));
-        assert!(browser_tab_line.contains("tmux_required=false"));
-        assert!(browser_tab_line.contains("restart_required=false"));
-    }
-
-    #[test]
     fn list_actions_reports_restart_not_required_when_tmux_runtime_is_active() {
-        let actions = action_lines_for_capabilities(true, true, false);
+        let actions = action_lines_for_capabilities(true, true);
         let resize_pane_line = actions
             .iter()
             .find(|line| line.starts_with(CommandId::ResizePaneLeft.config_name()))
@@ -568,7 +469,6 @@ mod tests {
             }],
             true,
             false,
-            false,
         );
         let install_cli_line = keybind_lines
             .iter()
@@ -588,7 +488,6 @@ mod tests {
             }],
             true,
             true,
-            false,
         );
         let resize_pane_line = keybind_lines
             .iter()

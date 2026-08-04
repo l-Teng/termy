@@ -36,7 +36,6 @@ final class SettingsSchemaParityTests: XCTestCase {
             "auto_hide_tabbar",
             "sidebar_enabled",
             "sidebar_width",
-            "browser_tabs_enabled",
             "show_termy_in_titlebar"
         ]
 

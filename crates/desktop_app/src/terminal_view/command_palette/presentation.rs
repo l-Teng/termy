@@ -14,7 +14,6 @@ pub(super) fn command_icon_path(id: CommandId) -> &'static str {
     use termy_command_core::CommandId::*;
     match id {
         NewTab => "icons/command_palette/new-tab.svg",
-        NewBrowserTab => "icons/command_palette/link.svg",
         CloseTab | ClosePane | ClosePaneOrTab => "icons/command_palette/close-tab.svg",
         MoveTabLeft | SwitchTabLeft => "icons/command_palette/tab-left.svg",
         MoveTabRight | SwitchTabRight | CycleTabs => "icons/command_palette/tab-right.svg",
@@ -69,6 +68,9 @@ pub(super) fn palette_item_icon_path(item: &CommandPaletteItem) -> &'static str 
             plugins::plugin_icon_path(*icon)
         }
         CommandPaletteItemKind::Theme(_) => "icons/settings/themes.svg",
+        CommandPaletteItemKind::SshHost { .. } | CommandPaletteItemKind::ManageSshHosts => {
+            "icons/settings/ssh.svg"
+        }
         CommandPaletteItemKind::TmuxSessionAttachOrSwitch { .. }
         | CommandPaletteItemKind::TmuxSessionCreateAndAttach { .. }
         | CommandPaletteItemKind::TmuxSessionDetachCurrent
@@ -103,7 +105,6 @@ pub(super) fn command_category(id: CommandId) -> &'static str {
     use termy_command_core::CommandId::*;
     match id {
         NewTab
-        | NewBrowserTab
         | CloseTab
         | RenameTab
         | MoveTabLeft
@@ -213,6 +214,9 @@ pub(super) fn palette_item_category(item: &CommandPaletteItem) -> Option<String>
             Some(command_category(action.to_command_id()).to_string())
         }
         CommandPaletteItemKind::PluginCommand { plugin_id, .. } => Some(plugin_id.clone()),
+        CommandPaletteItemKind::SshHost { .. } | CommandPaletteItemKind::ManageSshHosts => {
+            Some("SSH".to_string())
+        }
         _ => None,
     }
 }

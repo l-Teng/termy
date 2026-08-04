@@ -1,4 +1,4 @@
-// Persistent Bun-side coordinator for isolated Termy plugin Workers.
+// Bun-side coordinator for isolated Termy plugin Workers.
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";

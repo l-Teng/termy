@@ -53,11 +53,8 @@ run_desktop_checks() {
   log "Checking desktop and CLI crates"
   cargo check -p termy -p termy_cli
 
-  log "Testing browser command availability"
+  log "Testing command availability"
   cargo test -p termy_command_core -p termy_cli
-
-  log "Testing desktop browser helpers"
-  cargo test -p termy terminal_view::browser::tests
 }
 
 run_native() {

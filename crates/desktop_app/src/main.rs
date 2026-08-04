@@ -12,6 +12,7 @@ mod crash_log;
 mod deeplink;
 mod font_families;
 mod keybindings;
+mod launch_probe;
 #[cfg(target_os = "macos")]
 mod macos_titlebar_drag;
 mod menus;
@@ -476,6 +477,7 @@ fn spawn_deeplink_listener(cx: &mut App, deeplink_rx: Receiver<Vec<String>>) {
 }
 
 fn main() {
+    launch_probe::mark_process_start();
     let cli_args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(status) = ssh::run_askpass_if_requested(&cli_args) {
         std::process::exit(status);

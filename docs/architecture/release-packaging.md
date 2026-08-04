@@ -33,14 +33,6 @@ just build-setup -- -Version 0.3.0 -Arch x64 -Target x86_64-pc-windows-msvc
 
 Use `scripts/build-dmg-signed.sh` when a Developer ID signing identity is required. Unsigned DMGs should use `scripts/build-dmg.sh` directly.
 
-## Browser Runtime Dependencies
-
-Browser tabs use Wry native webviews:
-
-- macOS packages use the system WebKit framework.
-- Windows and Linux packages do not include a browser webview runtime because
-  browser tabs are disabled for those desktop targets.
-
 ## Boundary Rules
 
 - Keep packaging scripts in `scripts/`.
@@ -64,3 +56,13 @@ bash -n scripts/build-dmg.sh scripts/build-dmg-signed.sh scripts/build-linux.sh
 pwsh -NoProfile -Command '$null = [System.Management.Automation.Language.Parser]::ParseFile("scripts/build-setup.ps1", [ref]$null, [ref]$null)' # when PowerShell is available
 just check-boundaries
 ```
+
+For a local GPUI release performance gate:
+
+```sh
+cargo build --release -p termy
+./scripts/check-gpui-launch-idle.sh
+```
+
+The gate can seed `--plugins`, require `--expect-no-bun`, or load a fixture with
+`--workspace-store` to cover plugin and persisted-session regressions.

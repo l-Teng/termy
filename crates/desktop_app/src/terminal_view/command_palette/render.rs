@@ -235,6 +235,8 @@ impl TerminalView {
                     ..
                 } => self.command_palette_plugin_shortcut(plugin_id, command_id, window),
                 CommandPaletteItemKind::Theme(_)
+                | CommandPaletteItemKind::SshHost { .. }
+                | CommandPaletteItemKind::ManageSshHosts
                 | CommandPaletteItemKind::PluginInputSubmit { .. }
                 | CommandPaletteItemKind::PluginInputOption { .. }
                 | CommandPaletteItemKind::TmuxSessionAttachOrSwitch { .. }

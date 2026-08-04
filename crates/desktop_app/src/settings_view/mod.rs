@@ -83,8 +83,7 @@ const SETTINGS_CARD_RADIUS: f32 = 10.0;
 const SETTINGS_INPUT_RADIUS: f32 = 6.0;
 const SETTINGS_BUTTON_RADIUS: f32 = 6.0;
 const SETTINGS_SWITCH_RADIUS: f32 = 11.0;
-const SECTION_TITLE_SIZE: f32 = 22.0;
-const SECTION_SUBTITLE_SIZE: f32 = 13.0;
+// Section title and subtitle sizes now live in `termy_ui::metrics`.
 const GROUP_TITLE_SIZE: f32 = 11.0;
 const CARD_GAP: f32 = 22.0;
 const CARD_ROW_PADDING_X: f32 = 16.0;
@@ -1212,6 +1211,9 @@ impl gpui::EntityInputHandler for SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_window_background_appearance(window);
+        // Components from `termy_ui` read their colors from a global, so refresh
+        // it before building this frame's element tree.
+        self.sync_ui_tokens(cx);
         let bg = self.bg_primary();
         let settings_scrollbar_metrics = self.settings_scrollbar_metrics(window);
         let scrollbar_thumb_active = self.scrollbar_drag_state.is_some();
@@ -1445,6 +1447,48 @@ mod tests {
                 opacity: 0.6,
             })
         );
+    }
+
+    #[gpui::test]
+    fn settings_ui_tokens_track_the_windows_own_chrome_colors(cx: &mut TestAppContext) {
+        let settings = open_settings_window_handle(cx);
+
+        let tokens = settings
+            .update(cx, |view, _window, cx| {
+                let tokens = view.ui_tokens();
+
+                assert_eq!(tokens.bg_window, view.bg_primary());
+                assert_eq!(tokens.bg_panel, view.bg_secondary());
+                assert_eq!(tokens.bg_card, view.bg_elevated());
+                assert_eq!(tokens.bg_input, view.bg_input());
+                assert_eq!(tokens.bg_hover, view.bg_hover());
+                assert_eq!(tokens.border, view.border_color());
+                assert_eq!(tokens.card_border, view.card_border_color());
+                assert_eq!(tokens.row_separator, view.row_separator_color());
+                assert_eq!(tokens.text_primary, view.text_primary());
+                assert_eq!(tokens.text_secondary, view.text_secondary());
+                assert_eq!(tokens.text_muted, view.text_muted());
+                assert_eq!(tokens.accent, view.accent());
+                assert_eq!(tokens.accent_soft, view.sidebar_selection_bg());
+
+                // The kit's own palette-derived tokens are opaque. Deriving them
+                // that way here would silently drop this window's translucency,
+                // so the mapped surfaces must keep their alpha.
+                assert!(tokens.bg_card.a < 1.0);
+                assert!(tokens.bg_panel.a < 1.0);
+
+                view.sync_ui_tokens(cx);
+                tokens
+            })
+            .expect("settings window should still be open");
+
+        cx.update(|app| {
+            assert_eq!(
+                app.try_global::<termy_ui::Tokens>().copied(),
+                Some(tokens),
+                "components render from the global, so it has to carry this window's colors"
+            );
+        });
     }
 
     #[gpui::test]

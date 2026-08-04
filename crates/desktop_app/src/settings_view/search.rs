@@ -224,7 +224,7 @@ impl SettingsWindow {
             SettingsSection::Appearance => "Theme, type, and terminal surface",
             SettingsSection::Terminal => "Shell, input, scrolling, and tmux",
             SettingsSection::Ssh => "Saved hosts, authentication, and remote sessions",
-            SettingsSection::Tabs => "Tabs, sidebar, browser, and title bar",
+            SettingsSection::Tabs => "Tabs, sidebar, and title bar",
             SettingsSection::ThemeStore => "Find and install community themes",
             SettingsSection::Plugins => "Install and manage plugins",
             SettingsSection::Advanced => "Startup, windows, updates, and app behavior",
@@ -261,7 +261,7 @@ impl SettingsWindow {
         ]
     }
 
-    pub(super) fn set_active_section(
+    pub(crate) fn set_active_section(
         &mut self,
         section: SettingsSection,
         window: &mut Window,

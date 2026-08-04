@@ -14,6 +14,9 @@ pub(crate) struct WorkspaceEntry {
     pub(crate) pinned: bool,
     pub(crate) tabs: Vec<TerminalTab>,
     pub(crate) active_tab: usize,
+    /// Persisted tabs that have not started their PTYs yet. Inactive restored
+    /// workspaces stay cold until the user switches to them.
+    pub(crate) pending_restore: Option<crate::workspace_store::StoredWorkspace>,
     /// Something happened in this workspace while it was stashed (bell or a
     /// command finished). Cleared when the workspace is activated; never set
     /// on the active workspace. Not persisted.
@@ -49,6 +52,7 @@ impl WorkspaceEntry {
             pinned: false,
             tabs: Vec::new(),
             active_tab: 0,
+            pending_restore: None,
             attention: false,
         }
     }
@@ -410,13 +414,6 @@ impl TerminalView {
         if let Some(entry) = self.workspaces.get_mut(self.active_workspace) {
             entry.tabs = std::mem::take(&mut self.tabs);
             entry.active_tab = active_tab;
-            for tab in &mut entry.tabs {
-                for pane in &mut tab.panes {
-                    if let Some(state) = pane.browser_state_mut() {
-                        state.editing_url = false;
-                    }
-                }
-            }
         }
     }
 
@@ -441,9 +438,7 @@ impl TerminalView {
         };
         if let Some(tab) = self.tabs.get(tab_index) {
             for pane in &tab.panes {
-                if let Some(terminal) = pane.maybe_terminal() {
-                    terminal.set_term_options(options);
-                }
+                pane.terminal().set_term_options(options);
             }
         }
     }
@@ -465,6 +460,12 @@ impl TerminalView {
 
     pub(crate) fn switch_workspace(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.workspaces.len() || index == self.active_workspace {
+            return;
+        }
+        if let Err(error) = self.materialize_pending_workspace(index) {
+            log::error!("Failed to start saved workspace: {error}");
+            termy_toast::error("Failed to start saved workspace");
+            self.notify_overlay(cx);
             return;
         }
 
@@ -623,6 +624,17 @@ impl TerminalView {
         if !self.has_other_workspaces() {
             return;
         }
+        for index in 0..self.workspaces.len() {
+            if index == self.active_workspace {
+                continue;
+            }
+            if let Err(error) = self.materialize_pending_workspace(index) {
+                log::error!("Failed to start saved workspace before merging: {error}");
+                termy_toast::error("Could not merge saved workspaces");
+                self.notify_overlay(cx);
+                return;
+            }
+        }
 
         let mut merged: Vec<TerminalTab> = Vec::new();
         let mut active_tab = self.active_tab;
@@ -676,9 +688,7 @@ impl TerminalView {
                     if ready_terminal_ids.is_empty() {
                         break;
                     }
-                    let Some(terminal) = pane.maybe_terminal() else {
-                        continue;
-                    };
+                    let terminal = pane.terminal();
                     let Some(wakeup_id) = terminal.wakeup_id() else {
                         continue;
                     };

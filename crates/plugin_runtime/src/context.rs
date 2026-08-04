@@ -14,7 +14,6 @@ pub enum PluginRuntimeKind {
 #[serde(rename_all = "lowercase")]
 pub enum PluginPaneKind {
     Terminal,
-    Browser,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

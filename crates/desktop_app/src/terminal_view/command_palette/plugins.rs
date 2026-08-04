@@ -236,14 +236,10 @@ impl TerminalView {
         });
         let active_pane = self.tabs.get(self.active_tab).and_then(|tab| {
             let index = tab.active_pane_index()?;
-            let pane = tab.panes.get(index)?;
+            tab.panes.get(index)?;
             Some(PluginPaneContext {
                 index,
-                kind: if pane.is_browser() {
-                    PluginPaneKind::Browser
-                } else {
-                    PluginPaneKind::Terminal
-                },
+                kind: PluginPaneKind::Terminal,
             })
         });
         PluginContext {
@@ -420,6 +416,7 @@ impl TerminalView {
                     view.plugin_refresh_in_flight = false;
                     view.update_plugin_refresh_error(&refresh.errors, cx);
                     view.ensure_plugin_terminal_ready(cx);
+                    view.plugin_runtime.suspend_if_eventless();
                     if refresh.changed
                         && view.is_command_palette_open()
                         && view.command_palette.mode() == CommandPaletteMode::Commands
@@ -438,6 +435,17 @@ impl TerminalView {
                     }
                 })
             });
+        })
+        .detach();
+    }
+
+    #[cfg(not(test))]
+    pub(in super::super) fn schedule_initial_plugin_refresh(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            // Keep Bun discovery and TypeScript loading out of the first-paint
+            // window. Explicit plugin entry points still refresh on demand.
+            smol::Timer::after(Duration::from_millis(250)).await;
+            let _ = cx.update(|cx| this.update(cx, |view, cx| view.schedule_plugin_refresh(cx)));
         })
         .detach();
     }
@@ -825,7 +833,16 @@ impl TerminalView {
 
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = smol::unblock(move || {
-                runtime.invoke(&plugin_id, &command_id, &revision, inputs, context)
+                let result = runtime.invoke(&plugin_id, &command_id, &revision, inputs, context);
+                let opens_view = result.as_ref().is_ok_and(|actions| {
+                    actions
+                        .iter()
+                        .any(|action| matches!(action, PluginAction::ViewOpen { .. }))
+                });
+                if !opens_view {
+                    runtime.suspend_if_eventless();
+                }
+                result
             })
             .await;
             cx.update(|cx| {

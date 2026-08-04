@@ -13,7 +13,9 @@ Important internal areas:
 - `src/onboarding/`: first-run and import flows.
 - `src/config/`: app-owned config I/O and mutation.
 
-Push reusable headless behavior into `termy_core` or a pure domain crate. Push GPUI-adjacent terminal adapter behavior into `termy_terminal_ui` only when it is reusable outside the desktop app shell.
+Push reusable headless behavior into `termy_core` or a pure domain crate. Push GPUI-adjacent terminal adapter behavior into `termy_terminal_ui` only when it is reusable outside the desktop app shell. Push reusable chrome presentation — surfaces, controls, status affordances — into `termy_ui`, and keep the state and behavior behind it here.
+
+`src/settings_view/` renders its section headers and grouped cards with `termy_ui`. Its colors are published to the kit by `SettingsWindow::sync_ui_tokens`, which maps this window's own translucent chrome colors onto `termy_ui::Tokens`; do not swap that for `Tokens::from_palette`, which is opaque and would drop the window's transparency.
 
 ## Kitty graphics
 

@@ -3,7 +3,6 @@ macro_rules! termy_command_catalog {
     ($visitor:ident) => {
         $visitor! {
             (NewTab, "new_tab"),
-            (NewBrowserTab, "new_browser_tab"),
             (CloseTab, "close_tab"),
             (ClosePaneOrTab, "close_pane_or_tab"),
             (MoveTabLeft, "move_tab_left"),

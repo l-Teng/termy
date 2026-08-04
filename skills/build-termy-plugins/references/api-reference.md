@@ -99,7 +99,7 @@ Optional:
 - `activeCommand`
 - `selectedText`
 - `activeTab`: `{ index, title, paneCount }`
-- `activePane`: `{ index, kind: "terminal" | "browser" }`
+- `activePane`: `{ index, kind: "terminal" }`
 
 Indexes are zero-based. Selection is capped at 64 KiB at a UTF-8 boundary. Use
 `selectedTextTruncated` when completeness matters.

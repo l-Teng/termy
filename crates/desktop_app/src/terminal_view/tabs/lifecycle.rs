@@ -2,13 +2,12 @@ use super::*;
 use std::cmp::Reverse;
 
 fn should_show_new_tab_menu(
-    browser_tabs_available: bool,
     runtime_kind: RuntimeKind,
     windows_shell_menu_available: bool,
     saved_ssh_hosts_available: bool,
 ) -> bool {
     runtime_kind == RuntimeKind::Native
-        && (browser_tabs_available || windows_shell_menu_available || saved_ssh_hosts_available)
+        && (windows_shell_menu_available || saved_ssh_hosts_available)
 }
 
 fn runtime_config_for_windows_shell(
@@ -72,10 +71,6 @@ impl TerminalView {
             }
             CommandAction::NewTab => {
                 self.add_tab(cx);
-                true
-            }
-            CommandAction::NewBrowserTab => {
-                self.add_browser_tab(cx);
                 true
             }
             CommandAction::CloseTab => {
@@ -341,7 +336,6 @@ impl TerminalView {
     pub(crate) fn handle_new_tab_button(&mut self, anchor: (f32, f32), cx: &mut Context<Self>) {
         self.reload_saved_ssh_hosts();
         if should_show_new_tab_menu(
-            self.browser_tabs_available(),
             self.runtime_kind(),
             cfg!(target_os = "windows"),
             !self.saved_ssh_hosts.is_empty(),
@@ -370,7 +364,7 @@ impl TerminalView {
         }
     }
 
-    fn reload_saved_ssh_hosts(&mut self) {
+    pub(in super::super) fn reload_saved_ssh_hosts(&mut self) {
         match crate::ssh::load_hosts(self.config_path.as_deref()) {
             Ok(hosts) => self.saved_ssh_hosts = hosts,
             Err(error) => {
@@ -555,16 +549,12 @@ impl TerminalView {
             let inactive_options = active_options.with_scrollback_history(inactive_scrollback);
             if let Some(tab) = self.tabs.get(old_active_tab) {
                 for pane in &tab.panes {
-                    if let Some(terminal) = pane.maybe_terminal() {
-                        terminal.set_term_options(inactive_options);
-                    }
+                    pane.terminal().set_term_options(inactive_options);
                 }
             }
             if let Some(tab) = self.tabs.get(new_tab_index) {
                 for pane in &tab.panes {
-                    if let Some(terminal) = pane.maybe_terminal() {
-                        terminal.set_term_options(active_options);
-                    }
+                    pane.terminal().set_term_options(active_options);
                 }
             }
         }
@@ -711,10 +701,6 @@ impl TerminalView {
             return;
         }
 
-        // Leaving a browser tab mid-edit abandons the edit; the address bar
-        // shows the live page URL again when the tab is next activated.
-        self.cancel_active_browser_url_edit_quietly();
-
         match self.runtime_kind() {
             RuntimeKind::Tmux => {
                 self.tmux_switch_tab(index, cx);
@@ -735,14 +721,10 @@ impl TerminalView {
                     let inactive_options =
                         active_options.with_scrollback_history(inactive_scrollback);
                     for pane in &self.tabs[old_active].panes {
-                        if let Some(terminal) = pane.maybe_terminal() {
-                            terminal.set_term_options(inactive_options);
-                        }
+                        pane.terminal().set_term_options(inactive_options);
                     }
                     for pane in &self.tabs[index].panes {
-                        if let Some(terminal) = pane.maybe_terminal() {
-                            terminal.set_term_options(active_options);
-                        }
+                        pane.terminal().set_term_options(active_options);
                     }
                 }
 
@@ -1341,15 +1323,13 @@ impl TerminalView {
             active_pane.top = current_size.1;
             active_pane.width = current_size.2;
             active_pane.height = current_size.3;
-            if let Some(terminal) = active_pane.maybe_terminal_mut() {
-                // Resize terminal before the first render so pane geometry and grid size match.
-                terminal.resize(TerminalSize {
-                    cols: current_size.2,
-                    rows: current_size.3,
-                    cell_width: cell_size.width.into(),
-                    cell_height: cell_size.height.into(),
-                });
-            }
+            // Resize terminal before the first render so pane geometry and grid size match.
+            active_pane.terminal_mut().resize(TerminalSize {
+                cols: current_size.2,
+                rows: current_size.3,
+                cell_width: cell_size.width.into(),
+                cell_height: cell_size.height.into(),
+            });
         }
 
         let cached_element_ids = PaneCachedElementIds::new(&pane_id);
@@ -1363,7 +1343,7 @@ impl TerminalView {
             degraded: false,
             tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
-            content: PaneContent::Terminal(terminal),
+            terminal,
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),
             last_alternate_screen: Cell::new(false),
             cached_element_ids,
@@ -1901,7 +1881,7 @@ mod tests {
             degraded: false,
             tmux_mouse_mode: None,
             progress_state: ProgressState::default(),
-            content: PaneContent::Terminal(test_terminal()),
+            terminal: test_terminal(),
             render_cache: RefCell::new(TerminalPaneRenderCache::default()),
             last_alternate_screen: Cell::new(false),
             cached_element_ids: PaneCachedElementIds::new(id),
@@ -1915,31 +1895,11 @@ mod tests {
     }
 
     #[test]
-    fn windows_shell_choices_open_the_new_tab_menu_without_browser_tabs() {
-        assert!(should_show_new_tab_menu(
-            false,
-            RuntimeKind::Native,
-            true,
-            false
-        ));
-        assert!(!should_show_new_tab_menu(
-            false,
-            RuntimeKind::Native,
-            false,
-            false
-        ));
-        assert!(should_show_new_tab_menu(
-            false,
-            RuntimeKind::Native,
-            false,
-            true
-        ));
-        assert!(!should_show_new_tab_menu(
-            true,
-            RuntimeKind::Tmux,
-            true,
-            true
-        ));
+    fn native_extra_tab_choices_control_the_new_tab_menu() {
+        assert!(should_show_new_tab_menu(RuntimeKind::Native, true, false));
+        assert!(!should_show_new_tab_menu(RuntimeKind::Native, false, false));
+        assert!(should_show_new_tab_menu(RuntimeKind::Native, false, true));
+        assert!(!should_show_new_tab_menu(RuntimeKind::Tmux, true, true));
     }
 
     #[test]

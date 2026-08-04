@@ -124,6 +124,106 @@ export default definePlugin({
 }
 
 #[test]
+fn eventless_plugin_host_suspends_and_restarts_on_invocation() {
+    if !bun_is_available() {
+        return;
+    }
+    let temp = TempDir::new().expect("temp dir");
+    let config_path = temp.path().join("config.txt");
+    fs::write(&config_path, "").expect("write config");
+    let plugins = temp.path().join("plugins");
+    write_plugin(
+        &plugins,
+        "sleepy",
+        "Sleepy",
+        r#"
+export default definePlugin({
+  commands: [{
+    id: "run",
+    title: "Sleepy: Run",
+    run() {
+      return { type: "toast", level: "success", message: "awake" };
+    },
+  }],
+});
+"#,
+    );
+
+    let runtime = PluginRuntime::new(Some(&config_path));
+    let refresh = runtime.refresh_if_changed();
+    assert!(refresh.changed, "refresh errors: {:?}", refresh.errors);
+    assert!(refresh.errors.is_empty(), "errors: {:?}", refresh.errors);
+    let revision = runtime
+        .command_with_revision("sleepy", "run")
+        .expect("command revision")
+        .1;
+
+    assert!(runtime.suspend_if_eventless());
+    assert!(
+        !runtime.refresh_if_changed().changed,
+        "a passive refresh should reuse the cold catalog"
+    );
+    assert!(
+        !runtime.suspend_if_eventless(),
+        "passive refresh must not restart Bun"
+    );
+
+    let actions = runtime
+        .invoke(
+            "sleepy",
+            "run",
+            &revision,
+            BTreeMap::new(),
+            test_plugin_context(),
+        )
+        .expect("cold runtime should restart for invocation");
+    assert_eq!(
+        actions,
+        vec![PluginAction::Toast {
+            level: PluginToastLevel::Success,
+            message: "awake".to_string(),
+        }]
+    );
+    assert!(
+        runtime.suspend_if_eventless(),
+        "invocation should leave a host available to suspend"
+    );
+}
+
+#[test]
+fn lifecycle_subscribers_keep_plugin_host_warm() {
+    if !bun_is_available() {
+        return;
+    }
+    let temp = TempDir::new().expect("temp dir");
+    let config_path = temp.path().join("config.txt");
+    fs::write(&config_path, "").expect("write config");
+    let plugins = temp.path().join("plugins");
+    write_plugin(
+        &plugins,
+        "listener",
+        "Listener",
+        r#"
+export default definePlugin({
+  commands: [],
+  events: {
+    "terminal.ready"() {},
+  },
+});
+"#,
+    );
+
+    let runtime = PluginRuntime::new(Some(&config_path));
+    let refresh = runtime.refresh_if_changed();
+    assert!(refresh.changed, "refresh errors: {:?}", refresh.errors);
+    assert!(refresh.errors.is_empty(), "errors: {:?}", refresh.errors);
+    assert!(
+        !runtime.suspend_if_eventless(),
+        "lifecycle subscribers require the ordered warm worker"
+    );
+}
+
+#[test]
 fn tsx_views_render_and_round_trip_actions() {
     if !bun_is_available() {
         return;
@@ -245,6 +345,10 @@ export default definePlugin({
         refresh.errors
     );
     assert_eq!(runtime.views().len(), 3);
+    assert!(
+        runtime.suspend_if_eventless(),
+        "native UI catalog should remain available without a warm host"
+    );
     let revision = runtime
         .command_with_revision("todos", "open")
         .expect("command revision")

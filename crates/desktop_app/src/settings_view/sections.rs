@@ -246,40 +246,10 @@ impl SettingsWindow {
         title: impl Into<SharedString>,
         rows: Vec<AnyElement>,
     ) -> AnyElement {
-        let divider = self.row_separator_color();
-        let card_bg = self.bg_elevated();
-        let card_border = self.card_border_color();
-
-        let total = rows.len();
-        let mut card = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .rounded(px(SETTINGS_CARD_RADIUS))
-            .bg(card_bg)
-            .border_1()
-            .border_color(card_border)
-            .overflow_hidden();
-        for (index, row) in rows.into_iter().enumerate() {
-            card = card.child(div().w_full().child(row));
-            if index + 1 < total {
-                // Inset hairline separator aligned with the row text, like the
-                // grouped lists in native macOS settings.
-                card = card.child(
-                    div()
-                        .w_full()
-                        .px(px(CARD_ROW_PADDING_X))
-                        .child(div().w_full().h(px(1.0)).bg(divider)),
-                );
-            }
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(self.render_group_header(title))
-            .child(card)
+        // Card chrome, label, and the hairlines between rows all come from the
+        // design system now; the rows themselves stay owned by this view.
+        termy_ui::SettingsGroup::new(title.into())
+            .children(rows)
             .into_any_element()
     }
 
@@ -599,7 +569,6 @@ impl SettingsWindow {
             .child(self.render_tabs_title_group(cx))
             .child(self.render_tabs_strip_group(cx))
             .child(self.render_tabs_sidebar_group(cx))
-            .child(self.render_tabs_browser_group(cx))
             .child(self.render_tabs_titlebar_group(cx))
     }
 
@@ -784,39 +753,6 @@ impl SettingsWindow {
         ];
 
         self.render_settings_group("Workspace sidebar", rows)
-    }
-
-    pub(super) fn render_tabs_browser_group(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let browser_tabs_enabled = self.config.browser_tabs_enabled;
-        let rows = vec![
-            if crate::terminal_view::TerminalView::browser_tabs_supported() {
-                self.render_root_bool_setting_row(
-                    "browser_tabs_enabled",
-                    "browser_tabs_enabled-toggle",
-                    RootSettingId::BrowserTabsEnabled,
-                    browser_tabs_enabled,
-                    "Saved",
-                    cx,
-                )
-            } else {
-                let metadata = Self::setting_metadata_or_fallback("browser_tabs_enabled");
-                self.render_setting_row(
-                    "browser_tabs_enabled",
-                    "browser_tabs_enabled-toggle",
-                    metadata.title,
-                    crate::terminal_view::TerminalView::browser_tabs_unsupported_message(),
-                    false,
-                    cx,
-                    |_view, _window, _cx| {
-                        termy_toast::info(
-                            crate::terminal_view::TerminalView::browser_tabs_unsupported_message(),
-                        );
-                    },
-                )
-            },
-        ];
-
-        self.render_settings_group("Browser tabs", rows)
     }
 
     pub(super) fn render_tabs_titlebar_group(&mut self, cx: &mut Context<Self>) -> AnyElement {

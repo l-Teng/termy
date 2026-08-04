@@ -141,18 +141,12 @@ require_pattern './scripts/build-dmg\.sh' \
 require_pattern 'dist/Termy-\$\{\{ env.VERSION \}\}-macos-\$\{\{ matrix.arch \}\}\.dmg' \
   ".github/workflows/release.yml" \
   "release workflow must upload the documented macOS DMG path"
-require_pattern 'Browser tabs are only available on macOS' \
-  "crates/command_core/src/browser_support.rs" \
-  "browser tab capability must remain macOS-only"
-require_pattern '^wry = "0\.53"$' \
+forbid_pattern '^wry = ' \
   "crates/desktop_app/Cargo.toml" \
-  "desktop app must keep its macOS Wry dependency"
-forbid_pattern 'cfg\(any\(target_os = "macos", target_os = "windows", target_os = "linux"\)\)' \
-  "crates/desktop_app/Cargo.toml" \
-  "desktop app must not compile Wry for Windows or Linux"
+  "desktop app must not reintroduce the removed embedded browser runtime"
 forbid_pattern '^gtk = ' \
   "crates/desktop_app/Cargo.toml" \
-  "desktop app must not carry the Linux GTK browser dependency"
+  "desktop app must not carry an unused Linux GTK dependency"
 forbid_pattern 'WebView2|MicrosoftEdgeWebView2' \
   "scripts/build-setup.ps1" \
   "Windows setup must not bootstrap a browser runtime"
@@ -177,9 +171,6 @@ require_pattern './scripts/check-platform-builds\.sh --native' \
 require_pattern 'cargo check -p termy -p termy_cli' \
   "scripts/check-platform-builds.sh" \
   "platform verifier must check desktop and CLI crates"
-require_pattern 'terminal_view::browser::tests' \
-  "scripts/check-platform-builds.sh" \
-  "platform verifier must run desktop browser helper tests"
 require_pattern 'TERMY_CHECK_XWIN_MSVC' \
   "scripts/check-platform-builds.sh" \
   "platform verifier must expose an opt-in Windows MSVC cross-check"
@@ -207,9 +198,6 @@ require_pattern 'grep -Eo.*\|\| true' \
 require_pattern 'grep -Ev.*x86_64.*aarch64' \
   "scripts/install-linux.sh" \
   "Linux install helper generic fallback must not install an asset for the wrong architecture"
-check_required_target_dep "termy" "aarch64-apple-darwin" "wry"
-check_forbidden_target_dep "termy" "x86_64-pc-windows-msvc" "wry"
-check_forbidden_target_dep "termy" "x86_64-unknown-linux-gnu" "wry"
 check_forbidden_dep "termy_command_core" "gpui"
 check_forbidden_dep "termy_command_core" "termy_config_core"
 check_forbidden_dep "termy_config_core" "termy_themes"
@@ -224,6 +212,11 @@ check_forbidden_dep "termy_plugin_runtime" "termy_config_core"
 check_forbidden_dep "termy_plugin_runtime" "termy_terminal_ui"
 check_forbidden_dep "termy_ssh_core" "gpui"
 check_forbidden_dep "termy_ssh_core" "termy_terminal_ui"
+check_forbidden_dep "termy_ui" "termy_terminal_ui"
+check_forbidden_dep "termy_ui" "termy_config_core"
+check_forbidden_dep "termy_ui" "termy_command_core"
+check_forbidden_dep "termy_ui" "termy_plugin_runtime"
+check_forbidden_dep "termy_ui" "termy_ssh_core"
 
 require_issue_url_for_pattern \
   'clippy::cognitive_complexity' \
