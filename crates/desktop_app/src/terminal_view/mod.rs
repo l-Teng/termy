@@ -535,7 +535,7 @@ fn tmon_previous_wrapped_position(
         line: previous_line,
         col: columns.checked_sub(1)?,
     };
-    rows.cell(previous)?.wrapped.then_some(previous)
+    rows.cell(previous)?.wrapped().then_some(previous)
 }
 
 fn tmon_next_wrapped_position(
@@ -550,7 +550,7 @@ fn tmon_next_wrapped_position(
             col: position.col + 1,
         });
     }
-    if position.line >= max_line || !rows.cell(position)?.wrapped {
+    if position.line >= max_line || !rows.cell(position)?.wrapped() {
         return None;
     }
     Some(TmonGridPosition {
@@ -560,8 +560,8 @@ fn tmon_next_wrapped_position(
 }
 
 fn tmon_cell_link_character(cell: tmon::Cell) -> char {
-    if cell.wide_spacer
-        || cell.attributes.hidden
+    if cell.wide_spacer()
+        || cell.attributes.hidden()
         || cell.character == '\0'
         || cell.character.is_control()
     {
@@ -740,21 +740,21 @@ impl TerminalCellRef<'_> {
             Self::Alacritty(cell) => cell
                 .flags
                 .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-            Self::Tmon(cell, _) => cell.wide_spacer || cell.leading_wide_spacer,
+            Self::Tmon(cell, _) => cell.wide_spacer() || cell.leading_wide_spacer(),
         }
     }
 
     fn is_trailing_wide_spacer(self) -> bool {
         match self {
             Self::Alacritty(cell) => cell.flags.contains(Flags::WIDE_CHAR_SPACER),
-            Self::Tmon(cell, _) => cell.wide_spacer,
+            Self::Tmon(cell, _) => cell.wide_spacer(),
         }
     }
 
     fn is_hidden(self) -> bool {
         match self {
             Self::Alacritty(cell) => cell.flags.contains(Flags::HIDDEN),
-            Self::Tmon(cell, _) => cell.attributes.hidden,
+            Self::Tmon(cell, _) => cell.attributes.hidden(),
         }
     }
 

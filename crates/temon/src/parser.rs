@@ -351,12 +351,101 @@ impl Parser {
                 self.synchronized_update_bytes.saturating_add(bytes.len());
         }
         let mut output = ParseOutput::default();
-        for &byte in bytes {
-            self.advance_byte(grid, byte, &mut output);
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if self.state == State::Ground && !self.utf8.is_pending() {
+                let consumed = self.advance_ground_text(grid, &bytes[offset..], &mut output);
+                if consumed > 0 {
+                    offset += consumed;
+                    continue;
+                }
+            }
+            self.advance_byte(grid, bytes[offset], &mut output);
+            offset += 1;
         }
         self.sync_grid_effects(grid);
         output.synchronized_update_active = self.synchronized_update_started.is_some();
         output
+    }
+
+    fn advance_ground_text(
+        &mut self,
+        grid: &mut Grid,
+        bytes: &[u8],
+        output: &mut ParseOutput,
+    ) -> usize {
+        let span_len = bytes
+            .iter()
+            .position(|byte| *byte < 0x20 || *byte == 0x7f)
+            .unwrap_or(bytes.len());
+        if span_len == 0 {
+            return 0;
+        }
+
+        let candidate = &bytes[..span_len];
+        let mut consumed = 0;
+        while consumed < candidate.len() {
+            match std::str::from_utf8(&candidate[consumed..]) {
+                Ok(text) => {
+                    self.print_text(grid, text);
+                    return span_len;
+                }
+                Err(error) => {
+                    let valid_len = error.valid_up_to();
+                    if valid_len > 0 {
+                        let text = std::str::from_utf8(&candidate[consumed..consumed + valid_len])
+                            .expect("the UTF-8 error prefix is always valid");
+                        self.print_text(grid, text);
+                        consumed += valid_len;
+                    }
+
+                    self.advance_byte(grid, candidate[consumed], output);
+                    consumed += 1;
+                    while consumed < candidate.len() && self.utf8.is_pending() {
+                        self.advance_byte(grid, candidate[consumed], output);
+                        consumed += 1;
+                    }
+                }
+            }
+        }
+        span_len
+    }
+
+    fn print_text(&mut self, grid: &mut Grid, mut text: &str) {
+        let ascii_fast_path =
+            self.single_shift.is_none() && grid.charset(self.active_charset) == Charset::Ascii;
+        while !text.is_empty() {
+            if ascii_fast_path {
+                let ascii_len = text
+                    .as_bytes()
+                    .iter()
+                    .take_while(|&&byte| (0x20..=0x7e).contains(&byte))
+                    .count();
+                if ascii_len > 0 {
+                    let ascii = &text.as_bytes()[..ascii_len];
+                    let mut consumed_ascii = 0;
+                    while consumed_ascii < ascii.len() {
+                        let consumed = grid.put_ascii_run(&ascii[consumed_ascii..]);
+                        if consumed == 0 {
+                            self.print(grid, char::from(ascii[consumed_ascii]));
+                            consumed_ascii += 1;
+                        } else {
+                            consumed_ascii += consumed;
+                            self.last_printed = Some(char::from(ascii[consumed_ascii - 1]));
+                        }
+                    }
+                    text = &text[ascii_len..];
+                    continue;
+                }
+            }
+
+            let character = text
+                .chars()
+                .next()
+                .expect("non-empty text always has a first character");
+            self.print(grid, character);
+            text = &text[character.len_utf8()..];
+        }
     }
 
     fn advance_byte(&mut self, grid: &mut Grid, byte: u8, output: &mut ParseOutput) {
@@ -1534,7 +1623,7 @@ mod tests {
         assert_eq!(row[0].character, 'a');
         assert_eq!(row[1].character, 'X');
         assert_eq!(row[1].foreground, Color::Indexed(1));
-        assert!(row[1].attributes.bold);
+        assert!(row[1].attributes.bold());
     }
 
     #[test]
@@ -1550,9 +1639,9 @@ mod tests {
             }
         );
         assert_eq!(cell.background, Color::Indexed(200));
-        assert!(cell.attributes.underline);
+        assert!(cell.attributes.underline());
         assert!(
-            !cell.attributes.dim,
+            !cell.attributes.dim(),
             "underline style must not leak into SGR 2"
         );
     }
@@ -1578,6 +1667,50 @@ mod tests {
         parser.advance(&mut grid, &[0xe2, 0x9d]);
         parser.advance(&mut grid, &[0xaf]);
         assert_eq!(grid.line(0).unwrap()[0].character, '❯');
+    }
+
+    #[test]
+    fn ground_text_spans_preserve_invalid_and_split_utf8_behavior() {
+        let fixture = b"A\xe2\x28\xa1B\xc0\xafC\xf0\x9f\x99\x82D\xf0\x9f";
+        let expected = replay_chunks(fixture, &[]);
+        let every_byte = (1..fixture.len()).collect::<Vec<_>>();
+        assert_eq!(replay_chunks(fixture, &every_byte), expected);
+
+        let (grid, _) = parse(fixture);
+        let rendered = grid.line(0).unwrap()[..11]
+            .iter()
+            .filter(|cell| !cell.wide_spacer())
+            .map(|cell| cell.character)
+            .collect::<String>();
+        assert_eq!(rendered, "A�(�B��C🙂D");
+    }
+
+    #[test]
+    fn ground_text_spans_consume_long_malformed_runs_in_one_pass() {
+        let mut parser = Parser::default();
+        let mut grid = Grid::new(80, 24, 0, CursorStyle::Block);
+        let mut output = ParseOutput::default();
+        let malformed = vec![0x80; 16 * 1024];
+
+        assert_eq!(
+            parser.advance_ground_text(&mut grid, &malformed, &mut output),
+            malformed.len()
+        );
+        assert!(!parser.utf8.is_pending());
+    }
+
+    #[test]
+    fn long_ascii_spans_in_slow_grid_modes_match_chunked_parsing() {
+        for prefix in [b"\x1b[4h".as_slice(), b"\x1b[?7l".as_slice()] {
+            let mut fixture = prefix.to_vec();
+            fixture.extend(std::iter::repeat_n(b'a', 8 * 1024));
+            let chunks = (257..fixture.len()).step_by(257).collect::<Vec<_>>();
+
+            assert_eq!(
+                replay_chunks(&fixture, &chunks),
+                replay_chunks(&fixture, &[])
+            );
+        }
     }
 
     #[test]
@@ -1644,9 +1777,9 @@ mod tests {
                 let line = grid.line(line_index).unwrap();
                 assert_eq!(line.len(), grid.cols());
                 for (index, cell) in line.iter().enumerate() {
-                    if cell.wide_spacer {
+                    if cell.wide_spacer() {
                         assert!(index > 0);
-                        assert!(!line[index - 1].wide_spacer);
+                        assert!(!line[index - 1].wide_spacer());
                     }
                 }
             }
@@ -1802,7 +1935,7 @@ mod tests {
                 .all(|cell| cell.background == Color::Indexed(4))
         );
         assert_eq!(row[3].character, 'X');
-        assert!(!row[4].wide_spacer);
+        assert!(!row[4].wide_spacer());
     }
 
     #[test]
@@ -1818,12 +1951,12 @@ mod tests {
 
         let row = grid.line(0).unwrap();
         assert_eq!(row[0].character, 'A');
-        assert!(row[0].protected);
+        assert!(row[0].protected());
         assert_eq!(row[1].character, ' ');
         assert_eq!(row[2].character, '界');
-        assert!(row[2].protected);
-        assert!(row[3].wide_spacer);
-        assert!(row[3].protected);
+        assert!(row[2].protected());
+        assert!(row[3].wide_spacer());
+        assert!(row[3].protected());
         assert_eq!(row[4].character, ' ');
         assert_eq!(output.replies, b"\x1bP1$r1\"q\x1b\\");
 
@@ -1928,8 +2061,8 @@ mod tests {
             })
         );
         let (grid, _) = parse(b"\x1b[4:1mA\x1b[4:0mB");
-        assert!(grid.line(0).unwrap()[0].attributes.underline);
-        assert!(!grid.line(0).unwrap()[1].attributes.underline);
+        assert!(grid.line(0).unwrap()[0].attributes.underline());
+        assert!(!grid.line(0).unwrap()[1].attributes.underline());
     }
 
     #[test]
@@ -1974,7 +2107,7 @@ mod tests {
 
         assert_eq!(grid.line(0).unwrap()[1].character, '\t');
         assert_eq!(grid.line(0).unwrap()[4].character, 'X');
-        assert!(grid.line(0).unwrap()[4].wrapped);
+        assert!(grid.line(0).unwrap()[4].wrapped());
         assert_eq!(grid.line(1).unwrap()[0].character, 'z');
     }
 
@@ -1986,7 +2119,7 @@ mod tests {
 
         assert_eq!(grid.cursor_position(), (3, 0));
         assert_eq!(grid.line(0).unwrap()[3].character, 'X');
-        assert!(!grid.line(0).unwrap()[3].wrapped);
+        assert!(!grid.line(0).unwrap()[3].wrapped());
     }
 
     #[test]
@@ -2027,6 +2160,19 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|cell| *cell == Cell::default())
+        );
+    }
+
+    #[test]
+    fn repeat_uses_the_last_character_from_an_ascii_span() {
+        let (grid, _) = parse(b"abc\x1b[3b");
+
+        assert_eq!(
+            grid.line(0).unwrap()[..6]
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>(),
+            "abcccc"
         );
     }
 

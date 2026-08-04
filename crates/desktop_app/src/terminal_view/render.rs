@@ -215,10 +215,10 @@ fn terminal_cell_text_attributes(cell: TerminalCellRef<'_>) -> CellTextAttribute
     match cell {
         TerminalCellRef::Alacritty(cell) => cell_text_attributes(cell.flags),
         TerminalCellRef::Tmon(cell, _) => CellTextAttributes {
-            bold: cell.attributes.bold,
-            italic: cell.attributes.italic,
-            underline: cell.attributes.underline,
-            strikethrough: cell.attributes.strikethrough,
+            bold: cell.attributes.bold(),
+            italic: cell.attributes.italic(),
+            underline: cell.attributes.underline(),
+            strikethrough: cell.attributes.strikethrough(),
         },
     }
 }
@@ -475,14 +475,14 @@ fn resolve_cell_colors<'a>(
                 context.tmon_palette,
                 context.tmon_palette.and_then(tmon::Palette::background),
             );
-            if cell.attributes.inverse {
+            if cell.attributes.inverse() {
                 std::mem::swap(&mut fg, &mut bg);
             }
             (
                 fg,
                 bg,
-                matches!(cell.background, tmon::Color::Default) && !cell.attributes.inverse,
-                cell.attributes.dim,
+                matches!(cell.background, tmon::Color::Default) && !cell.attributes.inverse(),
+                cell.attributes.dim(),
                 cell.character,
             )
         }
@@ -4474,21 +4474,10 @@ mod tests {
     #[test]
     fn resolve_cell_colors_accepts_tmon_palette_and_attributes() {
         let context = test_build_context(0.25);
-        let cell = tmon::Cell {
-            character: 'x',
-            foreground: tmon::Color::Indexed(1),
-            background: tmon::Color::Default,
-            attributes: tmon::Attributes {
-                bold: true,
-                ..tmon::Attributes::default()
-            },
-            protected: false,
-            wide_spacer: false,
-            leading_wide_spacer: false,
-            wrapped: false,
-            hyperlink_id: None,
-            combining_id: None,
-        };
+        let mut cell = tmon::Cell::default();
+        cell.character = 'x';
+        cell.foreground = tmon::Color::Indexed(1);
+        cell.attributes = tmon::Attributes::default().with_bold(true);
 
         let resolved = resolve_cell_colors(&cell, context);
         assert_eq!(resolved.fg, context.colors.ansi[1]);
@@ -4505,10 +4494,8 @@ mod tests {
         let mut context = test_build_context(1.0);
         context.tmon_palette = Some(&palette);
 
-        let indexed = tmon::Cell {
-            foreground: tmon::Color::Indexed(1),
-            ..tmon::Cell::default()
-        };
+        let mut indexed = tmon::Cell::default();
+        indexed.foreground = tmon::Color::Indexed(1);
         let defaults = tmon::Cell::default();
 
         assert_eq!(

@@ -12,16 +12,19 @@ const SCROLLBACK: usize = 10_000;
 const SNAPSHOT_PREFILL_BYTES: usize = 2 * MIB;
 
 struct Workload {
+    id: &'static str,
     name: &'static str,
     payload: &'static str,
 }
 
 const WORKLOADS: [Workload; 4] = [
     Workload {
+        id: "plain",
         name: "plain scrollback",
         payload: "the quick brown fox jumps over the lazy dog 0123456789\r\n",
     },
     Workload {
+        id: "styled",
         name: "styled TUI redraw",
         payload: concat!(
             "\x1b[H\x1b[38;2;120;180;255;48;5;234;1mstatus\x1b[0m",
@@ -29,10 +32,12 @@ const WORKLOADS: [Workload; 4] = [
         ),
     },
     Workload {
+        id: "unicode",
         name: "Unicode + wide cells",
         payload: "ASCII café Ελληνικά 日本語 한글 🙂界\r\n",
     },
     Workload {
+        id: "edits",
         name: "cursor + line edits",
         payload: "\x1b[10;20Habcdef\x1b[3DXYZ\x1b[K\x1b[4;1H\x1b[2Linserted\x1b[1M\x1b[2J\x1b[H",
     },
@@ -224,11 +229,45 @@ fn collect_snapshot_samples(snapshot_count: usize, sample_count: usize) -> (Stat
     (stats(&tmon), stats(&alacritty))
 }
 
+fn run_profile_mode(target_bytes: usize) -> bool {
+    let Ok(workload_id) = env::var("TMON_PROFILE_WORKLOAD") else {
+        return false;
+    };
+    let workload = WORKLOADS
+        .iter()
+        .find(|workload| workload.id == workload_id)
+        .unwrap_or_else(|| {
+            panic!("TMON_PROFILE_WORKLOAD must be plain, styled, unicode, or edits")
+        });
+    let engine = match env::var("TMON_PROFILE_ENGINE").as_deref() {
+        Ok("alacritty") => Engine::Alacritty,
+        Ok("tmon") | Err(_) => Engine::Tmon,
+        Ok(other) => panic!("TMON_PROFILE_ENGINE must be tmon or alacritty, got {other:?}"),
+    };
+    let repetitions = setting("TMON_PROFILE_REPETITIONS", 1, 1, 100);
+    println!(
+        "Profiling {} with {} MiB of {} output per repetition",
+        match engine {
+            Engine::Tmon => "Tmon",
+            Engine::Alacritty => "Alacritty",
+        },
+        target_bytes / MIB,
+        workload.id,
+    );
+    for _ in 0..repetitions {
+        black_box(parse_sample(engine, workload, target_bytes));
+    }
+    true
+}
+
 fn main() {
     let target_mib = setting("TMON_BENCH_TARGET_MIB", 32, 1, 1024);
+    let target_bytes = target_mib * MIB;
+    if run_profile_mode(target_bytes) {
+        return;
+    }
     let sample_count = setting("TMON_BENCH_SAMPLES", 7, 3, 25);
     let snapshot_count = setting("TMON_BENCH_SNAPSHOTS", 250, 10, 10_000);
-    let target_bytes = target_mib * MIB;
 
     println!("Tmon vs Alacritty terminal engine benchmark");
     println!("============================================");
@@ -244,7 +283,7 @@ fn main() {
         size_of::<alacritty_terminal::term::cell::Cell>()
     );
     println!();
-    println!("Parser + grid throughput (median MiB/s; higher is better)");
+    println!("Integrated parser + grid throughput (median MiB/s; higher is better)");
     println!(
         "{:<24} {:>12} {:>12} {:>12}",
         "Workload", "Tmon", "Alacritty", "Tmon/Alac"
@@ -273,18 +312,27 @@ fn main() {
     let snapshot_ratio = tmon_snapshot.median / alacritty_snapshot.median;
 
     println!();
-    println!("Full visible-frame snapshot throughput (median snapshots/s)");
+    println!("Current full-frame API throughput (different result work; median calls/s)");
     println!("  Tmon:       {:>12.1}", tmon_snapshot.median);
     println!("  Alacritty:  {:>12.1}", alacritty_snapshot.median);
-    println!("  Tmon/Alac:  {:>11.2}x", snapshot_ratio);
+    println!("  Tmon/Alac:  {snapshot_ratio:>11.2}x");
     println!();
     println!("Summary");
     println!("  Parse throughput geometric mean: {parse_geomean:.2}x");
-    println!("  Full snapshot throughput:        {snapshot_ratio:.2}x");
+    println!("  Current full-frame API ratio:    {snapshot_ratio:.2}x");
     println!();
     println!("Notes");
     println!("  - Ratios above 1.00x favor Tmon; below 1.00x favor Alacritty.");
     println!("  - Alacritty is measured through Termy's termy_core wrapper.");
+    println!(
+        "  - Parser calls use each workload's small repeated payload, matching the saved baseline."
+    );
+    println!(
+        "  - Tmon snapshots copy raw Cells; termy_core converts Alacritty cells into TermyFrame."
+    );
+    println!(
+        "    Snapshot ratios measure the current public APIs, not equivalent raw engine work."
+    );
     println!("  - This excludes PTY I/O, GPUI rendering, input latency, RSS, and feature parity.");
     println!("  - Compare trends across runs; shared GitHub runners have timing noise.");
 }

@@ -145,14 +145,141 @@ impl Palette {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Attributes {
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub inverse: bool,
-    pub hidden: bool,
-    pub strikethrough: bool,
+#[repr(transparent)]
+pub struct Attributes(u8);
+
+impl Attributes {
+    const BOLD: u8 = 1 << 0;
+    const DIM: u8 = 1 << 1;
+    const ITALIC: u8 = 1 << 2;
+    const UNDERLINE: u8 = 1 << 3;
+    const INVERSE: u8 = 1 << 4;
+    const HIDDEN: u8 = 1 << 5;
+    const STRIKETHROUGH: u8 = 1 << 6;
+
+    const fn contains(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+
+    const fn with_flag(mut self, flag: u8, enabled: bool) -> Self {
+        if enabled {
+            self.0 |= flag;
+        } else {
+            self.0 &= !flag;
+        }
+        self
+    }
+
+    fn set_flag(&mut self, flag: u8, enabled: bool) {
+        *self = self.with_flag(flag, enabled);
+    }
+
+    pub const fn bold(self) -> bool {
+        self.contains(Self::BOLD)
+    }
+
+    pub fn set_bold(&mut self, enabled: bool) {
+        self.set_flag(Self::BOLD, enabled);
+    }
+
+    pub const fn with_bold(self, enabled: bool) -> Self {
+        self.with_flag(Self::BOLD, enabled)
+    }
+
+    pub const fn dim(self) -> bool {
+        self.contains(Self::DIM)
+    }
+
+    pub fn set_dim(&mut self, enabled: bool) {
+        self.set_flag(Self::DIM, enabled);
+    }
+
+    pub const fn with_dim(self, enabled: bool) -> Self {
+        self.with_flag(Self::DIM, enabled)
+    }
+
+    pub const fn italic(self) -> bool {
+        self.contains(Self::ITALIC)
+    }
+
+    pub fn set_italic(&mut self, enabled: bool) {
+        self.set_flag(Self::ITALIC, enabled);
+    }
+
+    pub const fn with_italic(self, enabled: bool) -> Self {
+        self.with_flag(Self::ITALIC, enabled)
+    }
+
+    pub const fn underline(self) -> bool {
+        self.contains(Self::UNDERLINE)
+    }
+
+    pub fn set_underline(&mut self, enabled: bool) {
+        self.set_flag(Self::UNDERLINE, enabled);
+    }
+
+    pub const fn with_underline(self, enabled: bool) -> Self {
+        self.with_flag(Self::UNDERLINE, enabled)
+    }
+
+    pub const fn inverse(self) -> bool {
+        self.contains(Self::INVERSE)
+    }
+
+    pub fn set_inverse(&mut self, enabled: bool) {
+        self.set_flag(Self::INVERSE, enabled);
+    }
+
+    pub const fn with_inverse(self, enabled: bool) -> Self {
+        self.with_flag(Self::INVERSE, enabled)
+    }
+
+    pub const fn hidden(self) -> bool {
+        self.contains(Self::HIDDEN)
+    }
+
+    pub fn set_hidden(&mut self, enabled: bool) {
+        self.set_flag(Self::HIDDEN, enabled);
+    }
+
+    pub const fn with_hidden(self, enabled: bool) -> Self {
+        self.with_flag(Self::HIDDEN, enabled)
+    }
+
+    pub const fn strikethrough(self) -> bool {
+        self.contains(Self::STRIKETHROUGH)
+    }
+
+    pub fn set_strikethrough(&mut self, enabled: bool) {
+        self.set_flag(Self::STRIKETHROUGH, enabled);
+    }
+
+    pub const fn with_strikethrough(self, enabled: bool) -> Self {
+        self.with_flag(Self::STRIKETHROUGH, enabled)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(transparent)]
+struct CellState(u8);
+
+impl CellState {
+    const PROTECTED: u8 = 1 << 0;
+    const WIDE_SPACER: u8 = 1 << 1;
+    const LEADING_WIDE_SPACER: u8 = 1 << 2;
+    const WRAPPED: u8 = 1 << 3;
+
+    const fn contains(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+
+    fn set(&mut self, flag: u8, enabled: bool) {
+        if enabled {
+            self.0 |= flag;
+        } else {
+            self.0 &= !flag;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,10 +288,7 @@ pub struct Cell {
     pub foreground: Color,
     pub background: Color,
     pub attributes: Attributes,
-    pub protected: bool,
-    pub wide_spacer: bool,
-    pub leading_wide_spacer: bool,
-    pub wrapped: bool,
+    state: CellState,
     pub hyperlink_id: Option<NonZeroU32>,
     #[doc(hidden)]
     pub combining_id: Option<NonZeroU32>,
@@ -177,13 +301,50 @@ impl Default for Cell {
             foreground: Color::Default,
             background: Color::Default,
             attributes: Attributes::default(),
-            protected: false,
-            wide_spacer: false,
-            leading_wide_spacer: false,
-            wrapped: false,
+            state: CellState::default(),
             hyperlink_id: None,
             combining_id: None,
         }
+    }
+}
+
+impl Cell {
+    pub const fn protected(&self) -> bool {
+        self.state.contains(CellState::PROTECTED)
+    }
+
+    pub const fn wide_spacer(&self) -> bool {
+        self.state.contains(CellState::WIDE_SPACER)
+    }
+
+    pub const fn leading_wide_spacer(&self) -> bool {
+        self.state.contains(CellState::LEADING_WIDE_SPACER)
+    }
+
+    pub const fn wrapped(&self) -> bool {
+        self.state.contains(CellState::WRAPPED)
+    }
+
+    pub fn set_protected(&mut self, enabled: bool) {
+        self.state.set(CellState::PROTECTED, enabled);
+    }
+
+    pub fn set_wide_spacer(&mut self, enabled: bool) {
+        self.state.set(CellState::WIDE_SPACER, enabled);
+    }
+
+    pub fn set_leading_wide_spacer(&mut self, enabled: bool) {
+        self.state.set(CellState::LEADING_WIDE_SPACER, enabled);
+    }
+
+    pub fn set_wrapped(&mut self, enabled: bool) {
+        self.state.set(CellState::WRAPPED, enabled);
+    }
+
+    fn take_leading_wide_spacer(&mut self) -> bool {
+        let leading_wide_spacer = self.leading_wide_spacer();
+        self.set_leading_wide_spacer(false);
+        leading_wide_spacer
     }
 }
 
@@ -314,18 +475,17 @@ struct Pen {
 
 impl Pen {
     fn cell(self, character: char) -> Cell {
-        Cell {
+        let mut cell = Cell {
             character,
             foreground: self.foreground,
             background: self.background,
             attributes: self.attributes,
-            protected: self.protected,
-            wide_spacer: false,
-            leading_wide_spacer: false,
-            wrapped: false,
+            state: CellState::default(),
             hyperlink_id: self.hyperlink_id,
             combining_id: None,
-        }
+        };
+        cell.set_protected(self.protected);
+        cell
     }
 
     fn blank(self) -> Cell {
@@ -507,7 +667,6 @@ impl Damage {
 
     fn mark_full(&mut self) {
         self.full = true;
-        self.rows.fill(None);
     }
 
     fn resize(&mut self, rows: usize) {
@@ -670,7 +829,7 @@ impl Grid {
 
     pub(crate) fn render_cursor_position(&self) -> (usize, usize) {
         let screen = self.active();
-        let col = if screen.row(screen.cursor_row)[screen.cursor_col].wide_spacer {
+        let col = if screen.row(screen.cursor_row)[screen.cursor_col].wide_spacer() {
             screen.cursor_col.saturating_sub(1)
         } else {
             screen.cursor_col
@@ -744,7 +903,7 @@ impl Grid {
                 let screen = self.active();
                 (screen.cursor_row, screen.cursor_col)
             };
-            self.active_mut().row_mut(row)[col].wrapped = true;
+            self.active_mut().row_mut(row)[col].set_wrapped(true);
             self.damage.mark(row, col, col);
             self.carriage_return();
             self.line_feed();
@@ -846,6 +1005,59 @@ impl Grid {
         }
     }
 
+    pub(crate) fn put_ascii_run(&mut self, bytes: &[u8]) -> usize {
+        if bytes.is_empty() || self.insert_mode {
+            return 0;
+        }
+
+        let (row, col, cols, run_len) = {
+            let screen = self.active();
+            if screen.wrap_pending {
+                return 0;
+            }
+            let row = screen.cursor_row;
+            let col = screen.cursor_col;
+            let run_len = bytes.len().min(screen.cols.saturating_sub(col));
+            let run_len = screen.row(row)[col..col + run_len]
+                .iter()
+                .position(|cell| {
+                    cell.wide_spacer()
+                        || cell.leading_wide_spacer()
+                        || character_width(cell.character) == 2
+                })
+                .unwrap_or(run_len);
+            (row, col, screen.cols, run_len)
+        };
+        if run_len == 0 {
+            return 0;
+        }
+        debug_assert!(
+            bytes[..run_len]
+                .iter()
+                .all(|byte| (0x20..=0x7e).contains(byte))
+        );
+
+        let pen = self.pen();
+        for (cell, byte) in self.active_mut().row_mut(row)[col..col + run_len]
+            .iter_mut()
+            .zip(&bytes[..run_len])
+        {
+            *cell = pen.cell(char::from(*byte));
+        }
+
+        let end = col + run_len;
+        let screen = self.active_mut();
+        if end >= cols {
+            screen.cursor_col = cols.saturating_sub(1);
+            screen.wrap_pending = true;
+        } else {
+            screen.cursor_col = end;
+            screen.wrap_pending = false;
+        }
+        self.damage.mark(row, col, end - 1);
+        run_len
+    }
+
     pub(crate) fn put_char(&mut self, character: char) {
         let width = character_width(character);
         if width == 0 {
@@ -869,16 +1081,11 @@ impl Grid {
             };
             if wide_does_not_fit && !wrap_pending {
                 let pen = self.pen();
-                self.write_cell_at(
-                    row,
-                    col,
-                    Cell {
-                        leading_wide_spacer: true,
-                        ..pen.cell(' ')
-                    },
-                );
+                let mut spacer = pen.cell(' ');
+                spacer.set_leading_wide_spacer(true);
+                self.write_cell_at(row, col, spacer);
             }
-            self.active_mut().row_mut(row)[col].wrapped = true;
+            self.active_mut().row_mut(row)[col].set_wrapped(true);
             self.damage.mark(row, col, col);
             self.carriage_return();
             self.line_feed();
@@ -903,14 +1110,9 @@ impl Grid {
 
         self.write_cell_at(row, col, pen.cell(character));
         if width == 2 && col + 1 < cols {
-            self.write_cell_at(
-                row,
-                col + 1,
-                Cell {
-                    wide_spacer: true,
-                    ..pen.cell(' ')
-                },
-            );
+            let mut spacer = pen.cell(' ');
+            spacer.set_wide_spacer(true);
+            self.write_cell_at(row, col + 1, spacer);
         }
 
         {
@@ -935,7 +1137,7 @@ impl Grid {
         if !wrap_pending {
             col = col.saturating_sub(1);
         }
-        if self.active().row(row)[col].wide_spacer {
+        if self.active().row(row)[col].wide_spacer() {
             col = col.saturating_sub(1);
         }
 
@@ -1010,15 +1212,15 @@ impl Grid {
 
     fn write_cell_at(&mut self, row: usize, col: usize, cell: Cell) {
         let old = self.active().row(row)[col];
-        let overwrites_wide = old.wide_spacer || character_width(old.character) == 2;
+        let overwrites_wide = old.wide_spacer() || character_width(old.character) == 2;
         if overwrites_wide && col <= 1 {
             self.clear_leading_wide_spacer_before(row);
         }
 
         let row_cells = self.active_mut().row_mut(row);
         if character_width(old.character) == 2 && col + 1 < row_cells.len() {
-            row_cells[col + 1].wide_spacer = false;
-        } else if old.wide_spacer && col > 0 {
+            row_cells[col + 1].set_wide_spacer(false);
+        } else if old.wide_spacer() && col > 0 {
             row_cells[col - 1].character = ' ';
             row_cells[col - 1].combining_id = None;
         }
@@ -1029,12 +1231,12 @@ impl Grid {
         let col = self.cols().saturating_sub(1);
         let changed = if row > 0 {
             let previous = self.active_mut().row_mut(row - 1);
-            std::mem::take(&mut previous[col].leading_wide_spacer)
+            previous[col].take_leading_wide_spacer()
         } else if !self.alternate_active {
             self.history.back_mut().is_some_and(|previous| {
                 previous
                     .get_mut(col)
-                    .is_some_and(|cell| std::mem::take(&mut cell.leading_wide_spacer))
+                    .is_some_and(Cell::take_leading_wide_spacer)
             })
         } else {
             false
@@ -1292,10 +1494,10 @@ impl Grid {
         let cols = self.cols();
         if selective {
             let cells = self.active().row(row);
-            if cells[left].wide_spacer {
+            if cells[left].wide_spacer() {
                 left = left.saturating_sub(1);
             }
-            if right + 1 < cols && cells[right + 1].wide_spacer {
+            if right + 1 < cols && cells[right + 1].wide_spacer() {
                 right += 1;
             }
         }
@@ -1304,20 +1506,17 @@ impl Grid {
         if selective {
             let mut col = left;
             while col <= right {
-                let pair_start = if row_cells[col].wide_spacer {
+                let pair_start = if row_cells[col].wide_spacer() {
                     col.saturating_sub(1)
                 } else {
                     col
                 };
-                let pair_end = if pair_start + 1 < cols && row_cells[pair_start + 1].wide_spacer {
+                let pair_end = if pair_start + 1 < cols && row_cells[pair_start + 1].wide_spacer() {
                     pair_start + 1
                 } else {
                     pair_start
                 };
-                if !row_cells[pair_start..=pair_end]
-                    .iter()
-                    .any(|cell| cell.protected)
-                {
+                if !row_cells[pair_start..=pair_end].iter().any(Cell::protected) {
                     row_cells[pair_start..=pair_end].fill(blank);
                 }
                 col = pair_end.saturating_add(1);
@@ -1413,30 +1612,21 @@ impl Grid {
         let alternate = self.alternate_active;
         let history_before = self.history.len();
         let blank = self.pen().blank();
-        let removed = {
-            let screen = self.active_mut();
-            let removed = (top..top + count)
-                .map(|row| std::mem::take(&mut screen.cells[row]))
-                .collect::<Vec<_>>();
-            screen.cells[top..=bottom].rotate_left(count);
-            removed
-        };
-        let mut recycled = Vec::with_capacity(count);
-        for row in removed {
-            if record_history {
-                if let Some(row) = self.push_history(row) {
-                    recycled.push(row);
-                }
-            } else {
-                recycled.push(row);
-            }
-        }
-        let screen = self.active_mut();
+        self.active_mut().cells[top..=bottom].rotate_left(count);
         for target in bottom + 1 - count..=bottom {
-            let mut row = recycled.pop().unwrap_or_default();
-            row.resize(cols, blank);
-            row.fill(blank);
-            screen.cells[target] = row;
+            let removed = std::mem::take(&mut self.active_mut().cells[target]);
+            let mut recycled = if record_history {
+                self.push_history(removed).unwrap_or_default()
+            } else {
+                removed
+            };
+            if recycled.is_empty() {
+                recycled.resize(cols, blank);
+            } else {
+                recycled.resize(cols, blank);
+                recycled.fill(blank);
+            }
+            self.active_mut().cells[target] = recycled;
         }
         let history_after = self.history.len();
         self.effects.push_back(GridEffect::ScrollUp {
@@ -1456,20 +1646,12 @@ impl Grid {
         if count == 0 {
             return;
         }
-        let cols = self.cols();
         let alternate = self.alternate_active;
         let history_size = self.history.len();
         let blank = self.pen().blank();
-        let screen = self.active_mut();
-        let mut recycled = (bottom + 1 - count..=bottom)
-            .map(|row| std::mem::take(&mut screen.cells[row]))
-            .collect::<Vec<_>>();
-        screen.cells[top..=bottom].rotate_right(count);
+        self.active_mut().cells[top..=bottom].rotate_right(count);
         for target in top..top + count {
-            let mut row = recycled.pop().unwrap_or_default();
-            row.resize(cols, blank);
-            row.fill(blank);
-            screen.cells[target] = row;
+            self.active_mut().cells[target].fill(blank);
         }
         self.effects.push_back(GridEffect::ScrollDown {
             alternate,
@@ -1819,25 +2001,25 @@ impl Grid {
         let mut codes = Vec::with_capacity(12);
         let pen = self.pen();
         let attributes = pen.attributes;
-        if attributes.bold {
+        if attributes.bold() {
             codes.push("1".to_string());
         }
-        if attributes.dim {
+        if attributes.dim() {
             codes.push("2".to_string());
         }
-        if attributes.italic {
+        if attributes.italic() {
             codes.push("3".to_string());
         }
-        if attributes.underline {
+        if attributes.underline() {
             codes.push("4".to_string());
         }
-        if attributes.inverse {
+        if attributes.inverse() {
             codes.push("7".to_string());
         }
-        if attributes.hidden {
+        if attributes.hidden() {
             codes.push("8".to_string());
         }
-        if attributes.strikethrough {
+        if attributes.strikethrough() {
             codes.push("9".to_string());
         }
         push_sgr_color(&mut codes, pen.foreground, true);
@@ -1962,23 +2144,23 @@ impl Grid {
                         ..Pen::default()
                     };
                 }
-                1 => pen.attributes.bold = true,
-                2 => pen.attributes.dim = true,
-                3 => pen.attributes.italic = true,
-                4 => pen.attributes.underline = true,
-                7 => pen.attributes.inverse = true,
-                8 => pen.attributes.hidden = true,
-                9 => pen.attributes.strikethrough = true,
-                21 => pen.attributes.bold = false,
+                1 => pen.attributes.set_bold(true),
+                2 => pen.attributes.set_dim(true),
+                3 => pen.attributes.set_italic(true),
+                4 => pen.attributes.set_underline(true),
+                7 => pen.attributes.set_inverse(true),
+                8 => pen.attributes.set_hidden(true),
+                9 => pen.attributes.set_strikethrough(true),
+                21 => pen.attributes.set_bold(false),
                 22 => {
-                    pen.attributes.bold = false;
-                    pen.attributes.dim = false;
+                    pen.attributes.set_bold(false);
+                    pen.attributes.set_dim(false);
                 }
-                23 => pen.attributes.italic = false,
-                24 => pen.attributes.underline = false,
-                27 => pen.attributes.inverse = false,
-                28 => pen.attributes.hidden = false,
-                29 => pen.attributes.strikethrough = false,
+                23 => pen.attributes.set_italic(false),
+                24 => pen.attributes.set_underline(false),
+                27 => pen.attributes.set_inverse(false),
+                28 => pen.attributes.set_hidden(false),
+                29 => pen.attributes.set_strikethrough(false),
                 30..=37 => pen.foreground = Color::Indexed((code - 30) as u8),
                 38 => {
                     if let Some(color) = extended_color(params, &mut index) {
@@ -2148,7 +2330,7 @@ impl Grid {
 
         for (physical_row, row) in old_history.into_iter().chain(screen_rows).enumerate() {
             let continues_logical_line = !logical.is_empty();
-            let wrapped = row.last().is_some_and(|cell| cell.wrapped);
+            let wrapped = row.last().is_some_and(Cell::wrapped);
             let is_cursor_row = physical_row == history_rows.saturating_add(cursor_row);
             let meaningful_used = if wrapped {
                 old_cols
@@ -2178,7 +2360,7 @@ impl Grid {
                 let retained_offset = row
                     .iter()
                     .take(cursor_offset.min(used))
-                    .filter(|cell| !cell.leading_wide_spacer)
+                    .filter(|cell| !cell.leading_wide_spacer())
                     .count();
                 logical_cursor = Some((
                     logical.len().saturating_add(retained_offset),
@@ -2187,10 +2369,10 @@ impl Grid {
                 ));
             }
             for mut cell in row.into_iter().take(used) {
-                if cell.leading_wide_spacer {
+                if cell.leading_wide_spacer() {
                     continue;
                 }
-                cell.wrapped = false;
+                cell.set_wrapped(false);
                 logical.push(cell);
             }
             if !wrapped {
@@ -2537,12 +2719,12 @@ fn cell_is_empty_for_viewport(cell: &Cell) -> bool {
         && cell.combining_id.is_none()
         && cell.foreground == Color::Default
         && cell.background == Color::Default
-        && !cell.attributes.inverse
-        && !cell.attributes.underline
-        && !cell.attributes.strikethrough
-        && !cell.wide_spacer
-        && !cell.leading_wide_spacer
-        && !cell.wrapped
+        && !cell.attributes.inverse()
+        && !cell.attributes.underline()
+        && !cell.attributes.strikethrough()
+        && !cell.wide_spacer()
+        && !cell.leading_wide_spacer()
+        && !cell.wrapped()
 }
 
 fn flush_reflow_line(
@@ -2573,14 +2755,14 @@ fn flush_reflow_line(
             let wide_character_hits_edge = cols > 1
                 && col + 1 == cols
                 && index + 1 < logical.len()
-                && logical[index + 1].wide_spacer
-                && !logical[index].wide_spacer;
+                && logical[index + 1].wide_spacer()
+                && !logical[index].wide_spacer();
             if wide_character_hits_edge {
                 wide_wrap_before_cursor |=
                     cursor_offset.is_some_and(|(offset, _, _)| offset > index);
                 let mut placeholder = logical[index + 1];
-                placeholder.wide_spacer = false;
-                placeholder.leading_wide_spacer = true;
+                placeholder.set_wide_spacer(false);
+                placeholder.set_leading_wide_spacer(true);
                 row[col] = placeholder;
                 break;
             }
@@ -2597,7 +2779,7 @@ fn flush_reflow_line(
             col += 1;
         }
         if index < logical.len() {
-            row[cols.saturating_sub(1)].wrapped = true;
+            row[cols.saturating_sub(1)].set_wrapped(true);
         }
         final_row = row_index;
         final_col = col;
@@ -2607,7 +2789,7 @@ fn flush_reflow_line(
         !shrinking && trailing_empty_continuation && final_col == cols;
     if preserved_empty_continuation {
         if let Some(row) = output.back_mut() {
-            row[cols.saturating_sub(1)].wrapped = true;
+            row[cols.saturating_sub(1)].set_wrapped(true);
         }
         output.push_back(vec![Cell::default(); cols]);
     }
@@ -2635,7 +2817,7 @@ fn flush_reflow_line(
                 let row = first_output_row + row_offset;
                 if row == output.len() {
                     if let Some(previous) = output.back_mut() {
-                        previous[cols.saturating_sub(1)].wrapped = true;
+                        previous[cols.saturating_sub(1)].set_wrapped(true);
                     }
                     output.push_back(vec![Cell::default(); cols]);
                 }
@@ -2645,7 +2827,7 @@ fn flush_reflow_line(
             Some((final_row + 1, 0, false))
         } else if final_col == cols && cursor_offset.is_some_and(|(_, force, _)| force) {
             if let Some(row) = output.back_mut() {
-                row[cols.saturating_sub(1)].wrapped = true;
+                row[cols.saturating_sub(1)].set_wrapped(true);
             }
             let row = output.len();
             output.push_back(vec![Cell::default(); cols]);
@@ -2713,7 +2895,116 @@ mod tests {
 
     #[test]
     fn cells_remain_compact_with_sparse_combining_storage() {
-        assert_eq!(std::mem::size_of::<Cell>(), 32);
+        assert_eq!(std::mem::size_of::<Attributes>(), 1);
+        assert_eq!(std::mem::size_of::<Cell>(), 24);
+    }
+
+    #[test]
+    fn packed_attribute_and_cell_state_flags_are_independent() {
+        let attributes = [
+            (Attributes::default().with_bold(true), Attributes::BOLD),
+            (Attributes::default().with_dim(true), Attributes::DIM),
+            (Attributes::default().with_italic(true), Attributes::ITALIC),
+            (
+                Attributes::default().with_underline(true),
+                Attributes::UNDERLINE,
+            ),
+            (
+                Attributes::default().with_inverse(true),
+                Attributes::INVERSE,
+            ),
+            (Attributes::default().with_hidden(true), Attributes::HIDDEN),
+            (
+                Attributes::default().with_strikethrough(true),
+                Attributes::STRIKETHROUGH,
+            ),
+        ];
+        for (attributes, expected) in attributes {
+            assert_eq!(attributes.0, expected);
+        }
+
+        let mut attributes = Attributes::default();
+        attributes.set_bold(true);
+        attributes.set_dim(true);
+        attributes.set_italic(true);
+        attributes.set_underline(true);
+        attributes.set_inverse(true);
+        attributes.set_hidden(true);
+        attributes.set_strikethrough(true);
+        assert!(attributes.bold());
+        assert!(attributes.dim());
+        assert!(attributes.italic());
+        assert!(attributes.underline());
+        assert!(attributes.inverse());
+        assert!(attributes.hidden());
+        assert!(attributes.strikethrough());
+        attributes.set_bold(false);
+        assert!(!attributes.bold());
+        assert!(attributes.dim());
+
+        let state_flags: [(fn(&mut Cell), u8); 4] = [
+            (
+                |cell: &mut Cell| cell.set_protected(true),
+                CellState::PROTECTED,
+            ),
+            (
+                |cell: &mut Cell| cell.set_wide_spacer(true),
+                CellState::WIDE_SPACER,
+            ),
+            (
+                |cell: &mut Cell| cell.set_leading_wide_spacer(true),
+                CellState::LEADING_WIDE_SPACER,
+            ),
+            (|cell: &mut Cell| cell.set_wrapped(true), CellState::WRAPPED),
+        ];
+        for (set, expected) in state_flags {
+            let mut cell = Cell::default();
+            set(&mut cell);
+            assert_eq!(cell.state.0, expected);
+        }
+    }
+
+    #[test]
+    fn ascii_runs_match_scalar_writes_across_wrap_and_scrollback() {
+        let mut fast = Grid::new(5, 2, 4, CursorStyle::Block);
+        let mut scalar = Grid::new(5, 2, 4, CursorStyle::Block);
+        assert_eq!(fast.take_damage(), DamageSnapshot::Full);
+        assert_eq!(scalar.take_damage(), DamageSnapshot::Full);
+        let bytes = b"abcdefghijklmnop";
+
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let consumed = fast.put_ascii_run(&bytes[offset..]);
+            if consumed == 0 {
+                fast.put_char(char::from(bytes[offset]));
+                offset += 1;
+            } else {
+                offset += consumed;
+            }
+        }
+        for byte in bytes {
+            scalar.put_char(char::from(*byte));
+        }
+
+        assert_eq!(fast.primary.cells, scalar.primary.cells);
+        assert_eq!(fast.history, scalar.history);
+        assert_eq!(fast.cursor_position(), scalar.cursor_position());
+        assert_eq!(fast.primary.wrap_pending, scalar.primary.wrap_pending);
+        assert_eq!(fast.take_damage(), scalar.take_damage());
+    }
+
+    #[test]
+    fn ascii_runs_stop_before_cells_that_need_wide_cleanup() {
+        let mut grid = Grid::new(6, 2, 0, CursorStyle::Block);
+        grid.set_cursor_position(0, 2);
+        grid.put_char('界');
+        grid.set_cursor_position(0, 0);
+
+        assert_eq!(grid.put_ascii_run(b"abcdef"), 2);
+        assert_eq!(grid.line(0).unwrap()[0].character, 'a');
+        assert_eq!(grid.line(0).unwrap()[1].character, 'b');
+        assert_eq!(grid.line(0).unwrap()[2].character, '界');
+        assert!(grid.line(0).unwrap()[3].wide_spacer());
     }
 
     #[test]
@@ -2850,6 +3141,16 @@ mod tests {
     }
 
     #[test]
+    fn full_damage_discards_stale_partial_spans_before_the_next_frame() {
+        let mut damage = Damage::new(2);
+        assert_eq!(damage.take(), DamageSnapshot::Full);
+        damage.mark(1, 2, 4);
+        damage.mark_full();
+        assert_eq!(damage.take(), DamageSnapshot::Full);
+        assert_eq!(damage.take(), DamageSnapshot::Partial(Vec::new()));
+    }
+
+    #[test]
     fn width_resize_reflows_soft_wrapped_content_and_cursor() {
         let mut grid = Grid::new(5, 3, 16, CursorStyle::Block);
         for character in "abcdefghij".chars() {
@@ -2869,10 +3170,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(rendered, ["abc", "def", "ghi", "j  "]);
         assert_eq!(grid.cursor_position(), (1, 3));
-        assert!(grid.line(0).unwrap()[2].wrapped);
-        assert!(grid.line(1).unwrap()[2].wrapped);
-        assert!(grid.line(2).unwrap()[2].wrapped);
-        assert!(!grid.line(3).unwrap()[2].wrapped);
+        assert!(grid.line(0).unwrap()[2].wrapped());
+        assert!(grid.line(1).unwrap()[2].wrapped());
+        assert!(grid.line(2).unwrap()[2].wrapped());
+        assert!(!grid.line(3).unwrap()[2].wrapped());
     }
 
     #[test]
@@ -2891,14 +3192,14 @@ mod tests {
                 .collect::<String>(),
             "abc"
         );
-        assert!(grid.line(0).unwrap()[3].leading_wide_spacer);
-        assert!(grid.line(0).unwrap()[3].wrapped);
+        assert!(grid.line(0).unwrap()[3].leading_wide_spacer());
+        assert!(grid.line(0).unwrap()[3].wrapped());
         assert_eq!(grid.line(1).unwrap()[0].character, '界');
-        assert!(grid.line(1).unwrap()[1].wide_spacer);
+        assert!(grid.line(1).unwrap()[1].wide_spacer());
 
         grid.resize(8, 3);
         assert_eq!(grid.line(0).unwrap()[3].character, '界');
-        assert!(grid.line(0).unwrap()[4].wide_spacer);
+        assert!(grid.line(0).unwrap()[4].wide_spacer());
     }
 
     #[test]
@@ -2923,10 +3224,10 @@ mod tests {
         assert_eq!(placeholder.character, ' ');
         assert_eq!(placeholder.foreground, Color::Indexed(1));
         assert_eq!(placeholder.background, Color::Indexed(4));
-        assert!(placeholder.leading_wide_spacer);
-        assert!(placeholder.wrapped);
+        assert!(placeholder.leading_wide_spacer());
+        assert!(placeholder.wrapped());
         assert_eq!(grid.line(1).unwrap()[0].character, '界');
-        assert!(grid.line(1).unwrap()[1].wide_spacer);
+        assert!(grid.line(1).unwrap()[1].wide_spacer());
     }
 
     #[test]
@@ -3153,5 +3454,42 @@ mod tests {
         assert_eq!(grid.history_size(), 1);
         assert_eq!(grid.line(-1).unwrap()[0].character, 'a');
         assert_eq!(grid.line(0).unwrap()[0].character, 'b');
+    }
+
+    #[test]
+    fn multi_row_shifts_preserve_order_through_history_rollover() {
+        let mut grid = Grid::new(2, 4, 3, CursorStyle::Block);
+        for (row, character) in ['a', 'b', 'c', 'd'].into_iter().enumerate() {
+            grid.primary.cells[row][0].character = character;
+        }
+
+        grid.scroll_up(2);
+        assert_eq!(grid.history_size(), 2);
+        assert_eq!(grid.line(-2).unwrap()[0].character, 'a');
+        assert_eq!(grid.line(-1).unwrap()[0].character, 'b');
+        assert_eq!(grid.line(0).unwrap()[0].character, 'c');
+        assert_eq!(grid.line(1).unwrap()[0].character, 'd');
+
+        grid.primary.cells[2][0].character = 'e';
+        grid.primary.cells[3][0].character = 'f';
+        grid.scroll_up(2);
+        assert_eq!(grid.history_size(), 3);
+        assert_eq!(grid.line(-3).unwrap()[0].character, 'b');
+        assert_eq!(grid.line(-2).unwrap()[0].character, 'c');
+        assert_eq!(grid.line(-1).unwrap()[0].character, 'd');
+        assert_eq!(grid.line(0).unwrap()[0].character, 'e');
+        assert_eq!(grid.line(1).unwrap()[0].character, 'f');
+        assert!(
+            grid.line(2)
+                .unwrap()
+                .iter()
+                .all(|cell| *cell == Cell::default())
+        );
+        assert!(
+            grid.line(3)
+                .unwrap()
+                .iter()
+                .all(|cell| *cell == Cell::default())
+        );
     }
 }

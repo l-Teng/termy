@@ -43,9 +43,13 @@ just benchmark-tmon
 The `Tmon vs Alacritty Benchmark` GitHub Actions workflow runs on every push and
 can also be started manually with configurable workload sizes. Each run uploads
 the same text report as a 30-day artifact and includes it in the job summary.
+The first measured optimization pass is documented in [PERFORMANCE.md](PERFORMANCE.md).
 
 The suite compares identical byte streams, grid dimensions, and scrollback
-limits in release mode. It reports parser/grid throughput, full visible-frame
-snapshot throughput, and static cell sizes. It does not measure PTY I/O, GPUI
-rendering, whole-process memory, input latency, or terminal compatibility, so
-speed ratios are not a feature-parity score.
+limits in release mode. It reports integrated parser/grid throughput, current
+full-frame API throughput, and static cell sizes. Feed calls intentionally keep
+the original small workload payloads so results remain comparable with the
+saved baseline. The snapshot APIs perform different conversion work, so that
+ratio is not a raw engine-to-engine snapshot comparison. The suite does not
+measure PTY I/O, GPUI rendering, whole-process memory, input latency, or
+terminal compatibility, and speed ratios are not a feature-parity score.
