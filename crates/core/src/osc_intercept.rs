@@ -382,6 +382,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_osc_7_preserves_percent_escaped_paths() {
+        let mut interceptor = OscInterceptor::new();
+        let (output, events) = process_str(&mut interceptor, "\x1b]7;file://host/tmp/a%20b\x1b\\");
+
+        assert!(output.is_empty());
+        assert_eq!(
+            events,
+            vec![OscEvent::WorkingDirectory("/tmp/a%20b".to_string())]
+        );
+    }
+
+    #[test]
     fn parse_osc_9_9_working_directory() {
         let mut interceptor = OscInterceptor::new();
         let (output, events) = process_str(

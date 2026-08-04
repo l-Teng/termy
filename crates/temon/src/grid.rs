@@ -1,10 +1,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::BuildHasher;
 use std::num::NonZeroU32;
 
 use crate::unicode_width::character_width;
 
 const MAX_GRID_DIMENSION: u16 = 4096;
 const MAX_SCROLLBACK_LINES: usize = 1_000_000;
+const KITTY_KEYBOARD_STACK_MAX_DEPTH: usize = 4096;
+const HYPERLINK_PRUNE_MIN_LEN: usize = 4096;
+const HYPERLINK_PRUNE_INTERVAL: usize = 1024;
 const COMBINING_PRUNE_INTERVAL: u32 = 1 << 18;
 const INLINE_COMBINING_BYTES: usize = 16;
 const POOLED_COMBINING_BIT: u32 = 1 << 31;
@@ -107,12 +111,13 @@ pub struct Rgb {
     pub b: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Palette {
     indexed: [Option<Rgb>; 256],
     foreground: Option<Rgb>,
     background: Option<Rgb>,
     cursor: Option<Rgb>,
+    revision: u64,
 }
 
 impl Default for Palette {
@@ -122,9 +127,21 @@ impl Default for Palette {
             foreground: None,
             background: None,
             cursor: None,
+            revision: 0,
         }
     }
 }
+
+impl PartialEq for Palette {
+    fn eq(&self, other: &Self) -> bool {
+        self.indexed == other.indexed
+            && self.foreground == other.foreground
+            && self.background == other.background
+            && self.cursor == other.cursor
+    }
+}
+
+impl Eq for Palette {}
 
 impl Palette {
     pub fn indexed(&self, index: u8) -> Option<Rgb> {
@@ -141,6 +158,19 @@ impl Palette {
 
     pub fn cursor(&self) -> Option<Rgb> {
         self.cursor
+    }
+
+    /// Returns the monotonic rendering revision for live palette overrides.
+    ///
+    /// Revisions are intentionally excluded from [`PartialEq`]: palette
+    /// equality describes visible colors, while this value tracks mutation
+    /// history for render-cache invalidation.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.saturating_add(1);
     }
 }
 
@@ -390,16 +420,6 @@ pub struct KeyboardMode {
     pub report_associated_text: bool,
 }
 
-impl KeyboardMode {
-    fn kitty_flags(self) -> u16 {
-        u16::from(self.disambiguate_escape_codes)
-            | (u16::from(self.report_event_types) << 1)
-            | (u16::from(self.report_alternate_keys) << 2)
-            | (u16::from(self.report_all_keys_as_esc) << 3)
-            | (u16::from(self.report_associated_text) << 4)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirtySpan {
     pub row: usize,
@@ -430,6 +450,88 @@ pub struct Hyperlink {
     pub target: String,
 }
 
+/// A link range returned by a host-provided text classifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkMatch {
+    pub start_col: usize,
+    pub end_col: usize,
+    pub target: String,
+}
+
+/// A link range clipped to the terminal's visible viewport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewportLink {
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
+    pub end_col: usize,
+    pub target: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GridPosition {
+    line: i32,
+    col: usize,
+}
+
+pub(crate) enum LinkCandidate {
+    Resolved(ViewportLink),
+    Text(TextLinkCandidate),
+}
+
+pub(crate) struct TextLinkCandidate {
+    characters: Vec<char>,
+    hovered_index: usize,
+    start: GridPosition,
+    display_offset: usize,
+    screen_lines: usize,
+    columns: usize,
+}
+
+impl TextLinkCandidate {
+    pub(crate) fn classifier_input(&self) -> (&[char], usize) {
+        (&self.characters, self.hovered_index)
+    }
+
+    pub(crate) fn resolve(self, link_match: LinkMatch) -> Option<ViewportLink> {
+        if link_match.start_col > self.hovered_index
+            || link_match.end_col < self.hovered_index
+            || link_match.end_col >= self.characters.len()
+        {
+            return None;
+        }
+
+        let start = self.position_at(link_match.start_col)?;
+        let end = self.position_at(link_match.end_col)?;
+        viewport_link_from_grid_range(
+            start,
+            end,
+            link_match.target,
+            self.display_offset,
+            self.screen_lines,
+            self.columns,
+        )
+    }
+
+    fn position_at(&self, index: usize) -> Option<GridPosition> {
+        if index >= self.characters.len() {
+            return None;
+        }
+        let linear_col = self.start.col.checked_add(index)?;
+        let line_offset = i32::try_from(linear_col / self.columns).ok()?;
+        Some(GridPosition {
+            line: self.start.line.checked_add(line_offset)?,
+            col: linear_col % self.columns,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HyperlinkEntry {
+    protocol_id: Option<String>,
+    target: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GridEffect {
     ScrollUp {
@@ -437,6 +539,7 @@ pub(crate) enum GridEffect {
         top: usize,
         bottom: usize,
         count: usize,
+        full_screen_region: bool,
         recorded_history: bool,
         history_before: usize,
         history_after: usize,
@@ -457,9 +560,6 @@ pub(crate) enum GridEffect {
     },
     RebaseHistory {
         dropped: usize,
-    },
-    Reflow {
-        alternate: bool,
     },
     Reset,
 }
@@ -726,8 +826,10 @@ pub(crate) struct Grid {
     cell_width: f32,
     cell_height: f32,
     palette: Palette,
-    hyperlinks: HashMap<u32, String>,
+    hyperlinks: HashMap<u32, HyperlinkEntry>,
+    hyperlink_identities: HashMap<u64, u32>,
     next_hyperlink_id: u32,
+    next_hyperlink_prune_len: usize,
     combining: HashMap<NonZeroU32, CombiningText>,
     next_combining_id: u32,
     effects: VecDeque<GridEffect>,
@@ -773,7 +875,9 @@ impl Grid {
             cell_height: 1.0,
             palette: Palette::default(),
             hyperlinks: HashMap::new(),
+            hyperlink_identities: HashMap::new(),
             next_hyperlink_id: 1,
+            next_hyperlink_prune_len: HYPERLINK_PRUNE_MIN_LEN,
             combining: HashMap::new(),
             next_combining_id: 1,
             effects: VecDeque::with_capacity(8),
@@ -1023,7 +1127,7 @@ impl Grid {
                 .position(|cell| {
                     cell.wide_spacer()
                         || cell.leading_wide_spacer()
-                        || character_width(cell.character) == 2
+                        || character_width(cell.character) > 1
                 })
                 .unwrap_or(run_len);
             (row, col, screen.cols, run_len)
@@ -1059,11 +1163,15 @@ impl Grid {
     }
 
     pub(crate) fn put_char(&mut self, character: char) {
-        let width = character_width(character);
-        if width == 0 {
+        let reported_width = character_width(character);
+        if reported_width == 0 {
             self.put_combining(character);
             return;
         }
+        // Alacritty uses the Unicode scalar width for insert-mode shifting,
+        // but renders every width greater than one as a two-cell glyph. Unicode
+        // 15.1 has one width-3 scalar (U+17D8), so keep those values separate.
+        let width = if reported_width == 1 { 1 } else { 2 };
 
         let (wrap_pending, wide_does_not_fit) = {
             let screen = self.active();
@@ -1101,10 +1209,11 @@ impl Grid {
             (screen.cursor_row, screen.cursor_col, screen.cols)
         };
 
-        if insert_mode && col + width < cols {
+        let shifted_for_insert = insert_mode && col + reported_width < cols;
+        if shifted_for_insert {
             let row_cells = self.active_mut().row_mut(row);
-            for source in (col..cols - width).rev() {
-                row_cells.swap(source + width, source);
+            for source in (col..cols - reported_width).rev() {
+                row_cells.swap(source + reported_width, source);
             }
         }
 
@@ -1125,8 +1234,12 @@ impl Grid {
                 screen.wrap_pending = false;
             }
         }
-        self.damage
-            .mark(row, col, col.saturating_add(width - 1).min(cols - 1));
+        let damage_end = if shifted_for_insert {
+            cols - 1
+        } else {
+            col.saturating_add(width - 1).min(cols - 1)
+        };
+        self.damage.mark(row, col, damage_end);
     }
 
     fn put_combining(&mut self, character: char) {
@@ -1212,19 +1325,27 @@ impl Grid {
 
     fn write_cell_at(&mut self, row: usize, col: usize, cell: Cell) {
         let old = self.active().row(row)[col];
-        let overwrites_wide = old.wide_spacer() || character_width(old.character) == 2;
+        let old_width = character_width(old.character);
+        let overwrites_wide = old.wide_spacer() || old_width > 1;
         if overwrites_wide && col <= 1 {
             self.clear_leading_wide_spacer_before(row);
         }
 
         let row_cells = self.active_mut().row_mut(row);
-        if character_width(old.character) == 2 && col + 1 < row_cells.len() {
+        let cleared_neighbor = if old_width > 1 && col + 1 < row_cells.len() {
             row_cells[col + 1].set_wide_spacer(false);
+            Some(col + 1)
         } else if old.wide_spacer() && col > 0 {
             row_cells[col - 1].character = ' ';
             row_cells[col - 1].combining_id = None;
-        }
+            Some(col - 1)
+        } else {
+            None
+        };
         row_cells[col] = cell;
+        if let Some(neighbor) = cleared_neighbor {
+            self.damage.mark(row, neighbor, neighbor);
+        }
     }
 
     fn clear_leading_wide_spacer_before(&mut self, row: usize) {
@@ -1366,10 +1487,13 @@ impl Grid {
 
     pub(crate) fn set_scroll_region(&mut self, top: usize, bottom: usize) {
         let rows = self.rows();
-        let bottom = bottom.min(rows.saturating_sub(1));
+        // Validate the requested margins before clipping them to the grid. VTE
+        // accepts a valid range whose bottom lies below the viewport, then
+        // clamps it; that can intentionally produce a one-line region.
         if top >= bottom || top >= rows {
             return;
         }
+        let bottom = bottom.min(rows.saturating_sub(1));
         let origin_mode = self.origin_mode;
         self.primary.scroll_top = top;
         self.primary.scroll_bottom = bottom;
@@ -1608,6 +1732,7 @@ impl Grid {
         if count == 0 {
             return;
         }
+        let full_screen_region = top == 0 && bottom.saturating_add(1) == self.rows();
         let cols = self.cols();
         let alternate = self.alternate_active;
         let history_before = self.history.len();
@@ -1634,6 +1759,7 @@ impl Grid {
             top,
             bottom,
             count,
+            full_screen_region,
             recorded_history: record_history,
             history_before,
             history_after,
@@ -1706,9 +1832,10 @@ impl Grid {
         self.kitty_keyboard_stack.clear();
         self.inactive_kitty_keyboard_stack.clear();
         self.tab_stops = default_tab_stops(self.cols());
-        self.palette = Palette::default();
         self.hyperlinks.clear();
+        self.hyperlink_identities.clear();
         self.next_hyperlink_id = 1;
+        self.next_hyperlink_prune_len = HYPERLINK_PRUNE_MIN_LEN;
         self.combining.clear();
         self.next_combining_id = 1;
         self.effects.clear();
@@ -1724,6 +1851,7 @@ impl Grid {
         let slot = &mut self.palette.indexed[usize::from(index)];
         if *slot != Some(color) {
             *slot = Some(color);
+            self.palette.bump_revision();
             self.damage.mark_full();
         }
     }
@@ -1731,6 +1859,7 @@ impl Grid {
     pub(crate) fn reset_indexed_color(&mut self, index: u8) {
         let slot = &mut self.palette.indexed[usize::from(index)];
         if slot.take().is_some() {
+            self.palette.bump_revision();
             self.damage.mark_full();
         }
     }
@@ -1738,6 +1867,7 @@ impl Grid {
     pub(crate) fn reset_indexed_colors(&mut self) {
         if self.palette.indexed.iter().any(Option::is_some) {
             self.palette.indexed.fill(None);
+            self.palette.bump_revision();
             self.damage.mark_full();
         }
     }
@@ -1745,6 +1875,7 @@ impl Grid {
     pub(crate) fn set_foreground_color(&mut self, color: Option<Rgb>) {
         if self.palette.foreground != color {
             self.palette.foreground = color;
+            self.palette.bump_revision();
             self.damage.mark_full();
         }
     }
@@ -1752,6 +1883,7 @@ impl Grid {
     pub(crate) fn set_background_color(&mut self, color: Option<Rgb>) {
         if self.palette.background != color {
             self.palette.background = color;
+            self.palette.bump_revision();
             self.damage.mark_full();
         }
     }
@@ -1759,6 +1891,7 @@ impl Grid {
     pub(crate) fn set_cursor_color(&mut self, color: Option<Rgb>) {
         if self.palette.cursor != color {
             self.palette.cursor = color;
+            self.palette.bump_revision();
             self.damage.mark_full();
         }
     }
@@ -1997,6 +2130,11 @@ impl Grid {
         (screen.scroll_top + 1, screen.scroll_bottom + 1)
     }
 
+    pub(crate) fn scroll_region_covers_full_screen(&self) -> bool {
+        let screen = self.active();
+        screen.scroll_top == 0 && screen.scroll_bottom == screen.rows.saturating_sub(1)
+    }
+
     pub(crate) fn sgr_status(&self) -> String {
         let mut codes = Vec::with_capacity(12);
         let pen = self.pen();
@@ -2030,27 +2168,69 @@ impl Grid {
         format!("{}m", codes.join(";"))
     }
 
-    pub(crate) fn set_hyperlink(&mut self, target: Option<&str>) {
+    pub(crate) fn set_hyperlink(&mut self, protocol_id: Option<&str>, target: Option<&str>) {
         let Some(target) = target.filter(|target| !target.is_empty()) else {
             self.pen_mut().hyperlink_id = None;
             return;
         };
 
-        if let Some(id) = self
-            .hyperlinks
-            .iter()
-            .find_map(|(id, existing)| (existing == target).then_some(*id))
-        {
-            self.pen_mut().hyperlink_id = NonZeroU32::new(id);
-            return;
+        // Alacritty treats each OSC 8 link without an explicit `id` as a new
+        // identity. Explicit IDs, however, reconnect equal `id + uri` pairs.
+        // Index their combined identity so reopening a link does not scan all
+        // retained links. The full scan is only a collision-safe fallback.
+        let identity_hash =
+            protocol_id.map(|protocol_id| self.hyperlink_identity_hash(protocol_id, target));
+        if let (Some(protocol_id), Some(identity_hash)) = (protocol_id, identity_hash) {
+            let indexed_id = self.hyperlink_identities.get(&identity_hash).copied();
+            let id = match indexed_id {
+                Some(id)
+                    if self.hyperlinks.get(&id).is_some_and(|existing| {
+                        existing.protocol_id.as_deref() == Some(protocol_id)
+                            && existing.target == target
+                    }) =>
+                {
+                    Some(id)
+                }
+                Some(_) => self.hyperlinks.iter().find_map(|(id, existing)| {
+                    (existing.protocol_id.as_deref() == Some(protocol_id)
+                        && existing.target == target)
+                        .then_some(*id)
+                }),
+                None => None,
+            };
+            if let Some(id) = id {
+                self.pen_mut().hyperlink_id = NonZeroU32::new(id);
+                return;
+            }
         }
-        if self.hyperlinks.len() >= 4096 {
+        if self.hyperlinks.len() >= self.next_hyperlink_prune_len {
             self.prune_hyperlinks();
+            // A screen can legitimately retain thousands of live links. Once
+            // a full grid scan finds that many, amortize the next scan instead
+            // of rescanning every time another OSC 8 link is opened.
+            self.next_hyperlink_prune_len = self
+                .hyperlinks
+                .len()
+                .saturating_add(HYPERLINK_PRUNE_INTERVAL)
+                .max(HYPERLINK_PRUNE_MIN_LEN);
         }
         let id = self.next_hyperlink_id.max(1);
         self.next_hyperlink_id = self.next_hyperlink_id.wrapping_add(1).max(1);
-        self.hyperlinks.insert(id, target.to_string());
+        self.hyperlinks.insert(
+            id,
+            HyperlinkEntry {
+                protocol_id: protocol_id.map(str::to_owned),
+                target: target.to_string(),
+            },
+        );
+        if let Some(identity_hash) = identity_hash {
+            self.hyperlink_identities.entry(identity_hash).or_insert(id);
+        }
         self.pen_mut().hyperlink_id = NonZeroU32::new(id);
+    }
+
+    fn hyperlink_identity_hash(&self, protocol_id: &str, target: &str) -> u64 {
+        self.hyperlinks.hasher().hash_one((protocol_id, target))
     }
 
     fn prune_hyperlinks(&mut self) {
@@ -2086,6 +2266,19 @@ impl Grid {
         }
         self.hyperlinks
             .retain(|id, _| NonZeroU32::new(*id).is_some_and(|id| live.contains(&id)));
+        self.hyperlink_identities.clear();
+        for (id, entry) in &self.hyperlinks {
+            let Some(protocol_id) = entry.protocol_id.as_deref() else {
+                continue;
+            };
+            self.hyperlink_identities
+                .entry(
+                    self.hyperlinks
+                        .hasher()
+                        .hash_one((protocol_id, entry.target.as_str())),
+                )
+                .or_insert(*id);
+        }
     }
 
     pub(crate) fn set_kitty_keyboard_flags(&mut self, flags: u16, mode: u16) {
@@ -2101,12 +2294,12 @@ impl Grid {
         apply(&mut self.keyboard_mode.report_associated_text, 1 << 4);
     }
 
-    pub(crate) fn kitty_keyboard_flags(&self) -> u16 {
-        self.keyboard_mode.kitty_flags()
+    pub(crate) fn kitty_keyboard_report_flags(&self) -> u16 {
+        self.kitty_keyboard_stack.last().copied().unwrap_or(0)
     }
 
     pub(crate) fn push_kitty_keyboard_flags(&mut self, flags: u16) {
-        if self.kitty_keyboard_stack.len() >= 64 {
+        if self.kitty_keyboard_stack.len() >= KITTY_KEYBOARD_STACK_MAX_DEPTH {
             self.kitty_keyboard_stack.remove(0);
         }
         self.kitty_keyboard_stack.push(flags & 0x1f);
@@ -2197,10 +2390,9 @@ impl Grid {
         if self.primary.cols != cols {
             self.reflow_primary(cols, rows);
             self.alternate.resize(cols, rows, false);
-            self.effects
-                .push_back(GridEffect::Reflow { alternate: false });
-            self.effects
-                .push_back(GridEffect::Reflow { alternate: true });
+            // Kitty placements stay anchored to terminal lines across a width change.
+            // Rendering clips placements outside the resized viewport, matching the
+            // native engine and allowing them to reappear after a later expansion.
         } else {
             self.resize_primary_rows(rows);
             let alternate_old_rows = self.alternate.rows;
@@ -2214,6 +2406,7 @@ impl Grid {
                         top: 0,
                         bottom: alternate_old_rows.saturating_sub(1),
                         count,
+                        full_screen_region: true,
                         recorded_history: false,
                         history_before: 0,
                         history_after: 0,
@@ -2294,6 +2487,7 @@ impl Grid {
                 top: 0,
                 bottom: old_rows.saturating_sub(1),
                 count: required_scrolling,
+                full_screen_region: true,
                 recorded_history: self.history_limit > 0,
                 history_before,
                 history_after,
@@ -2605,8 +2799,166 @@ impl Grid {
         Some(Hyperlink {
             start_col,
             end_col,
-            target: self.hyperlinks.get(&id.get())?.clone(),
+            target: self.hyperlinks.get(&id.get())?.target.clone(),
         })
+    }
+
+    pub(crate) fn link_candidate(&self, row: usize, col: usize) -> Option<LinkCandidate> {
+        let columns = self.cols();
+        let screen_lines = self.rows();
+        if row >= screen_lines || col >= columns || columns == 0 {
+            return None;
+        }
+
+        let display_offset = self.display_offset();
+        let display_offset_i32 = i32::try_from(display_offset).ok()?;
+        let hovered = GridPosition {
+            line: i32::try_from(row).ok()?.checked_sub(display_offset_i32)?,
+            col,
+        };
+        let bounds = self.line_bounds();
+        let hovered_cell = self.cell_at_position(hovered)?;
+
+        if let Some(hyperlink_id) = hovered_cell.hyperlink_id {
+            let target = self.hyperlinks.get(&hyperlink_id.get())?.target.clone();
+            let mut start = hovered;
+            while let Some(previous) = self.previous_wrapped_position(start, bounds.0, columns) {
+                if self.cell_at_position(previous)?.hyperlink_id == Some(hyperlink_id) {
+                    start = previous;
+                } else {
+                    break;
+                }
+            }
+
+            let mut end = hovered;
+            while let Some(next) = self.next_wrapped_position(end, bounds.1, columns) {
+                if self.cell_at_position(next)?.hyperlink_id == Some(hyperlink_id) {
+                    end = next;
+                } else {
+                    break;
+                }
+            }
+
+            return viewport_link_from_grid_range(
+                start,
+                end,
+                target,
+                display_offset,
+                screen_lines,
+                columns,
+            )
+            .map(LinkCandidate::Resolved);
+        }
+
+        let hovered_character = self.link_character(hovered)?;
+        if hovered_character.is_whitespace() {
+            return None;
+        }
+
+        let mut start = hovered;
+        while let Some(previous) = self.previous_wrapped_position(start, bounds.0, columns) {
+            if self.link_character(previous)?.is_whitespace() {
+                break;
+            }
+            start = previous;
+        }
+
+        let line_distance = usize::try_from(hovered.line.checked_sub(start.line)?).ok()?;
+        let hovered_index = line_distance
+            .checked_mul(columns)?
+            .checked_add(hovered.col)?
+            .checked_sub(start.col)?;
+        let mut characters = Vec::with_capacity(columns.min(128));
+        let mut cursor = start;
+        loop {
+            let character = self.link_character(cursor)?;
+            if character.is_whitespace() {
+                break;
+            }
+            characters.push(character);
+            let Some(next) = self.next_wrapped_position(cursor, bounds.1, columns) else {
+                break;
+            };
+            cursor = next;
+        }
+        if hovered_index >= characters.len() {
+            return None;
+        }
+
+        Some(LinkCandidate::Text(TextLinkCandidate {
+            characters,
+            hovered_index,
+            start,
+            display_offset,
+            screen_lines,
+            columns,
+        }))
+    }
+
+    fn cell_at_position(&self, position: GridPosition) -> Option<&Cell> {
+        self.line(position.line)?.get(position.col)
+    }
+
+    fn previous_wrapped_position(
+        &self,
+        position: GridPosition,
+        min_line: i32,
+        columns: usize,
+    ) -> Option<GridPosition> {
+        if position.col > 0 {
+            return Some(GridPosition {
+                line: position.line,
+                col: position.col - 1,
+            });
+        }
+        let previous_line = position.line.checked_sub(1)?;
+        if previous_line < min_line {
+            return None;
+        }
+        let previous = GridPosition {
+            line: previous_line,
+            col: columns.checked_sub(1)?,
+        };
+        self.cell_at_position(previous)?
+            .wrapped()
+            .then_some(previous)
+    }
+
+    fn next_wrapped_position(
+        &self,
+        position: GridPosition,
+        max_line: i32,
+        columns: usize,
+    ) -> Option<GridPosition> {
+        if position.col + 1 < columns {
+            return Some(GridPosition {
+                line: position.line,
+                col: position.col + 1,
+            });
+        }
+        if position.line >= max_line || !self.cell_at_position(position)?.wrapped() {
+            return None;
+        }
+        Some(GridPosition {
+            line: position.line.checked_add(1)?,
+            col: 0,
+        })
+    }
+
+    fn link_character(&self, position: GridPosition) -> Option<char> {
+        let cell = self.cell_at_position(position)?;
+        Some(
+            if cell.wide_spacer()
+                || cell.leading_wide_spacer()
+                || cell.attributes.hidden()
+                || cell.character == '\0'
+                || cell.character.is_control()
+            {
+                ' '
+            } else {
+                cell.character
+            },
+        )
     }
 
     pub(crate) fn for_each_viewport_range(
@@ -2686,6 +3038,43 @@ impl Grid {
                     .map(|text| Combining::Text(text.as_str()))
             })
     }
+}
+
+fn viewport_link_from_grid_range(
+    start: GridPosition,
+    end: GridPosition,
+    target: String,
+    display_offset: usize,
+    screen_lines: usize,
+    columns: usize,
+) -> Option<ViewportLink> {
+    let display_offset = i32::try_from(display_offset).ok()?;
+    let viewport_min_line = -display_offset;
+    let viewport_max_line = i32::try_from(screen_lines)
+        .ok()?
+        .checked_sub(1)?
+        .checked_sub(display_offset)?;
+    let visible_start_line = start.line.max(viewport_min_line);
+    let visible_end_line = end.line.min(viewport_max_line);
+    if visible_start_line > visible_end_line {
+        return None;
+    }
+
+    Some(ViewportLink {
+        start_row: usize::try_from(visible_start_line.checked_add(display_offset)?).ok()?,
+        start_col: if start.line < visible_start_line {
+            0
+        } else {
+            start.col
+        },
+        end_row: usize::try_from(visible_end_line.checked_add(display_offset)?).ok()?,
+        end_col: if end.line > visible_end_line {
+            columns.checked_sub(1)?
+        } else {
+            end.col
+        },
+        target,
+    })
 }
 
 fn inline_combining_id(character: char) -> NonZeroU32 {
@@ -2900,6 +3289,35 @@ mod tests {
     }
 
     #[test]
+    fn palette_revision_advances_only_for_visible_mutations() {
+        let mut grid = grid(4, 2);
+        let color = Rgb {
+            r: 0x12,
+            g: 0x34,
+            b: 0x56,
+        };
+        assert_eq!(grid.palette().revision(), 0);
+
+        grid.set_indexed_color(7, color);
+        assert_eq!(grid.palette().revision(), 1);
+
+        grid.set_indexed_color(7, color);
+        assert_eq!(grid.palette().revision(), 1);
+    }
+
+    #[test]
+    fn palette_equality_ignores_mutation_history() {
+        let pristine = Palette::default();
+        let mut changed_then_reset = grid(4, 2);
+        changed_then_reset.set_foreground_color(Some(Rgb { r: 1, g: 2, b: 3 }));
+        changed_then_reset.set_foreground_color(None);
+        let changed_then_reset = changed_then_reset.palette();
+
+        assert_eq!(changed_then_reset, pristine);
+        assert_ne!(changed_then_reset.revision(), pristine.revision());
+    }
+
+    #[test]
     fn packed_attribute_and_cell_state_flags_are_independent() {
         let attributes = [
             (Attributes::default().with_bold(true), Attributes::BOLD),
@@ -2942,7 +3360,8 @@ mod tests {
         assert!(!attributes.bold());
         assert!(attributes.dim());
 
-        let state_flags: [(fn(&mut Cell), u8); 4] = [
+        type CellStateSetter = fn(&mut Cell);
+        let state_flags: [(CellStateSetter, u8); 4] = [
             (
                 |cell: &mut Cell| cell.set_protected(true),
                 CellState::PROTECTED,
@@ -3174,6 +3593,15 @@ mod tests {
         assert!(grid.line(1).unwrap()[2].wrapped());
         assert!(grid.line(2).unwrap()[2].wrapped());
         assert!(!grid.line(3).unwrap()[2].wrapped());
+    }
+
+    #[test]
+    fn width_resize_does_not_emit_a_destructive_graphics_effect() {
+        let mut grid = Grid::new(8, 4, 16, CursorStyle::Block);
+
+        grid.resize(4, 4);
+
+        assert_eq!(grid.pop_effect(), None);
     }
 
     #[test]
@@ -3491,5 +3919,69 @@ mod tests {
                 .iter()
                 .all(|cell| *cell == Cell::default())
         );
+    }
+
+    #[test]
+    fn hyperlink_pruning_is_amortized_when_the_grid_retains_many_live_links() {
+        let mut grid = Grid::new(HYPERLINK_PRUNE_MIN_LEN as u16, 1, 0, CursorStyle::Block);
+        for id in 1..=HYPERLINK_PRUNE_MIN_LEN as u32 {
+            grid.hyperlinks.insert(
+                id,
+                HyperlinkEntry {
+                    protocol_id: None,
+                    target: format!("https://example.com/{id}"),
+                },
+            );
+            grid.primary.cells[0][id as usize - 1].hyperlink_id = NonZeroU32::new(id);
+        }
+        grid.next_hyperlink_id = HYPERLINK_PRUNE_MIN_LEN as u32 + 1;
+
+        grid.set_hyperlink(None, Some("https://example.com/first-new"));
+        assert_eq!(
+            grid.next_hyperlink_prune_len,
+            HYPERLINK_PRUNE_MIN_LEN + HYPERLINK_PRUNE_INTERVAL
+        );
+
+        for index in 1..HYPERLINK_PRUNE_INTERVAL {
+            grid.set_hyperlink(None, Some(&format!("https://example.com/new/{index}")));
+        }
+        assert_eq!(
+            grid.hyperlinks.len(),
+            HYPERLINK_PRUNE_MIN_LEN + HYPERLINK_PRUNE_INTERVAL
+        );
+        assert_eq!(
+            grid.next_hyperlink_prune_len,
+            HYPERLINK_PRUNE_MIN_LEN + HYPERLINK_PRUNE_INTERVAL
+        );
+
+        grid.set_hyperlink(None, Some("https://example.com/prune-again"));
+        assert_eq!(
+            grid.hyperlinks.len(),
+            HYPERLINK_PRUNE_MIN_LEN + 2,
+            "the next amortized scan should retain the grid links and active pen only"
+        );
+        assert_eq!(
+            grid.next_hyperlink_prune_len,
+            HYPERLINK_PRUNE_MIN_LEN + HYPERLINK_PRUNE_INTERVAL + 1
+        );
+    }
+
+    #[test]
+    fn explicit_hyperlink_identity_index_reopens_without_duplication() {
+        let mut grid = grid(4, 2);
+
+        grid.set_hyperlink(Some("shared"), Some("https://example.com/one"));
+        let first = grid.pen().hyperlink_id;
+        grid.set_hyperlink(None, None);
+        grid.set_hyperlink(Some("shared"), Some("https://example.com/one"));
+
+        assert_eq!(grid.pen().hyperlink_id, first);
+        assert_eq!(grid.hyperlinks.len(), 1);
+        assert_eq!(grid.hyperlink_identities.len(), 1);
+
+        grid.set_hyperlink(Some("shared"), Some("https://example.com/two"));
+        assert_ne!(grid.pen().hyperlink_id, first);
+        assert_eq!(grid.hyperlinks.len(), 2);
+        assert_eq!(grid.hyperlink_identities.len(), 2);
     }
 }

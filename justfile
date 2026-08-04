@@ -15,8 +15,12 @@ benchmark-tmon:
     {
       rustc --version
       echo
-      cargo run --quiet -p tmon --release --example engine_compare
-    } | tee "$report"
+      cargo run --locked --quiet -p tmon --release --example engine_compare
+    } 2>&1 | tee "$report"
+    {
+      echo
+      TMON_BENCH_ALLOCATIONS_ONLY=1 cargo run --locked --quiet -p tmon --release --example engine_compare --features benchmark-allocations
+    } 2>&1 | tee -a "$report"
 
 run-cli *args:
     cargo run --bin termy-cli --release {{ args }}

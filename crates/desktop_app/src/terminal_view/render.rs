@@ -461,6 +461,12 @@ fn resolve_cell_colors<'a>(
             )
         }
         TerminalCellRef::Tmon(cell, _) => {
+            let inverse = cell.attributes.inverse();
+            let uses_terminal_default_bg = if inverse {
+                matches!(cell.foreground, tmon::Color::Default)
+            } else {
+                matches!(cell.background, tmon::Color::Default)
+            };
             let mut fg = resolve_tmon_color(
                 cell.foreground,
                 context.colors.foreground,
@@ -475,13 +481,13 @@ fn resolve_cell_colors<'a>(
                 context.tmon_palette,
                 context.tmon_palette.and_then(tmon::Palette::background),
             );
-            if cell.attributes.inverse() {
+            if inverse {
                 std::mem::swap(&mut fg, &mut bg);
             }
             (
                 fg,
                 bg,
-                matches!(cell.background, tmon::Color::Default) && !cell.attributes.inverse(),
+                uses_terminal_default_bg,
                 cell.attributes.dim(),
                 cell.character,
             )
@@ -761,6 +767,7 @@ impl TerminalView {
         search_active: bool,
         cell_color_transform: CellColorTransform,
         effective_background_opacity: f32,
+        tmon_palette_revision: Option<u64>,
     ) -> TerminalPaneRenderCacheKey {
         let (search_results_revision, search_position) = if search_active && is_active_pane {
             let results = self.search_state.results();
@@ -778,6 +785,7 @@ impl TerminalView {
             selection_range: is_active_pane.then(|| self.selection_range()).flatten(),
             search_results_revision,
             search_position,
+            tmon_palette_revision,
             effective_background_opacity_bits: effective_background_opacity.to_bits(),
             background_opacity_cells: self.background_opacity_cells,
             color_transform: TerminalPaneCellColorTransformKey {
@@ -3086,15 +3094,19 @@ impl Render for TerminalView {
                 // the start of the render pass, avoiding another nested pair
                 // of terminal locks here.
                 let alternate_screen_mode = pane.last_alternate_screen.get();
+                // Sample once before consuming damage. If a palette mutation races after
+                // this point, its newer revision invalidates the next frame even when this
+                // frame consumed the mutation's full-damage marker.
+                let tmon_palette = terminal.tmon_palette();
                 let pane_cache_key = self.pane_render_cache_key(
                     is_active_pane,
                     alternate_screen_mode,
                     search_active,
                     cell_color_transform,
                     effective_background_opacity,
+                    tmon_palette.as_ref().map(tmon::Palette::revision),
                 );
                 let (pane_display_offset, _) = terminal.scroll_state();
-                let tmon_palette = terminal.tmon_palette();
                 let pane_search_results = if search_active && is_active_pane {
                     Some(self.search_state.results())
                 } else {
@@ -4600,6 +4612,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tmon_cell_colors_classifies_inverse_background_after_swap() {
+        let context = test_build_context(0.2);
+        let mut inverse_default_background = tmon::Cell::default();
+        inverse_default_background.background = tmon::Color::Indexed(4);
+        inverse_default_background.attributes = tmon::Attributes::default().with_inverse(true);
+
+        let resolved = resolve_cell_colors(&inverse_default_background, context);
+
+        assert!(resolved.uses_terminal_default_bg);
+        assert!((resolved.bg.a - 0.2).abs() <= f32::EPSILON);
+
+        inverse_default_background.foreground = tmon::Color::Indexed(2);
+        inverse_default_background.background = tmon::Color::Default;
+        let explicit = resolve_cell_colors(&inverse_default_background, context);
+        assert!(!explicit.uses_terminal_default_bg);
+        assert!((explicit.bg.a - 1.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
     fn resolve_cell_colors_keeps_transformed_default_background_in_sync_with_default_fill() {
         let pane_focus_target_bg = gpui::Rgba {
             r: 0.8,
@@ -4739,6 +4770,39 @@ mod tests {
             false,
             &TerminalDamageSnapshot::Partial(Vec::new()),
         );
+        assert_eq!(strategy, PaneCacheUpdateStrategy::Full);
+    }
+
+    #[test]
+    fn pane_cache_strategy_forces_full_rebuild_for_new_tmon_palette_revision() {
+        let cached_key = TerminalPaneRenderCacheKey {
+            is_active_pane: true,
+            alternate_screen_mode: false,
+            selection_range: None,
+            search_results_revision: None,
+            search_position: None,
+            tmon_palette_revision: Some(4),
+            effective_background_opacity_bits: 1.0f32.to_bits(),
+            background_opacity_cells: false,
+            color_transform: TerminalPaneCellColorTransformKey {
+                fg_blend_bits: 0.0f32.to_bits(),
+                bg_blend_bits: 0.0f32.to_bits(),
+                desaturate_bits: 0.0f32.to_bits(),
+            },
+        };
+        let current_key = TerminalPaneRenderCacheKey {
+            tmon_palette_revision: Some(5),
+            ..cached_key.clone()
+        };
+
+        let strategy = pane_cache_update_strategy(
+            true,
+            true,
+            true,
+            cached_key == current_key,
+            &TerminalDamageSnapshot::Partial(Vec::new()),
+        );
+
         assert_eq!(strategy, PaneCacheUpdateStrategy::Full);
     }
 

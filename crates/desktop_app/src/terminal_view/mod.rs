@@ -482,234 +482,6 @@ struct TmonTerminalInstance {
 }
 
 #[derive(Clone, Copy)]
-struct TmonGridPosition {
-    line: i32,
-    col: usize,
-}
-
-struct TmonLinkRows<'a> {
-    terminal: &'a tmon::Terminal,
-    rows: RefCell<HashMap<i32, Vec<tmon::Cell>>>,
-}
-
-impl<'a> TmonLinkRows<'a> {
-    fn new(terminal: &'a tmon::Terminal) -> Self {
-        Self {
-            terminal,
-            rows: RefCell::new(HashMap::new()),
-        }
-    }
-
-    fn cell(&self, position: TmonGridPosition) -> Option<tmon::Cell> {
-        if !self.rows.borrow().contains_key(&position.line) {
-            let cells = self
-                .terminal
-                .with_line_cells(position.line, <[tmon::Cell]>::to_vec)?;
-            self.rows.borrow_mut().insert(position.line, cells);
-        }
-        self.rows
-            .borrow()
-            .get(&position.line)?
-            .get(position.col)
-            .copied()
-    }
-}
-
-fn tmon_previous_wrapped_position(
-    rows: &TmonLinkRows<'_>,
-    position: TmonGridPosition,
-    min_line: i32,
-    columns: usize,
-) -> Option<TmonGridPosition> {
-    if position.col > 0 {
-        return Some(TmonGridPosition {
-            line: position.line,
-            col: position.col - 1,
-        });
-    }
-    let previous_line = position.line.checked_sub(1)?;
-    if previous_line < min_line {
-        return None;
-    }
-    let previous = TmonGridPosition {
-        line: previous_line,
-        col: columns.checked_sub(1)?,
-    };
-    rows.cell(previous)?.wrapped().then_some(previous)
-}
-
-fn tmon_next_wrapped_position(
-    rows: &TmonLinkRows<'_>,
-    position: TmonGridPosition,
-    max_line: i32,
-    columns: usize,
-) -> Option<TmonGridPosition> {
-    if position.col + 1 < columns {
-        return Some(TmonGridPosition {
-            line: position.line,
-            col: position.col + 1,
-        });
-    }
-    if position.line >= max_line || !rows.cell(position)?.wrapped() {
-        return None;
-    }
-    Some(TmonGridPosition {
-        line: position.line + 1,
-        col: 0,
-    })
-}
-
-fn tmon_cell_link_character(cell: tmon::Cell) -> char {
-    if cell.wide_spacer()
-        || cell.attributes.hidden()
-        || cell.character == '\0'
-        || cell.character.is_control()
-    {
-        ' '
-    } else {
-        cell.character
-    }
-}
-
-fn tmon_viewport_link_from_range(
-    start: TmonGridPosition,
-    end: TmonGridPosition,
-    target: String,
-    display_offset: usize,
-    screen_lines: usize,
-    columns: usize,
-) -> Option<termy_terminal_ui::DetectedViewportLink> {
-    let display_offset = i32::try_from(display_offset).ok()?;
-    let viewport_min_line = -display_offset;
-    let viewport_max_line = i32::try_from(screen_lines)
-        .ok()?
-        .checked_sub(1)?
-        .saturating_sub(display_offset);
-    let visible_start_line = start.line.max(viewport_min_line);
-    let visible_end_line = end.line.min(viewport_max_line);
-    if visible_start_line > visible_end_line {
-        return None;
-    }
-
-    Some(termy_terminal_ui::DetectedViewportLink {
-        start_row: usize::try_from(visible_start_line.saturating_add(display_offset)).ok()?,
-        start_col: if start.line < visible_start_line {
-            0
-        } else {
-            start.col
-        },
-        end_row: usize::try_from(visible_end_line.saturating_add(display_offset)).ok()?,
-        end_col: if end.line > visible_end_line {
-            columns.saturating_sub(1)
-        } else {
-            end.col
-        },
-        target,
-    })
-}
-
-fn tmon_link_at_viewport_cell(
-    terminal: &tmon::Terminal,
-    row: usize,
-    col: usize,
-) -> Option<termy_terminal_ui::DetectedViewportLink> {
-    let size = terminal.size();
-    let columns = usize::from(size.cols);
-    let screen_lines = usize::from(size.rows);
-    if row >= screen_lines || col >= columns || columns == 0 {
-        return None;
-    }
-
-    let (display_offset, _) = terminal.scroll_state();
-    let display_offset_i32 = i32::try_from(display_offset).ok()?;
-    let hovered = TmonGridPosition {
-        line: i32::try_from(row).ok()?.saturating_sub(display_offset_i32),
-        col,
-    };
-    let (min_line, max_line) = terminal.line_bounds();
-    let rows = TmonLinkRows::new(terminal);
-    let hovered_cell = rows.cell(hovered)?;
-
-    if let Some(hyperlink_id) = hovered_cell.hyperlink_id {
-        let target = terminal.hyperlink_at(row, col)?.target;
-        let mut start = hovered;
-        while let Some(previous) = tmon_previous_wrapped_position(&rows, start, min_line, columns) {
-            if rows.cell(previous)?.hyperlink_id == Some(hyperlink_id) {
-                start = previous;
-            } else {
-                break;
-            }
-        }
-
-        let mut end = hovered;
-        while let Some(next) = tmon_next_wrapped_position(&rows, end, max_line, columns) {
-            if rows.cell(next)?.hyperlink_id == Some(hyperlink_id) {
-                end = next;
-            } else {
-                break;
-            }
-        }
-
-        return tmon_viewport_link_from_range(
-            start,
-            end,
-            target,
-            display_offset,
-            screen_lines,
-            columns,
-        );
-    }
-
-    let hovered_character = tmon_cell_link_character(hovered_cell);
-    if hovered_character.is_whitespace() {
-        return None;
-    }
-
-    let mut positions_before = Vec::new();
-    let mut cursor = hovered;
-    while let Some(previous) = tmon_previous_wrapped_position(&rows, cursor, min_line, columns) {
-        let character = tmon_cell_link_character(rows.cell(previous)?);
-        if character.is_whitespace() {
-            break;
-        }
-        positions_before.push((previous, character));
-        cursor = previous;
-    }
-    positions_before.reverse();
-
-    let mut positions = Vec::with_capacity(positions_before.len().saturating_add(16));
-    positions.extend(positions_before);
-    let hovered_index = positions.len();
-    positions.push((hovered, hovered_character));
-
-    cursor = hovered;
-    while let Some(next) = tmon_next_wrapped_position(&rows, cursor, max_line, columns) {
-        let character = tmon_cell_link_character(rows.cell(next)?);
-        if character.is_whitespace() {
-            break;
-        }
-        positions.push((next, character));
-        cursor = next;
-    }
-
-    let token = positions
-        .iter()
-        .map(|(_, character)| *character)
-        .collect::<Vec<_>>();
-    let detected = find_link_in_line(&token, hovered_index)?;
-    let start = positions.get(detected.start_col)?.0;
-    let end = positions.get(detected.end_col)?.0;
-    tmon_viewport_link_from_range(
-        start,
-        end,
-        detected.target,
-        display_offset,
-        screen_lines,
-        columns,
-    )
-}
-
-#[derive(Clone, Copy)]
 enum TerminalCellRef<'a> {
     Alacritty(&'a alacritty_terminal::term::cell::Cell),
     Tmon(&'a tmon::Cell, Option<tmon::Combining<'a>>),
@@ -779,8 +551,16 @@ impl TerminalCellRef<'_> {
     }
 }
 
-fn tmon_engine_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+fn tmon_engine_requested(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|value| value == "1")
+}
+
+const fn tmon_engine_available() -> bool {
+    cfg!(unix)
+}
+
+fn tmon_engine_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    tmon_engine_requested(value) && tmon_engine_available()
 }
 
 impl Deref for TmonTerminalInstance {
@@ -844,7 +624,14 @@ impl TerminalReplyHost for GpuiClipboardReplyHost<'_, '_> {
 impl Terminal {
     fn tmon_enabled() -> bool {
         let value = std::env::var_os("TERMY_EXPERIMENTAL_TMON_ENGINE");
-        tmon_engine_enabled(value.as_deref())
+        let value = value.as_deref();
+        if tmon_engine_requested(value) && !tmon_engine_available() {
+            log::warn!(
+                "TERMY_EXPERIMENTAL_TMON_ENGINE=1 requested, but Tmon requires Unix PTY support; \
+                 falling back to the native Alacritty terminal engine"
+            );
+        }
+        tmon_engine_enabled(value)
     }
 
     fn new_tmux(size: TerminalSize, options: TerminalOptions) -> Self {
@@ -1277,7 +1064,21 @@ impl Terminal {
                 .lock()
                 .ok()
                 .and_then(|terminal| terminal.link_at(row, col)),
-            Self::Tmon(terminal) => tmon_link_at_viewport_cell(terminal, row, col),
+            Self::Tmon(terminal) => terminal
+                .link_at(row, col, |characters, hovered_index| {
+                    find_link_in_line(characters, hovered_index).map(|link| tmon::LinkMatch {
+                        start_col: link.start_col,
+                        end_col: link.end_col,
+                        target: link.target,
+                    })
+                })
+                .map(|link| termy_terminal_ui::DetectedViewportLink {
+                    start_row: link.start_row,
+                    start_col: link.start_col,
+                    end_row: link.end_row,
+                    end_col: link.end_col,
+                    target: link.target,
+                }),
         }
     }
 
@@ -5297,10 +5098,59 @@ mod tests {
 
     #[test]
     fn tmon_engine_requires_explicit_opt_in() {
+        assert!(tmon_engine_requested(Some(std::ffi::OsStr::new("1"))));
+        assert!(!tmon_engine_requested(None));
+        assert!(!tmon_engine_requested(Some(std::ffi::OsStr::new("0"))));
+        assert!(!tmon_engine_requested(Some(std::ffi::OsStr::new("true"))));
+    }
+
+    #[test]
+    fn tmon_link_adapter_matches_native_soft_wrapped_ranges() {
+        let size = TerminalSize {
+            cols: 10,
+            rows: 4,
+            cell_width: 9.0,
+            cell_height: 18.0,
+        };
+        let native = Terminal::Native(NativeTerminalInstance {
+            wakeup_id: 1,
+            terminal: Mutex::new(NativeTerminal::new_display(size, None)),
+        });
+        let tmon = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 2,
+            terminal: tmon::Terminal::new_display(
+                tmon_adapter::size(size),
+                tmon::Config::default(),
+            ),
+        });
+        let output = b"go https://example.com/path";
+        native.hydrate_output(output);
+        tmon.hydrate_output(output);
+
+        for (row, col) in [(0, 4), (1, 5), (2, 4)] {
+            assert_eq!(
+                tmon.link_at(row, col),
+                native.link_at(row, col),
+                "wrapped link mismatch at {row}:{col}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tmon_engine_is_enabled_when_requested_on_unix() {
+        assert!(tmon_engine_available());
         assert!(tmon_engine_enabled(Some(std::ffi::OsStr::new("1"))));
         assert!(!tmon_engine_enabled(None));
         assert!(!tmon_engine_enabled(Some(std::ffi::OsStr::new("0"))));
         assert!(!tmon_engine_enabled(Some(std::ffi::OsStr::new("true"))));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn tmon_engine_request_falls_back_when_unavailable() {
+        assert!(!tmon_engine_available());
+        assert!(!tmon_engine_enabled(Some(std::ffi::OsStr::new("1"))));
     }
 
     #[test]

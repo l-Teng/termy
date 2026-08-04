@@ -1,10 +1,9 @@
-use std::collections::BTreeMap;
-
 use termy_terminal_ui::{
-    KittyGraphicsRenderPlacement, ProgressState, TabTitleShellIntegration, TerminalClipboardTarget,
-    TerminalCursorState, TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan,
-    TerminalEvent, TerminalKeyboardMode, TerminalLaunch, TerminalMouseMode, TerminalOptions,
-    TerminalQueryColors, TerminalRuntimeConfig, TerminalSize, resolve_launch_working_directory,
+    KittyGraphicsRenderPlacement, MAX_TERMINAL_SCROLLBACK_HISTORY, ProgressState,
+    TabTitleShellIntegration, TerminalClipboardTarget, TerminalCursorState, TerminalCursorStyle,
+    TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalKeyboardMode, TerminalLaunch,
+    TerminalMouseMode, TerminalOptions, TerminalQueryColors, TerminalRuntimeConfig, TerminalSize,
+    resolve_launch_working_directory, terminal_environment_overrides,
 };
 
 pub(super) fn size(size: TerminalSize) -> tmon::Size {
@@ -49,7 +48,9 @@ pub(super) fn cursor_state(state: tmon::CursorState) -> TerminalCursorState {
 
 pub(super) fn options(options: TerminalOptions) -> tmon::TerminalOptions {
     tmon::TerminalOptions {
-        scrollback_history: options.scrollback_history,
+        scrollback_history: options
+            .scrollback_history
+            .min(MAX_TERMINAL_SCROLLBACK_HISTORY),
         default_cursor_style: cursor_style(options.default_cursor_style),
     }
 }
@@ -91,8 +92,11 @@ pub(super) fn config(
         ),
         environment: environment(shell_integration, &runtime_config),
         launch,
-        scrollback_history: runtime_config.scrollback_history,
+        scrollback_history: runtime_config
+            .scrollback_history
+            .min(MAX_TERMINAL_SCROLLBACK_HISTORY),
         default_cursor_style: cursor_style(runtime_config.default_cursor_style),
+        query_colors: query_colors(runtime_config.query_colors),
         osc52: tmon::Osc52::OnlyCopy,
     }
 }
@@ -101,57 +105,9 @@ fn environment(
     shell_integration: Option<&TabTitleShellIntegration>,
     runtime_config: &TerminalRuntimeConfig,
 ) -> Vec<(String, String)> {
-    let mut environment = BTreeMap::new();
-    if let Ok(path) = std::env::var("PATH")
-        && !path.trim().is_empty()
-    {
-        environment.insert("PATH".to_string(), path);
-    }
-
-    let term = runtime_config.term.trim();
-    environment.insert(
-        "TERM".to_string(),
-        if term.is_empty() {
-            "xterm-256color".to_string()
-        } else {
-            term.to_string()
-        },
-    );
-    if let Some(colorterm) = runtime_config
-        .colorterm
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        environment.insert("COLORTERM".to_string(), colorterm.to_string());
-    }
-
-    environment.insert("TERM_PROGRAM".to_string(), "ghostty".to_string());
-    environment.insert("TERM_PROGRAM_VERSION".to_string(), "1.2.0".to_string());
-    environment.insert("TERMY_TERM_PROGRAM".to_string(), "termy".to_string());
-
-    let shell_integration_enabled = shell_integration.is_some_and(|config| config.enabled);
-    environment.insert(
-        "TERMY_SHELL_INTEGRATION".to_string(),
-        if shell_integration_enabled { "1" } else { "0" }.to_string(),
-    );
-    if shell_integration_enabled {
-        let prefix = shell_integration
-            .and_then(|config| {
-                let prefix = config.explicit_prefix.trim();
-                (!prefix.is_empty()).then_some(prefix)
-            })
-            .unwrap_or("termy:tab:");
-        environment.insert("TERMY_TAB_TITLE_PREFIX".to_string(), prefix.to_string());
-    }
-
-    for (name, value) in &runtime_config.environment {
-        let name = name.trim();
-        if !name.is_empty() {
-            environment.insert(name.to_string(), value.clone());
-        }
-    }
-    environment.into_iter().collect()
+    terminal_environment_overrides(shell_integration, runtime_config)
+        .into_iter()
+        .collect()
 }
 
 pub(super) fn event(event: tmon::Event) -> Option<TerminalEvent> {
@@ -259,7 +215,7 @@ mod tests {
         grid::Dimensions,
         index::Line,
         term::cell::{Cell as AlacrittyCell, Flags},
-        vte::ansi::{Color as AlacrittyColor, NamedColor},
+        vte::ansi::{Color as AlacrittyColor, NamedColor, Rgb as AlacrittyRgb},
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,6 +223,26 @@ mod tests {
         Default,
         Indexed(u8),
         Rgb(u8, u8, u8),
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SemanticPalette {
+        indexed: Vec<Option<(u8, u8, u8)>>,
+        foreground: Option<(u8, u8, u8)>,
+        background: Option<(u8, u8, u8)>,
+        cursor: Option<(u8, u8, u8)>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SemanticPlacement {
+        image_id: u32,
+        placement_id: u32,
+        viewport_row: i32,
+        col: usize,
+        display_cols: Option<u32>,
+        display_rows: Option<u32>,
+        occupied_cols: u32,
+        occupied_rows: u32,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,6 +261,38 @@ mod tests {
         hyperlink: bool,
         wide_spacer: bool,
         wrapped: bool,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum SemanticEvent {
+        Title(String),
+        ResetTitle,
+        Bell,
+        Exit,
+        ClipboardStore(String),
+        ShellPromptStart,
+        ShellCommandStart,
+        ShellCommandExecuting,
+        ShellCommandFinished(Option<i32>),
+        Progress(ProgressState),
+        WorkingDirectory(String),
+    }
+
+    fn semantic_event(event: TerminalEvent) -> Option<SemanticEvent> {
+        Some(match event {
+            TerminalEvent::Wakeup => return None,
+            TerminalEvent::Title(title) => SemanticEvent::Title(title),
+            TerminalEvent::ResetTitle => SemanticEvent::ResetTitle,
+            TerminalEvent::Bell => SemanticEvent::Bell,
+            TerminalEvent::Exit => SemanticEvent::Exit,
+            TerminalEvent::ClipboardStore(text) => SemanticEvent::ClipboardStore(text),
+            TerminalEvent::ShellPromptStart => SemanticEvent::ShellPromptStart,
+            TerminalEvent::ShellCommandStart => SemanticEvent::ShellCommandStart,
+            TerminalEvent::ShellCommandExecuting => SemanticEvent::ShellCommandExecuting,
+            TerminalEvent::ShellCommandFinished(code) => SemanticEvent::ShellCommandFinished(code),
+            TerminalEvent::Progress(progress) => SemanticEvent::Progress(progress),
+            TerminalEvent::WorkingDirectory(path) => SemanticEvent::WorkingDirectory(path),
+        })
     }
 
     fn alacritty_color(color: AlacrittyColor) -> RawColor {
@@ -307,6 +315,45 @@ mod tests {
             tmon::Color::Default => RawColor::Default,
             tmon::Color::Indexed(index) => RawColor::Indexed(index),
             tmon::Color::Rgb { r, g, b } => RawColor::Rgb(r, g, b),
+        }
+    }
+
+    fn native_palette(terminal: &termy_terminal_ui::Terminal) -> SemanticPalette {
+        terminal.with_term(|term| {
+            let colors = term.colors();
+            let tuple = |color: alacritty_terminal::vte::ansi::Rgb| (color.r, color.g, color.b);
+            SemanticPalette {
+                indexed: (0..=255).map(|index| colors[index].map(tuple)).collect(),
+                foreground: colors[NamedColor::Foreground as usize].map(tuple),
+                background: colors[NamedColor::Background as usize].map(tuple),
+                cursor: colors[NamedColor::Cursor as usize].map(tuple),
+            }
+        })
+    }
+
+    fn tmon_palette(terminal: &tmon::Terminal) -> SemanticPalette {
+        let palette = terminal.palette();
+        let tuple = |color: tmon::Rgb| (color.r, color.g, color.b);
+        SemanticPalette {
+            indexed: (0..=255)
+                .map(|index| palette.indexed(index).map(tuple))
+                .collect(),
+            foreground: palette.foreground().map(tuple),
+            background: palette.background().map(tuple),
+            cursor: palette.cursor().map(tuple),
+        }
+    }
+
+    fn semantic_placement(placement: &KittyGraphicsRenderPlacement) -> SemanticPlacement {
+        SemanticPlacement {
+            image_id: placement.image_id,
+            placement_id: placement.placement_id,
+            viewport_row: placement.viewport_row,
+            col: placement.col,
+            display_cols: placement.display_cols,
+            display_rows: placement.display_rows,
+            occupied_cols: placement.occupied_cols,
+            occupied_rows: placement.occupied_rows,
         }
     }
 
@@ -398,6 +445,55 @@ mod tests {
             cell_width: 9.0,
             cell_height: 18.0,
         }
+    }
+
+    #[test]
+    fn config_preserves_initial_query_colors_and_native_child_environment() {
+        let colors = TerminalQueryColors {
+            ansi: [AlacrittyRgb { r: 1, g: 2, b: 3 }; 16],
+            foreground: AlacrittyRgb { r: 4, g: 5, b: 6 },
+            background: AlacrittyRgb { r: 7, g: 8, b: 9 },
+            cursor: Some(AlacrittyRgb {
+                r: 10,
+                g: 11,
+                b: 12,
+            }),
+        };
+        let runtime_config = TerminalRuntimeConfig {
+            query_colors: colors,
+            ..TerminalRuntimeConfig::default()
+        };
+        let converted = config(None, None, Some(&runtime_config), None);
+
+        assert_eq!(converted.query_colors, query_colors(colors));
+        assert_eq!(
+            converted
+                .environment
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>(),
+            terminal_environment_overrides(None, &runtime_config)
+        );
+    }
+
+    #[test]
+    fn config_and_options_match_the_native_scrollback_cap() {
+        let terminal_options = TerminalOptions {
+            scrollback_history: usize::MAX,
+            ..TerminalOptions::default()
+        };
+        let runtime_config = TerminalRuntimeConfig {
+            scrollback_history: usize::MAX,
+            ..TerminalRuntimeConfig::default()
+        };
+
+        assert_eq!(
+            options(terminal_options).scrollback_history,
+            terminal_options.term_config().scrolling_history
+        );
+        assert_eq!(
+            config(None, None, Some(&runtime_config), None).scrollback_history,
+            MAX_TERMINAL_SCROLLBACK_HISTORY
+        );
     }
 
     fn assert_terminal_states_match(
@@ -492,6 +588,44 @@ mod tests {
         );
     }
 
+    fn assert_damage_covers_changes(
+        before: &[SemanticCell],
+        after: &[SemanticCell],
+        damage: &TerminalDamageSnapshot,
+        cols: usize,
+        rows: usize,
+        context: &str,
+    ) {
+        assert_eq!(before.len(), after.len(), "{context}: viewport length");
+        let TerminalDamageSnapshot::Partial(spans) = damage else {
+            return;
+        };
+        for span in spans {
+            assert!(span.row < rows, "{context}: damage row out of bounds");
+            assert!(
+                span.left_col <= span.right_col,
+                "{context}: reversed damage span"
+            );
+            assert!(
+                span.right_col < cols,
+                "{context}: damage column out of bounds"
+            );
+        }
+        for (index, (before, after)) in before.iter().zip(after).enumerate() {
+            if before == after {
+                continue;
+            }
+            let row = index / cols;
+            let col = index % cols;
+            assert!(
+                spans.iter().any(|span| {
+                    span.row == row && span.left_col <= col && col <= span.right_col
+                }),
+                "{context}: changed cell at row {row}, col {col} is outside damage {spans:?}"
+            );
+        }
+    }
+
     fn assert_engines_match(context: &str, bytes: &[u8]) {
         let native_size = test_size(12, 4);
         let native = termy_terminal_ui::Terminal::new_display(native_size, None);
@@ -554,6 +688,10 @@ mod tests {
                     .as_slice(),
             ),
             (
+                "clamped scroll region homes the cursor",
+                b"abc\x1b[2;4r".as_slice(),
+            ),
+            (
                 "insert and autowrap modes",
                 b"abcdefghijkl\x1b[1;3H\x1b[4hXY\x1b[4l\x1b[?7l\x1b[1;12HZQ\x1b[?7hR".as_slice(),
             ),
@@ -581,7 +719,11 @@ mod tests {
             ),
             (
                 "OSC cursor shape",
-                b"abc\x1b]50;CursorShape=1\x07".as_slice(),
+                b"abc\x1b]50;CursorShape=10\x07".as_slice(),
+            ),
+            (
+                "8-bit APC Kitty graphics",
+                b"\x9fGa=T,f=32,s=1,v=1,i=7;/wAA/w==\x9cZ".as_slice(),
             ),
             (
                 "DEC column mode side effects",
@@ -594,6 +736,14 @@ mod tests {
             (
                 "zero-width format and combining characters",
                 "a\u{200d}b c\u{093f}d e\u{feff}f g\u{1e944}h".as_bytes(),
+            ),
+            (
+                "encoded C1 controls are ignored",
+                "A\u{85}B C\u{9b}D".as_bytes(),
+            ),
+            (
+                "width-three scalar uses native insert shift",
+                "AB\r\x1b[4h\u{17d8}".as_bytes(),
             ),
             (
                 "C1 cursor and line controls",
@@ -814,6 +964,221 @@ mod tests {
     }
 
     #[test]
+    fn damage_covers_all_observable_changes_for_both_engines() {
+        let initial = test_size(12, 4);
+        let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+        let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
+
+        assert_eq!(native.take_damage_snapshot(), TerminalDamageSnapshot::Full);
+        assert_eq!(
+            damage(tmon.take_damage_snapshot()),
+            TerminalDamageSnapshot::Full
+        );
+        assert!(matches!(
+            native.take_damage_snapshot(),
+            TerminalDamageSnapshot::Partial(_)
+        ));
+        assert_eq!(
+            damage(tmon.take_damage_snapshot()),
+            TerminalDamageSnapshot::Partial(Vec::new())
+        );
+
+        let mut native_before = native_cells(&native);
+        let mut tmon_before = tmon_cells(&tmon);
+        for (name, output) in [
+            ("plain text", b"abc".as_slice()),
+            ("styled overwrite", b"\x1b[1;2H\x1b[31mZ\x1b[0m"),
+            ("wide character", "\x1b[2;5H界".as_bytes()),
+            ("overwrite wide spacer", b"\x1b[2;6HX"),
+            (
+                "insert-mode write",
+                b"\x1b[1;1Habcdef\x1b[1;2H\x1b[4hZ\x1b[4l",
+            ),
+            ("insert and delete", b"\x1b[1;1H\x1b[2@++\x1b[1P"),
+            ("erase", b"\x1b[2;1H\x1b[4X"),
+        ] {
+            native.feed_output(output);
+            tmon.feed_output(output);
+            let native_after = native_cells(&native);
+            let tmon_after = tmon_cells(&tmon);
+            assert_eq!(tmon_after, native_after, "{name}: visible state");
+            let native_damage = native.take_damage_snapshot();
+            let tmon_damage = damage(tmon.take_damage_snapshot());
+            assert_damage_covers_changes(
+                &native_before,
+                &native_after,
+                &native_damage,
+                12,
+                4,
+                &format!("native {name}"),
+            );
+            assert_damage_covers_changes(
+                &tmon_before,
+                &tmon_after,
+                &tmon_damage,
+                12,
+                4,
+                &format!("Tmon {name}"),
+            );
+            native_before = native_after;
+            tmon_before = tmon_after;
+        }
+
+        let scroll = b"\x1b[Hone\r\ntwo\r\nthree\r\nfour\r\nfive";
+        native.feed_output(scroll);
+        tmon.feed_output(scroll);
+        assert_terminal_states_match(&native, &tmon, "damage scroll");
+        assert_eq!(native.take_damage_snapshot(), TerminalDamageSnapshot::Full);
+        assert_eq!(
+            damage(tmon.take_damage_snapshot()),
+            TerminalDamageSnapshot::Full
+        );
+
+        let resized = test_size(9, 5);
+        native.resize(resized);
+        tmon.resize(size(resized));
+        assert_terminal_states_match(&native, &tmon, "damage resize");
+        assert_eq!(native.take_damage_snapshot(), TerminalDamageSnapshot::Full);
+        assert_eq!(
+            damage(tmon.take_damage_snapshot()),
+            TerminalDamageSnapshot::Full
+        );
+    }
+
+    #[test]
+    fn kitty_partial_region_cursor_advance_matches_the_alacritty_engine() {
+        let native_size = test_size(8, 4);
+        let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+        let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
+        let output = b"\x1b[2;3r\x1b[3;1H\x1b_Ga=T,f=32,s=1,v=1,i=82,c=2,r=3;AQID/w==\x1b\\\x1b[r";
+
+        native.feed_output(output);
+        tmon.feed_output(output);
+
+        assert_terminal_states_match(&native, &tmon, "Kitty partial DECSTBM cursor advance");
+        let native_placements = native.kitty_graphics_placements();
+        let tmon_placements = tmon
+            .kitty_graphics_placements()
+            .into_iter()
+            .map(kitty_graphics_placement)
+            .collect::<Vec<_>>();
+        assert_eq!(native_placements.len(), 1);
+        assert_eq!(tmon_placements.len(), 1);
+        assert_eq!(
+            semantic_placement(&tmon_placements[0]),
+            semantic_placement(&native_placements[0])
+        );
+    }
+
+    #[test]
+    fn kitty_chunk_completion_on_another_screen_matches_the_alacritty_engine() {
+        let native_size = test_size(8, 4);
+        let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+        let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
+        let output = b"\x1b[2;3H\x1b_Ga=T,f=32,s=1,v=1,i=7,c=2,r=1,m=1,q=1;AQI=\x1b\\\x1b[?1049h\x1b_Gm=0;A/8=\x1b\\\x1b[?1049l";
+
+        native.feed_output(output);
+        tmon.feed_output(output);
+
+        assert_terminal_states_match(&native, &tmon, "Kitty cross-screen chunk completion");
+        let native_placements = native.kitty_graphics_placements();
+        let tmon_placements = tmon
+            .kitty_graphics_placements()
+            .into_iter()
+            .map(kitty_graphics_placement)
+            .collect::<Vec<_>>();
+        assert_eq!(native_placements.len(), 1);
+        assert_eq!(tmon_placements.len(), 1);
+        assert_eq!(
+            semantic_placement(&tmon_placements[0]),
+            semantic_placement(&native_placements[0])
+        );
+    }
+
+    #[test]
+    fn kitty_image_data_survives_terminal_reset_like_the_alacritty_engine() {
+        let native_size = test_size(8, 4);
+        let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+        let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
+        let output =
+            b"\x1b_Ga=t,f=32,s=1,v=1,i=7,q=2;AQID/w==\x1b\\\x1bc\x1b_Ga=p,i=7,C=1,q=2\x1b\\";
+
+        native.feed_output(output);
+        tmon.feed_output(output);
+
+        assert_terminal_states_match(&native, &tmon, "Kitty image reuse after RIS");
+        let native_placements = native.kitty_graphics_placements();
+        let tmon_placements = tmon
+            .kitty_graphics_placements()
+            .into_iter()
+            .map(kitty_graphics_placement)
+            .collect::<Vec<_>>();
+        assert_eq!(native_placements.len(), 1);
+        assert_eq!(tmon_placements.len(), 1);
+        assert_eq!(
+            semantic_placement(&tmon_placements[0]),
+            semantic_placement(&native_placements[0])
+        );
+    }
+
+    #[test]
+    fn kitty_footer_survives_partial_top_scroll_like_the_alacritty_engine() {
+        let native_size = test_size(8, 4);
+        let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+        let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
+        let output =
+            b"\x1b[4;1H\x1b_Ga=T,f=32,s=1,v=1,i=7,C=1,q=2;AQID/w==\x1b\\\x1b[1;3r\x1b[3;1H\n";
+
+        native.feed_output(output);
+        tmon.feed_output(output);
+
+        assert_terminal_states_match(&native, &tmon, "Kitty footer after partial top scroll");
+        let native_placements = native.kitty_graphics_placements();
+        let tmon_placements = tmon
+            .kitty_graphics_placements()
+            .into_iter()
+            .map(kitty_graphics_placement)
+            .collect::<Vec<_>>();
+        assert_eq!(native_placements.len(), 1);
+        assert_eq!(tmon_placements.len(), 1);
+        assert_eq!(native_placements[0].viewport_row, 3);
+        assert_eq!(
+            semantic_placement(&tmon_placements[0]),
+            semantic_placement(&native_placements[0])
+        );
+    }
+
+    #[test]
+    fn kitty_placements_survive_column_resize_like_the_alacritty_engine() {
+        let initial = test_size(8, 4);
+        let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+        let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
+        let output = b"\x1b[2;7H\x1b_Ga=T,f=32,s=1,v=1,i=83,c=3,r=2,C=1;AQID/w==\x1b\\";
+        native.feed_output(output);
+        tmon.feed_output(output);
+
+        native.resize(test_size(5, 4));
+        tmon.resize(size(test_size(5, 4)));
+        assert!(native.kitty_graphics_placements().is_empty());
+        assert!(tmon.kitty_graphics_placements().is_empty());
+
+        native.resize(initial);
+        tmon.resize(size(initial));
+        let native_placements = native.kitty_graphics_placements();
+        let tmon_placements = tmon
+            .kitty_graphics_placements()
+            .into_iter()
+            .map(kitty_graphics_placement)
+            .collect::<Vec<_>>();
+        assert_eq!(native_placements.len(), 1);
+        assert_eq!(tmon_placements.len(), 1);
+        assert_eq!(
+            semantic_placement(&tmon_placements[0]),
+            semantic_placement(&native_placements[0])
+        );
+    }
+
+    #[test]
     fn reflow_resize_matches_the_alacritty_engine() {
         let initial = test_size(8, 3);
         let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
@@ -848,6 +1213,29 @@ mod tests {
         native.resize(resized);
         tmon.resize(size(resized));
         assert_terminal_states_match(&native, &tmon, "after cursor reflow");
+    }
+
+    #[test]
+    fn cursor_gap_reflow_matches_the_termy_native_engine() {
+        let initial = test_size(8, 4);
+        let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+        let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
+
+        native.feed_output(b"\x1b[8G");
+        tmon.feed_output(b"\x1b[8G");
+        assert_terminal_states_match(&native, &tmon, "before empty cursor-gap reflow");
+
+        let resized = test_size(3, 4);
+        native.resize(resized);
+        tmon.resize(size(resized));
+        // Termy's native wrapper intentionally bottom-anchors the resize instead of
+        // exposing the pinned Alacritty Term's two trailing blank rows as history.
+        assert_eq!(native.scroll_state(), (0, 0));
+        assert_eq!(
+            native.cursor_state().map(|state| (state.col, state.row)),
+            Some((1, 2))
+        );
+        assert_terminal_states_match(&native, &tmon, "after empty cursor-gap reflow");
     }
 
     #[test]
@@ -1057,5 +1445,149 @@ mod tests {
                 native_link.target
             )
         );
+    }
+
+    #[test]
+    fn osc8_identity_ranges_match_the_alacritty_engine() {
+        let native_size = test_size(12, 4);
+        let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+        let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
+        let output = b"\x1b]8;id=one;https://example.com/same\x1b\\A\
+                       \x1b]8;id=two;https://example.com/same\x1b\\B\
+                       \x1b]8;;https://example.com/same\x1b\\C\
+                       \x1b]8;;https://example.com/same\x1b\\D";
+        native.feed_output(output);
+        tmon.feed_output(output);
+
+        for col in 0..4 {
+            let native_link = native
+                .hyperlink_at(0, col)
+                .expect("native link should exist");
+            let tmon_link = tmon.hyperlink_at(0, col).expect("Tmon link should exist");
+            assert_eq!(
+                (tmon_link.start_col, tmon_link.end_col, tmon_link.target),
+                (
+                    native_link.start_col,
+                    native_link.end_col,
+                    native_link.target
+                ),
+                "OSC 8 identity mismatch at column {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn common_terminal_events_match_the_alacritty_engine() {
+        let native_size = test_size(12, 4);
+        let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+        let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
+        let output = b"\x07\x1b]2;hello\x07\x1b]52;c;dGVybXk=\x07";
+        native.feed_output(output);
+        tmon.feed_output(output);
+
+        let (native_events, native_has_more) = native.drain_events(&mut |_| None);
+        let (tmon_events, tmon_has_more) = tmon.drain_events();
+        assert!(!native_has_more);
+        assert!(!tmon_has_more);
+        let native_events = native_events
+            .into_iter()
+            .filter_map(semantic_event)
+            .collect::<Vec<_>>();
+        let tmon_events = tmon_events
+            .into_iter()
+            .filter_map(event)
+            .filter_map(semantic_event)
+            .collect::<Vec<_>>();
+
+        assert_eq!(tmon_events, native_events);
+    }
+
+    #[test]
+    fn title_stack_parameters_match_the_alacritty_engine() {
+        let native_size = test_size(12, 4);
+        let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+        let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
+
+        for output in [
+            b"\x1b]2;A\x07".as_slice(),
+            b"\x1b[22;1t".as_slice(),
+            b"\x1b]2;B\x07".as_slice(),
+            b"\x1b[23;1t".as_slice(),
+        ] {
+            native.feed_output(output);
+            tmon.feed_output(output);
+
+            let native_events = native
+                .drain_events(&mut |_| None)
+                .0
+                .into_iter()
+                .filter_map(semantic_event)
+                .collect::<Vec<_>>();
+            let tmon_events = tmon
+                .drain_events()
+                .0
+                .into_iter()
+                .filter_map(event)
+                .filter_map(semantic_event)
+                .collect::<Vec<_>>();
+            assert_eq!(tmon_events, native_events);
+        }
+    }
+
+    #[test]
+    fn osc_palette_overrides_and_resets_match_the_alacritty_engine() {
+        let native_size = test_size(12, 4);
+        let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+        let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
+        assert_eq!(tmon_palette(&tmon), native_palette(&native));
+
+        let set = b"\x1b]4;1;#123456;200;rgb:f/8/0\x1b\\\
+                    \x1b]10;#010203;#040506;#070809\x07";
+        native.feed_output(set);
+        tmon.feed_output(set);
+        let palette = tmon_palette(&tmon);
+        assert_eq!(palette, native_palette(&native));
+        assert_eq!(palette.indexed[1], Some((0x12, 0x34, 0x56)));
+        assert_eq!(palette.indexed[200], Some((0xff, 0x88, 0x00)));
+        assert_eq!(palette.foreground, Some((1, 2, 3)));
+        assert_eq!(palette.background, Some((4, 5, 6)));
+        assert_eq!(palette.cursor, Some((7, 8, 9)));
+
+        let partial_reset = b"\x1b]104;1\x07\x1b]110\x07\x1b]112\x07";
+        native.feed_output(partial_reset);
+        tmon.feed_output(partial_reset);
+        let palette = tmon_palette(&tmon);
+        assert_eq!(palette, native_palette(&native));
+        assert_eq!(palette.indexed[1], None);
+        assert_eq!(palette.indexed[200], Some((0xff, 0x88, 0x00)));
+        assert_eq!(palette.foreground, None);
+        assert_eq!(palette.background, Some((4, 5, 6)));
+        assert_eq!(palette.cursor, None);
+
+        let full_reset = b"\x1b]104\x07\x1b]111\x07";
+        native.feed_output(full_reset);
+        tmon.feed_output(full_reset);
+        let palette = tmon_palette(&tmon);
+        assert_eq!(palette, native_palette(&native));
+        assert!(palette.indexed.iter().all(Option::is_none));
+        assert_eq!(palette.background, None);
+    }
+
+    #[test]
+    fn ris_preserves_osc_palette_overrides_like_the_alacritty_engine() {
+        let native_size = test_size(12, 4);
+        let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+        let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
+        let set_then_reset = b"\x1b]4;1;#123456\x07\x1b]10;#010203;#040506;#070809\x07\x1bc";
+
+        native.feed_output(set_then_reset);
+        tmon.feed_output(set_then_reset);
+
+        let palette = tmon_palette(&tmon);
+        assert_eq!(palette, native_palette(&native));
+        assert_eq!(palette.indexed[1], Some((0x12, 0x34, 0x56)));
+        assert_eq!(palette.foreground, Some((1, 2, 3)));
+        assert_eq!(palette.background, Some((4, 5, 6)));
+        assert_eq!(palette.cursor, Some((7, 8, 9)));
     }
 }

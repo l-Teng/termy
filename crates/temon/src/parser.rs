@@ -10,6 +10,10 @@ const MAX_OSC_BYTES: usize = 64 * 1024;
 const MAX_DCS_BYTES: usize = 64 * 1024;
 const MAX_SYNC_BYTES: usize = 2 * 1024 * 1024;
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
+const SYNC_ESCAPE_LEN: usize = 8;
+const BSU_CSI: &[u8; SYNC_ESCAPE_LEN] = b"\x1b[?2026h";
+const ESU_CSI: &[u8; SYNC_ESCAPE_LEN] = b"\x1b[?2026l";
+const TITLE_STACK_MAX_DEPTH: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueryColors {
@@ -174,6 +178,22 @@ pub(crate) struct ParseOutput {
     pub(crate) events: Vec<ParsedEvent>,
     pub(crate) replies: Vec<u8>,
     pub(crate) synchronized_update_active: bool,
+    pub(crate) synchronized_update_deadline: Option<Instant>,
+    pub(crate) synchronized_update_refreshed: bool,
+    pub(crate) synchronized_update_committed: bool,
+    pub(crate) unsynchronized_activity: bool,
+}
+
+impl ParseOutput {
+    fn append(&mut self, mut other: Self) {
+        self.events.append(&mut other.events);
+        self.replies.append(&mut other.replies);
+        self.synchronized_update_active = other.synchronized_update_active;
+        self.synchronized_update_deadline = other.synchronized_update_deadline;
+        self.synchronized_update_refreshed |= other.synchronized_update_refreshed;
+        self.synchronized_update_committed |= other.synchronized_update_committed;
+        self.unsynchronized_activity |= other.unsynchronized_activity;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -187,6 +207,7 @@ enum State {
     Dcs,
     ApcStart,
     Kitty,
+    KittyEscape,
     IgnoreString,
 }
 
@@ -265,7 +286,7 @@ pub(crate) struct Parser {
     query_colors: QueryColors,
     osc52: Osc52,
     synchronized_update_started: Option<Instant>,
-    synchronized_update_bytes: usize,
+    synchronized_update_buffer: Vec<u8>,
     title: Option<String>,
     title_stack: Vec<Option<String>>,
     graphics: GraphicsState,
@@ -301,7 +322,7 @@ impl Default for Parser {
             query_colors: QueryColors::default(),
             osc52: Osc52::default(),
             synchronized_update_started: None,
-            synchronized_update_bytes: 0,
+            synchronized_update_buffer: Vec::new(),
             title: None,
             title_stack: Vec::with_capacity(8),
             graphics: GraphicsState::default(),
@@ -339,20 +360,38 @@ impl Parser {
     }
 
     pub(crate) fn advance(&mut self, grid: &mut Grid, bytes: &[u8]) -> ParseOutput {
-        if self.synchronized_update_started.is_some_and(|started| {
-            started.elapsed() >= SYNC_TIMEOUT
-                || self.synchronized_update_bytes.saturating_add(bytes.len()) > MAX_SYNC_BYTES
-        }) {
-            self.synchronized_update_started = None;
-            self.synchronized_update_bytes = 0;
-        }
-        if self.synchronized_update_started.is_some() {
-            self.synchronized_update_bytes =
-                self.synchronized_update_bytes.saturating_add(bytes.len());
-        }
         let mut output = ParseOutput::default();
+        if self
+            .synchronized_update_started
+            .is_some_and(|started| started.elapsed() >= SYNC_TIMEOUT)
+        {
+            output.append(self.stop_synchronized_update(grid));
+        }
+
         let mut offset = 0;
+        let mut candidate_sequence_start = None;
         while offset < bytes.len() {
+            if self.synchronized_update_started.is_some() {
+                if self
+                    .synchronized_update_buffer
+                    .len()
+                    .saturating_add(bytes.len() - offset)
+                    >= MAX_SYNC_BYTES - 1
+                {
+                    output.append(self.stop_synchronized_update(grid));
+                    continue;
+                }
+
+                let new_bytes = bytes.len() - offset;
+                self.synchronized_update_buffer
+                    .extend_from_slice(&bytes[offset..]);
+                offset = bytes.len();
+                if let Some(bsu_offset) = self.scan_synchronized_update(new_bytes, &mut output) {
+                    output.append(self.commit_synchronized_update(grid, bsu_offset));
+                }
+                continue;
+            }
+
             if self.state == State::Ground && !self.utf8.is_pending() {
                 let consumed = self.advance_ground_text(grid, &bytes[offset..], &mut output);
                 if consumed > 0 {
@@ -360,12 +399,147 @@ impl Parser {
                     continue;
                 }
             }
+            if self.state == State::Ground && bytes[offset] == 0x1b {
+                candidate_sequence_start = Some(offset);
+            }
+            let was_synchronized = self.synchronized_update_started.is_some();
             self.advance_byte(grid, bytes[offset], &mut output);
             offset += 1;
+            if !was_synchronized && self.synchronized_update_started.is_some() {
+                output.unsynchronized_activity |= candidate_sequence_start
+                    .is_some_and(|start| start > 0)
+                    || !output.events.is_empty()
+                    || !output.replies.is_empty();
+            }
         }
         self.sync_grid_effects(grid);
         output.synchronized_update_active = self.synchronized_update_started.is_some();
+        output.synchronized_update_deadline = self
+            .synchronized_update_started
+            .map(|started| started + SYNC_TIMEOUT);
         output
+    }
+
+    /// Commit a pending synchronized update immediately.
+    ///
+    /// The timeout and capacity paths deliberately use the same replay path as
+    /// an exact ESU. This keeps grid changes, events, and protocol replies on a
+    /// single commit boundary.
+    pub(crate) fn stop_synchronized_update(&mut self, grid: &mut Grid) -> ParseOutput {
+        if self.synchronized_update_started.is_none() {
+            return ParseOutput::default();
+        }
+        self.commit_synchronized_update(grid, None)
+    }
+
+    /// Clear read-boundary state after persistence hydration.
+    ///
+    /// Completed semantic state lives in the grid, graphics store, title stack,
+    /// and charset selection and is intentionally retained. Incomplete control
+    /// strings, UTF-8, single-shift, and synchronized bytes belong to the replay
+    /// parser and must not leak into the subsequent live PTY stream.
+    pub(crate) fn reset_transient_state_after_hydration(&mut self) {
+        self.state = State::Ground;
+        self.params.fill(0);
+        self.separators.fill(0);
+        self.param_count = 0;
+        self.private_marker = 0;
+        self.intermediate = 0;
+        self.csi_has_params = false;
+        self.csi_intermediate_count = 0;
+        self.csi_ignored = false;
+        self.osc.clear();
+        self.osc_oversized = false;
+        self.dcs.clear();
+        self.dcs_oversized = false;
+        self.kitty.clear();
+        self.kitty_oversized = false;
+        self.utf8.reset();
+        self.last_printed = None;
+        self.single_shift = None;
+        self.designating_charset = None;
+        self.reset_escape_intermediates();
+        self.synchronized_update_started = None;
+        self.synchronized_update_buffer.clear();
+    }
+
+    /// Scan only newly appended synchronized bytes for exact raw BSU/ESU.
+    /// The overlap matches vte's local scan, so an escape split at any byte
+    /// boundary is still recognized without rescanning the full 2 MiB buffer.
+    fn scan_synchronized_update(
+        &mut self,
+        new_bytes: usize,
+        output: &mut ParseOutput,
+    ) -> Option<Option<usize>> {
+        let buffer_len = self.synchronized_update_buffer.len();
+        let start_offset = (buffer_len - new_bytes).saturating_sub(SYNC_ESCAPE_LEN - 1);
+        let end_offset = buffer_len.saturating_sub(SYNC_ESCAPE_LEN - 1);
+        let mut bsu_offset = None;
+
+        for offset in (start_offset..end_offset)
+            .rev()
+            .filter(|&offset| self.synchronized_update_buffer[offset] == 0x1b)
+        {
+            let escape = &self.synchronized_update_buffer[offset..offset + SYNC_ESCAPE_LEN];
+            if escape == BSU_CSI {
+                self.synchronized_update_started = Some(Instant::now());
+                output.synchronized_update_refreshed = true;
+                bsu_offset = Some(offset);
+            } else if escape == ESU_CSI {
+                return Some(bsu_offset);
+            }
+        }
+        None
+    }
+
+    fn commit_synchronized_update(
+        &mut self,
+        grid: &mut Grid,
+        bsu_offset: Option<usize>,
+    ) -> ParseOutput {
+        let mut buffer = std::mem::take(&mut self.synchronized_update_buffer);
+        let replay_end = bsu_offset.unwrap_or(buffer.len());
+        let mut output = ParseOutput {
+            synchronized_update_committed: true,
+            ..ParseOutput::default()
+        };
+        self.advance_unbuffered(grid, &buffer[..replay_end], &mut output);
+
+        if let Some(offset) = bsu_offset {
+            let retained_len = buffer.len() - offset;
+            buffer.copy_within(offset.., 0);
+            buffer.truncate(retained_len);
+            self.synchronized_update_buffer = buffer;
+            self.synchronized_update_started = Some(Instant::now());
+            output.synchronized_update_refreshed = true;
+        } else {
+            buffer.clear();
+            self.synchronized_update_buffer = buffer;
+            self.synchronized_update_started = None;
+        }
+        self.sync_grid_effects(grid);
+        output.synchronized_update_active = self.synchronized_update_started.is_some();
+        output.synchronized_update_deadline = self
+            .synchronized_update_started
+            .map(|started| started + SYNC_TIMEOUT);
+        output
+    }
+
+    /// Parse bytes without entering the outer synchronized staging loop. This
+    /// is used exclusively to replay a committed batch.
+    fn advance_unbuffered(&mut self, grid: &mut Grid, bytes: &[u8], output: &mut ParseOutput) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if self.state == State::Ground && !self.utf8.is_pending() {
+                let consumed = self.advance_ground_text(grid, &bytes[offset..], output);
+                if consumed > 0 {
+                    offset += consumed;
+                    continue;
+                }
+            }
+            self.advance_byte(grid, bytes[offset], output);
+            offset += 1;
+        }
     }
 
     fn advance_ground_text(
@@ -374,6 +548,17 @@ impl Parser {
         bytes: &[u8],
         output: &mut ParseOutput,
     ) -> usize {
+        if self.single_shift.is_none() && grid.charset(self.active_charset) == Charset::Ascii {
+            let ascii_len = bytes
+                .iter()
+                .take_while(|&&byte| (0x20..=0x7e).contains(&byte))
+                .count();
+            if ascii_len > 0 {
+                self.print_ascii(grid, &bytes[..ascii_len]);
+                return ascii_len;
+            }
+        }
+
         let span_len = bytes
             .iter()
             .position(|byte| *byte < 0x20 || *byte == 0x7f)
@@ -401,6 +586,9 @@ impl Parser {
 
                     self.advance_byte(grid, candidate[consumed], output);
                     consumed += 1;
+                    if self.state != State::Ground {
+                        return consumed;
+                    }
                     while consumed < candidate.len() && self.utf8.is_pending() {
                         self.advance_byte(grid, candidate[consumed], output);
                         consumed += 1;
@@ -423,17 +611,7 @@ impl Parser {
                     .count();
                 if ascii_len > 0 {
                     let ascii = &text.as_bytes()[..ascii_len];
-                    let mut consumed_ascii = 0;
-                    while consumed_ascii < ascii.len() {
-                        let consumed = grid.put_ascii_run(&ascii[consumed_ascii..]);
-                        if consumed == 0 {
-                            self.print(grid, char::from(ascii[consumed_ascii]));
-                            consumed_ascii += 1;
-                        } else {
-                            consumed_ascii += consumed;
-                            self.last_printed = Some(char::from(ascii[consumed_ascii - 1]));
-                        }
-                    }
+                    self.print_ascii(grid, ascii);
                     text = &text[ascii_len..];
                     continue;
                 }
@@ -445,6 +623,20 @@ impl Parser {
                 .expect("non-empty text always has a first character");
             self.print(grid, character);
             text = &text[character.len_utf8()..];
+        }
+    }
+
+    fn print_ascii(&mut self, grid: &mut Grid, ascii: &[u8]) {
+        let mut consumed_ascii = 0;
+        while consumed_ascii < ascii.len() {
+            let consumed = grid.put_ascii_run(&ascii[consumed_ascii..]);
+            if consumed == 0 {
+                self.print(grid, char::from(ascii[consumed_ascii]));
+                consumed_ascii += 1;
+            } else {
+                consumed_ascii += consumed;
+                self.last_printed = Some(char::from(ascii[consumed_ascii - 1]));
+            }
         }
     }
 
@@ -485,8 +677,7 @@ impl Parser {
             }
             State::Kitty => match byte {
                 0x1b => {
-                    self.finish_kitty(grid, output);
-                    self.state = State::Escape;
+                    self.state = State::KittyEscape;
                 }
                 0x9c => {
                     self.finish_kitty(grid, output);
@@ -494,6 +685,16 @@ impl Parser {
                 }
                 _ => self.push_kitty(byte),
             },
+            State::KittyEscape => {
+                if byte == b'\\' {
+                    self.finish_kitty(grid, output);
+                    self.state = State::Ground;
+                } else {
+                    self.push_kitty(0x1b);
+                    self.push_kitty(byte);
+                    self.state = State::Kitty;
+                }
+            }
             State::IgnoreString => {
                 if byte == 0x1b {
                     self.state = State::Escape;
@@ -530,6 +731,9 @@ impl Parser {
             0x1a => {}
             0x1b => self.state = State::Escape,
             0x20..=0x7e => self.print(grid, char::from(byte)),
+            // Termy's native Kitty interceptor accepts the 8-bit APC introducer
+            // even though other standalone C1 bytes are ignored in UTF-8 mode.
+            0x9f => self.state = State::ApcStart,
             // The PTY stream is UTF-8. Match Alacritty by ignoring standalone
             // C1 bytes instead of interpreting their legacy 8-bit forms.
             0x80..=0x9f => {}
@@ -542,6 +746,12 @@ impl Parser {
     }
 
     fn print(&mut self, grid: &mut Grid, character: char) {
+        // VTE dispatches valid UTF-8 encodings of C1 code points as controls.
+        // Alacritty ignores those controls in UTF-8 mode, so they must not be
+        // retained as zero-width combining text or become REP's last glyph.
+        if ('\u{80}'..='\u{9f}').contains(&character) {
+            return;
+        }
         self.last_printed = Some(character);
         let charset_index = self.single_shift.take().unwrap_or(self.active_charset);
         let charset = grid.charset(charset_index);
@@ -599,7 +809,9 @@ impl Parser {
                 self.state = State::Ground;
             }
             b'Z' => {
-                self.device_attributes(output);
+                // DECID is the legacy primary-device-attributes request. It
+                // does not inherit a private marker from an earlier CSI.
+                output.replies.extend_from_slice(b"\x1b[?6c");
                 self.state = State::Ground;
             }
             b'=' => {
@@ -864,10 +1076,12 @@ impl Parser {
                     if private && mode == 2026 {
                         if enabled {
                             self.synchronized_update_started = Some(Instant::now());
-                            self.synchronized_update_bytes = 0;
+                            self.synchronized_update_buffer.clear();
+                            output.synchronized_update_refreshed = true;
+                            output.unsynchronized_activity |= self.param_count > 1;
                         } else {
                             self.synchronized_update_started = None;
-                            self.synchronized_update_bytes = 0;
+                            self.synchronized_update_buffer.clear();
                         }
                     } else {
                         grid.set_mode(private, mode, enabled);
@@ -900,7 +1114,7 @@ impl Parser {
             }
             b'u' if self.private_marker == b'?' => {
                 output.replies.extend_from_slice(
-                    format!("\x1b[?{}u", grid.kitty_keyboard_flags()).as_bytes(),
+                    format!("\x1b[?{}u", grid.kitty_keyboard_report_flags()).as_bytes(),
                 );
             }
             b'u' => {
@@ -938,13 +1152,13 @@ impl Parser {
                 18 => output.replies.extend_from_slice(
                     format!("\x1b[8;{};{}t", grid.rows(), grid.cols()).as_bytes(),
                 ),
-                22 if matches!(self.param(1), 0 | 2) => {
-                    if self.title_stack.len() >= 64 {
+                22 => {
+                    if self.title_stack.len() >= TITLE_STACK_MAX_DEPTH {
                         self.title_stack.remove(0);
                     }
                     self.title_stack.push(self.title.clone());
                 }
-                23 if matches!(self.param(1), 0 | 2) => {
+                23 => {
                     if let Some(title) = self.title_stack.pop() {
                         self.title = title.clone();
                         output.events.push(match title {
@@ -1227,9 +1441,12 @@ impl Parser {
                     .push(ParsedEvent::WorkingDirectory(osc7_path(&value)));
             }
             "8" => {
-                let _parameters = fields.next();
+                let parameters = fields.next().unwrap_or_default();
+                let protocol_id = parameters
+                    .split(':')
+                    .find_map(|parameter| parameter.strip_prefix("id="));
                 let target = fields.collect::<Vec<_>>().join(";");
-                grid.set_hyperlink((!target.is_empty()).then_some(target.as_str()));
+                grid.set_hyperlink(protocol_id, (!target.is_empty()).then_some(target.as_str()));
             }
             "4" => {
                 let values = fields.collect::<Vec<_>>();
@@ -1343,7 +1560,11 @@ impl Parser {
                 let Some(shape) = fields
                     .next()
                     .and_then(|value| value.strip_prefix("CursorShape="))
-                    .and_then(|value| value.parse::<u16>().ok())
+                    .and_then(|value| value.as_bytes().first())
+                    .and_then(|value| match value {
+                        b'0'..=b'2' => Some(u16::from(value - b'0')),
+                        _ => None,
+                    })
                 else {
                     return;
                 };
@@ -1479,30 +1700,11 @@ fn progress_state(state: u8, progress: u8) -> Progress {
 }
 
 fn osc7_path(value: &str) -> String {
-    let path = value
+    value
         .strip_prefix("file://")
         .and_then(|value| value.find('/').map(|index| &value[index..]))
-        .unwrap_or(value);
-    percent_decode(path)
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2]))
-        {
-            decoded.push((high << 4) | low);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
+        .unwrap_or(value)
+        .to_string()
 }
 
 fn hex(byte: u8) -> Option<u8> {
@@ -1670,6 +1872,27 @@ mod tests {
     }
 
     #[test]
+    fn encoded_c1_controls_are_ignored_without_replacing_the_last_printed_character() {
+        let (grid, _) = parse("A\u{85}\u{9b}\x1b[2bB".as_bytes());
+        let row = grid.line(0).unwrap();
+
+        assert_eq!(
+            row[..4]
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>(),
+            "AAAB"
+        );
+        let mut first_combining = None;
+        assert!(grid.for_each_line_cell(0, |col, _, combining| {
+            if col == 0 {
+                first_combining = combining.map(|combining| combining.to_owned_string());
+            }
+        }));
+        assert_eq!(first_combining, None);
+    }
+
+    #[test]
     fn ground_text_spans_preserve_invalid_and_split_utf8_behavior() {
         let fixture = b"A\xe2\x28\xa1B\xc0\xafC\xf0\x9f\x99\x82D\xf0\x9f";
         let expected = replay_chunks(fixture, &[]);
@@ -1751,6 +1974,63 @@ mod tests {
     }
 
     #[test]
+    fn kitty_apc_terminator_is_chunk_safe() {
+        let mut grid = Grid::new(12, 4, 8, CursorStyle::Block);
+        let mut parser = Parser::default();
+
+        let pending = parser.advance(
+            &mut grid,
+            b"\x1b_Ga=T,f=32,s=1,v=1,i=77,p=3,c=2,r=1,C=1;/wAA/w==\x1b",
+        );
+        assert!(pending.replies.is_empty());
+        assert!(parser.graphics_placements(&grid).is_empty());
+        assert_eq!(parser.state, State::KittyEscape);
+
+        let finished = parser.advance(&mut grid, b"\\");
+        assert_eq!(finished.replies, b"\x1b_Gi=77,p=3;OK\x1b\\");
+        assert_eq!(parser.graphics_placements(&grid).len(), 1);
+        assert_eq!(parser.state, State::Ground);
+    }
+
+    #[test]
+    fn kitty_apc_accepts_the_native_engines_eight_bit_introducer() {
+        let mut parser = Parser::default();
+        let mut grid = Grid::new(8, 2, 0, CursorStyle::Block);
+        let output = parser.advance(&mut grid, b"\x9fGa=T,f=32,s=1,v=1,i=7;/wAA/w==\x9cZ");
+
+        assert_eq!(grid.line(1).unwrap()[1].character, 'Z');
+        assert_eq!(parser.graphics_placements(&grid).len(), 1);
+        assert!(output.replies.starts_with(b"\x1b_Gi=7;"));
+    }
+
+    #[test]
+    fn kitty_apc_preserves_non_terminating_escape_bytes_across_chunks() {
+        let mut grid = Grid::new(12, 4, 8, CursorStyle::Block);
+        let mut parser = Parser::default();
+
+        let first = parser.advance(
+            &mut grid,
+            b"\x1b_Ga=T,f=32,s=1,v=1,i=78,C=1,q=1;/wAA/w==\x1b",
+        );
+        assert!(first.replies.is_empty());
+        assert_eq!(parser.state, State::KittyEscape);
+
+        let middle = parser.advance(&mut grid, b"x\x1b");
+        assert!(middle.replies.is_empty());
+        assert!(parser.graphics_placements(&grid).is_empty());
+        assert_eq!(parser.state, State::KittyEscape);
+
+        let finished = parser.advance(&mut grid, b"\\Z");
+        assert_eq!(
+            finished.replies,
+            b"\x1b_Gi=78;EINVAL:invalid base64 payload\x1b\\"
+        );
+        assert!(parser.graphics_placements(&grid).is_empty());
+        assert_eq!(grid.line(0).unwrap()[0].character, 'Z');
+        assert_eq!(parser.state, State::Ground);
+    }
+
+    #[test]
     fn malformed_random_streams_keep_grid_and_graphics_invariants() {
         let mut grid = Grid::new(31, 7, 16, CursorStyle::Block);
         let mut parser = Parser::default();
@@ -1820,7 +2100,7 @@ mod tests {
         assert_eq!(
             output.events,
             vec![
-                ParsedEvent::WorkingDirectory("/tmp/a b;c".to_string()),
+                ParsedEvent::WorkingDirectory("/tmp/a%20b;c".to_string()),
                 ParsedEvent::WorkingDirectory("/tmp/d;e".to_string()),
                 ParsedEvent::Progress(Progress::InProgress(100)),
                 ParsedEvent::ShellCommandFinished(None),
@@ -1847,6 +2127,18 @@ mod tests {
     }
 
     #[test]
+    fn osc_cursor_shape_matches_vte_first_byte_compatibility() {
+        let (grid, _) = parse(b"\x1b]50;CursorShape=10\x07");
+        assert_eq!(grid.cursor_style_status(), 6);
+
+        let (grid, _) = parse(b"\x1b]50;CursorShape=20\x07");
+        assert_eq!(grid.cursor_style_status(), 4);
+
+        let (grid, _) = parse(b"\x1b]50;CursorShape=9\x07");
+        assert_eq!(grid.cursor_state().unwrap().style, CursorStyle::Block);
+    }
+
+    #[test]
     fn cursor_shape_queries_preserve_blinking_and_underlying_shape() {
         let (grid, output) = parse(
             b"\x1b[3 q\x1bP$q q\x1b\\\
@@ -1863,6 +2155,16 @@ mod tests {
 
     #[test]
     fn saves_and_restores_window_titles() {
+        let (_, output) = parse(b"\x1b]2;A\x07\x1b[22;1t\x1b]2;B\x07\x1b[23;1t");
+        assert_eq!(
+            output.events,
+            vec![
+                ParsedEvent::Title("A".to_string()),
+                ParsedEvent::Title("B".to_string()),
+                ParsedEvent::Title("A".to_string()),
+            ]
+        );
+
         let (_, output) = parse(b"\x1b]2;one\x07\x1b[22;2t\x1b]2;two\x07\x1b[23;2t\x1b[23;2t");
         assert_eq!(
             output.events,
@@ -1871,6 +2173,27 @@ mod tests {
                 ParsedEvent::Title("two".to_string()),
                 ParsedEvent::Title("one".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn window_title_stack_matches_alacritty_depth_limit() {
+        let mut grid = Grid::new(12, 3, 8, CursorStyle::Block);
+        let mut parser = Parser::default();
+
+        for index in 0..=TITLE_STACK_MAX_DEPTH {
+            parser.title = Some(index.to_string());
+            parser.advance(&mut grid, b"\x1b[22;1t");
+        }
+
+        assert_eq!(parser.title_stack.len(), TITLE_STACK_MAX_DEPTH);
+        assert_eq!(
+            parser.title_stack.first().and_then(Option::as_deref),
+            Some("1")
+        );
+        assert_eq!(
+            parser.title_stack.last().and_then(Option::as_deref),
+            Some("4096")
         );
     }
 
@@ -1994,6 +2317,35 @@ mod tests {
     }
 
     #[test]
+    fn osc8_ranges_use_the_protocol_id_and_uri_identity() {
+        let uri = "https://example.com/same";
+        let bytes = format!(
+            "\x1b]8;foo=bar:id=one;{uri}\x1b\\A\
+             \x1b]8;id=two;{uri}\x1b\\B\
+             \x1b]8;;{uri}\x1b\\C\
+             \x1b]8;;{uri}\x1b\\D\
+             \x1b]8;id=one;{uri}\x1b\\E"
+        );
+        let (grid, _) = parse(bytes.as_bytes());
+
+        for col in 0..5 {
+            let link = grid
+                .hyperlink_at(0, col)
+                .expect("cell should carry an OSC 8 link");
+            assert_eq!((link.start_col, link.end_col), (col, col));
+            assert_eq!(link.target, uri);
+        }
+
+        let bytes = format!(
+            "\x1b]8;id=shared;{uri}\x1b\\A\x1b]8;;\x1b\\\
+             \x1b]8;id=shared;{uri}\x1b\\B"
+        );
+        let (grid, _) = parse(bytes.as_bytes());
+        let link = grid.hyperlink_at(0, 0).expect("reopened link should exist");
+        assert_eq!((link.start_col, link.end_col), (0, 1));
+    }
+
+    #[test]
     fn answers_and_updates_indexed_and_dynamic_color_queries() {
         let (grid, output) = parse(
             b"\x1b]4;1;?\x07\x1b]4;1;#123456\x1b\\\x1b]4;1;?\x1b\\\
@@ -2074,8 +2426,18 @@ mod tests {
 
         assert_eq!(
             output.replies,
-            b"\x1b[?2004;1$y\x1b[4;2$y\x1b[?5u\x1b[4;54;108t\x1b[8;3;12t"
+            b"\x1b[?2004;1$y\x1b[4;2$y\x1b[?0u\x1b[4;54;108t\x1b[8;3;12t"
         );
+    }
+
+    #[test]
+    fn keyboard_mode_query_reports_the_stack_top_like_alacritty() {
+        let (grid, output) = parse(b"\x1b[>1u\x1b[=2;2u\x1b[?u");
+
+        let keyboard = grid.keyboard_mode();
+        assert!(keyboard.disambiguate_escape_codes);
+        assert!(keyboard.report_event_types);
+        assert_eq!(output.replies, b"\x1b[?1u");
     }
 
     #[test]
@@ -2218,6 +2580,119 @@ mod tests {
                 .advance(&mut grid, b"\x1b[?2026l")
                 .synchronized_update_active
         );
+    }
+
+    #[test]
+    fn synchronized_updates_stage_grid_events_and_replies_atomically() {
+        let mut grid = Grid::new(12, 2, 0, CursorStyle::Block);
+        let mut parser = Parser::default();
+
+        let staged = parser.advance(&mut grid, b"\x1b[?2026hframe\x07\x1b]2;batched\x07\x1b[6n");
+        assert!(staged.synchronized_update_active);
+        assert!(staged.events.is_empty());
+        assert!(staged.replies.is_empty());
+        assert_eq!(grid.line(0).unwrap()[0].character, ' ');
+
+        let committed = parser.advance(&mut grid, ESU_CSI);
+        assert!(!committed.synchronized_update_active);
+        assert_eq!(
+            grid.line(0).unwrap()[..5]
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>(),
+            "frame"
+        );
+        assert_eq!(
+            committed.events,
+            vec![ParsedEvent::Bell, ParsedEvent::Title("batched".to_string())]
+        );
+        assert_eq!(committed.replies, b"\x1b[1;6R");
+    }
+
+    #[test]
+    fn synchronized_update_initial_bsu_can_share_a_private_mode_sequence() {
+        let mut grid = Grid::new(8, 2, 0, CursorStyle::Block);
+        let mut parser = Parser::default();
+
+        let staged = parser.advance(&mut grid, b"\x1b[?2004;2026hX");
+        assert!(staged.synchronized_update_active);
+        assert_eq!(grid.line(0).unwrap()[0].character, ' ');
+        assert!(grid.bracketed_paste_mode());
+
+        parser.advance(&mut grid, ESU_CSI);
+        assert_eq!(grid.line(0).unwrap()[0].character, 'X');
+    }
+
+    #[test]
+    fn exact_synchronized_update_end_is_chunk_safe_at_every_split() {
+        for split in 0..=ESU_CSI.len() {
+            let mut grid = Grid::new(8, 2, 0, CursorStyle::Block);
+            let mut parser = Parser::default();
+            parser.advance(&mut grid, b"\x1b[?2026hX");
+
+            let pending = parser.advance(&mut grid, &ESU_CSI[..split]);
+            if split < ESU_CSI.len() {
+                assert!(pending.synchronized_update_active, "split {split}");
+                assert_eq!(grid.line(0).unwrap()[0].character, ' ', "split {split}");
+            }
+            let committed = parser.advance(&mut grid, &ESU_CSI[split..]);
+            assert!(!committed.synchronized_update_active, "split {split}");
+            assert_eq!(grid.line(0).unwrap()[0].character, 'X', "split {split}");
+        }
+    }
+
+    #[test]
+    fn synchronized_scanner_requires_exact_raw_end_and_retains_later_bsu() {
+        let mut grid = Grid::new(12, 2, 0, CursorStyle::Block);
+        let mut parser = Parser::default();
+
+        let pending = parser.advance(&mut grid, b"\x1b[?2026hA\x1b[?2026;25lB");
+        assert!(pending.synchronized_update_active);
+        assert_eq!(grid.line(0).unwrap()[0].character, ' ');
+
+        let extended = parser.advance(&mut grid, b"\x1b[?2026l\x1b[?2026hC");
+        assert!(extended.synchronized_update_active);
+        assert_eq!(
+            grid.line(0).unwrap()[..2]
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>(),
+            "AB"
+        );
+
+        parser.advance(&mut grid, ESU_CSI);
+        assert_eq!(
+            grid.line(0).unwrap()[..3]
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>(),
+            "ABC"
+        );
+    }
+
+    #[test]
+    fn explicit_sync_stop_commits_buffered_protocol_replies() {
+        let mut grid = Grid::new(8, 2, 0, CursorStyle::Block);
+        let mut parser = Parser::default();
+        parser.advance(&mut grid, b"\x1b[?2026hX\x1b[6n");
+
+        let committed = parser.stop_synchronized_update(&mut grid);
+        assert!(!committed.synchronized_update_active);
+        assert_eq!(grid.line(0).unwrap()[0].character, 'X');
+        assert_eq!(committed.replies, b"\x1b[1;2R");
+    }
+
+    #[test]
+    fn synchronized_update_capacity_flushes_before_exceeding_two_mibibytes() {
+        let mut grid = Grid::new(8, 2, 0, CursorStyle::Block);
+        let mut parser = Parser::default();
+        parser.advance(&mut grid, BSU_CSI);
+        let oversized = vec![b'X'; MAX_SYNC_BYTES - 1];
+
+        let flushed = parser.advance(&mut grid, &oversized);
+        assert!(!flushed.synchronized_update_active);
+        assert!(flushed.synchronized_update_committed);
+        assert_eq!(grid.line(0).unwrap()[0].character, 'X');
     }
 
     #[test]

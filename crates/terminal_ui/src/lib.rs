@@ -37,11 +37,11 @@ pub use render_metrics::{
     terminal_ui_render_metrics_snapshot,
 };
 pub use runtime::{
-    TabTitleShellIntegration, Terminal, TerminalCursorState, TerminalCursorStyle,
-    TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalLaunch, TerminalOptions,
-    TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell, WorkingDirFallback,
-    normalize_working_directory_candidate, resolve_launch_working_directory,
-    resolve_working_directory_path,
+    MAX_TERMINAL_SCROLLBACK_HISTORY, TabTitleShellIntegration, Terminal, TerminalCursorState,
+    TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalLaunch,
+    TerminalOptions, TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
+    WorkingDirFallback, normalize_working_directory_candidate, resolve_launch_working_directory,
+    resolve_working_directory_path, terminal_environment_overrides,
 };
 pub use shell_integration::{CommandLifecycle, CommandPhase, ProgressState};
 pub use termy_core::KittyGraphicsRenderPlacement;

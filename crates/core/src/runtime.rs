@@ -91,7 +91,7 @@ const DEFAULT_SCROLLBACK_HISTORY: usize = 1000;
 /// scrollback toward this cap, so an unbounded value plus hostile output is an
 /// unbounded memory leak. Kept in parity with `config_core`'s constant of the
 /// same name.
-const MAX_SCROLLBACK_HISTORY: usize = 20_000;
+pub const MAX_TERMINAL_SCROLLBACK_HISTORY: usize = 20_000;
 
 /// Upper clamp on terminal dimensions. Real displays never approach this (an 8K
 /// display at a 4px font is ~1900 columns); it exists only to stop a buggy or
@@ -194,7 +194,7 @@ impl TerminalOptions {
         TermConfig {
             // Every terminal build and live option change flows through here, so
             // clamping once bounds the config, runtime-setter, and FFI paths.
-            scrolling_history: self.scrollback_history.min(MAX_SCROLLBACK_HISTORY),
+            scrolling_history: self.scrollback_history.min(MAX_TERMINAL_SCROLLBACK_HISTORY),
             default_cursor_style: AlacrittyCursorStyle {
                 shape,
                 blinking: false,
@@ -1046,7 +1046,12 @@ fn user_home_dir() -> Option<PathBuf> {
     None
 }
 
-fn pty_env_overrides(
+/// Build the child-process environment shared by native terminal engines.
+///
+/// Keeping this at the engine boundary prevents experimental backends from
+/// drifting on terminal identity, PATH normalization, shell integration, or
+/// Unix UTF-8 locale repair.
+pub fn terminal_environment_overrides(
     shell_integration: Option<&TabTitleShellIntegration>,
     runtime_config: &TerminalRuntimeConfig,
 ) -> HashMap<String, String> {
@@ -2174,7 +2179,7 @@ impl Terminal {
         let pty_options = PtyOptions {
             shell: Some(shell),
             working_directory,
-            env: pty_env_overrides(tab_title_shell_integration, &runtime_config),
+            env: terminal_environment_overrides(tab_title_shell_integration, &runtime_config),
             drain_on_exit: true,
             #[cfg(target_os = "windows")]
             escape_args: true,
@@ -2783,16 +2788,17 @@ mod tests {
     use super::{
         DEFAULT_TERM, EVENT_QUEUE_HARD_CAP, EVENT_QUEUE_SOFT_CAP, GHOSTTY_COMPAT_TERM_PROGRAM,
         GHOSTTY_COMPAT_TERM_PROGRAM_VERSION, JsonEventListener, KittyGraphicsCursorTracker,
-        MAX_SCROLLBACK_HISTORY, MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, RuntimeEvent,
+        MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MAX_TERMINAL_SCROLLBACK_HISTORY, RuntimeEvent,
         TERMY_TERM_PROGRAM, Terminal, TerminalCursorState, TerminalCursorStyle,
         TerminalDamageSnapshot, TerminalEvent, TerminalLaunch, TerminalOptions,
         TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
         WorkingDirFallback, advance_kitty_graphics_cursor, advance_kitty_graphics_text,
         apply_term_config, cursor_position_from_term, cursor_state_from_term, default_shell_launch,
-        drain_runtime_events, normalize_working_directory_candidate, pty_env_overrides,
+        drain_runtime_events, normalize_working_directory_candidate,
         resolve_launch_working_directory, resolve_shell_path, resolved_terminal_launch,
-        search_term_buffer, should_drop_event, take_term_damage_snapshot, terminal_event_from_osc,
-        termmode_to_terminal_mouse_mode, user_home_dir,
+        search_term_buffer, should_drop_event, take_term_damage_snapshot,
+        terminal_environment_overrides, terminal_event_from_osc, termmode_to_terminal_mouse_mode,
+        user_home_dir,
     };
     use crate::keyboard::{
         Keystroke, Modifiers, TerminalKeyEventKind, TerminalKeyboardMode, keystroke_to_input,
@@ -3226,7 +3232,7 @@ mod tests {
         };
         assert_eq!(
             options.term_config().scrolling_history,
-            MAX_SCROLLBACK_HISTORY
+            MAX_TERMINAL_SCROLLBACK_HISTORY
         );
     }
 
@@ -4316,13 +4322,13 @@ mod tests {
 
     #[test]
     fn env_overrides_set_term_by_default() {
-        let env = pty_env_overrides(None, &TerminalRuntimeConfig::default());
+        let env = terminal_environment_overrides(None, &TerminalRuntimeConfig::default());
         assert_eq!(env.get("TERM").map(String::as_str), Some(DEFAULT_TERM));
     }
 
     #[test]
     fn env_overrides_advertise_ghostty_progress_capability() {
-        let env = pty_env_overrides(None, &TerminalRuntimeConfig::default());
+        let env = terminal_environment_overrides(None, &TerminalRuntimeConfig::default());
         assert_eq!(
             env.get("TERM_PROGRAM").map(String::as_str),
             Some(GHOSTTY_COMPAT_TERM_PROGRAM)
@@ -4343,7 +4349,7 @@ mod tests {
             colorterm: None,
             ..TerminalRuntimeConfig::default()
         };
-        let env = pty_env_overrides(None, &config);
+        let env = terminal_environment_overrides(None, &config);
         assert!(!env.contains_key("COLORTERM"));
     }
 
@@ -4356,7 +4362,7 @@ mod tests {
             ]),
             ..TerminalRuntimeConfig::default()
         };
-        let env = pty_env_overrides(None, &config);
+        let env = terminal_environment_overrides(None, &config);
         assert_eq!(
             env.get("CMUX_SOCKET_PATH").map(String::as_str),
             Some("/tmp/cmux.sock")

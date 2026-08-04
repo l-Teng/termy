@@ -8,6 +8,9 @@ description = "Experimental lightweight terminal engine for Termy"
 [lints]
 workspace = true
 
+[features]
+benchmark-allocations = []
+
 [dependencies]
 
 [dev-dependencies]

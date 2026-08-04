@@ -37,6 +37,7 @@ pub(crate) fn character_width(character: char) -> usize {
 #[inline]
 fn special_width(character: char) -> usize {
     match character {
+        '\u{17d8}' => 3,
         '\u{05dc}'
         | '\u{0622}'..='\u{0882}'
         | '\u{1780}'..='\u{17af}'
@@ -991,6 +992,7 @@ mod tests {
             ('\u{200d}', 0),
             ('\u{feff}', 0),
             ('\u{1e944}', 0),
+            ('\u{17d8}', 3),
             ('界', 2),
             ('🙂', 2),
         ] {

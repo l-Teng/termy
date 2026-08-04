@@ -9,8 +9,10 @@ baseline so host differences are not presented as engine improvements.
 
 ## Result
 
-Release benchmark settings: 120x40 grid, 10,000 scrollback lines, 32 MiB per
-parser sample, 7 samples, and 250 full-frame API calls per snapshot sample.
+The saved release measurements below used a 120x40 grid, 10,000 scrollback
+lines, 32 MiB per parser sample, 7 samples, and 250 full-frame API calls per
+snapshot sample. Seven is the historical sample count, not the current harness
+default; CI now uses eight so every workload has balanced AB/BA sample order.
 
 | Workload | Before Tmon | After Tmon | Final Alacritty | Tmon improvement | Final ratio |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -32,9 +34,9 @@ target remained above its required margin in both runs.
 
 The full-frame API result does not compare equivalent raw work. Tmon copies its
 internal cells, while `termy_core` converts Alacritty cells into a `TermyFrame`.
-The benchmark output now labels this explicitly. The useful regression check is
-within Tmon itself; its throughput improved instead of consuming the allowed 5%
-regression budget.
+The benchmark output now labels this explicitly. The saved same-machine
+before/after result shows that Tmon's own throughput improved; it does not make
+the cross-engine ratio a valid hosted-CI regression gate.
 
 ## Supplied Linux baseline
 
@@ -54,8 +56,37 @@ uploads `tmon-alacritty-benchmark.txt`.
 ## Benchmark and profile audit
 
 Both engines receive identical bytes, a 120x40 grid, a 10,000-line history
-limit, alternating sample order, and release builds. The saved metric uses the
-same small payload-sized public `feed_output` calls as the baseline.
+limit, alternating sample order, and release builds. The current default is
+eight samples; odd values are rejected so every workload contains the same
+number of Tmon-first and Alacritty-first pairs. Before any timed samples, the
+benchmark feeds up to 32 MiB of every workload into fresh terminals and compares
+every normalized grid and scrollback cell, cursor state, scroll state,
+alternate-screen mode, and bracketed-paste mode. The saved metric uses the same
+small payload-sized public `feed_output` calls as the baseline.
+
+Parser decisions use the median of the eight per-sample Tmon/Alacritty ratios,
+not the ratio of two independently aggregated medians. The report preserves the
+individual pair ratios and their order, prints actual ratios and committed
+targets to three decimals, and rejects non-finite target values. GitHub Actions
+enforces the four parser/grid targets after the benchmark has written its
+output.
+
+Snapshot throughput remains report-only. The report shows retention against the
+supplied 19.880x baseline, but does not enforce the tempting
+`19.880x * 0.95 = 18.886x` threshold. That gate is not sound on hosted CI: Tmon
+copies raw cells while `termy_core` constructs a `TermyFrame`, so the numerator
+and denominator are different operations whose relative cost can move with the
+runner. Retention is a trend to investigate, not an equivalent-work pass/fail
+claim.
+
+The Actions report is initialized under `runner.temp` before checkout. The
+timed comparison and subsequent allocation-only pass append through Bash
+`pipefail` pipelines, and an `always()` finalizer records the outcome of
+checkout, toolchain setup, cache setup, the comparison, and allocation
+accounting. If the runner remains available, the report is still added to the
+job summary and uploaded even when an earlier step fails. Allocation accounting
+also caps total parser work at 1,024 MiB, so an invalid oversized manual input
+fails quickly enough for the finalizer to preserve the report.
 
 It is an integrated runtime comparison, not a raw-parser comparison. Tmon feeds
 its engine directly. Alacritty is exercised through `termy_core`, including its
@@ -95,12 +126,58 @@ An erase-display experiment that tried to skip fills of already blank rows was
 discarded. Its first version fell to 3.3 MiB/s on edits; an exact-first revision
 reached 4.4 MiB/s versus the retained 4.5 MiB/s at that stage.
 
+## Follow-up awaiting CI measurement
+
+The saved after-table predates a small static hot-path follow-up. Printable
+ASCII at the start of a ground-state batch now bypasses the control-span scan
+and UTF-8 validation pass, wide-cell replacement reuses one scalar-width
+calculation, and OSC 8 explicit identities use a reverse hash index. Hyperlink
+garbage collection is also amortized after 4,096 live links instead of scanning
+the full primary, alternate, and scrollback grids for every later link.
+
+These changes are intentionally not folded into the measured table above. The
+next GitHub Actions benchmark run is the acceptance measurement; no newer local
+benchmark was run. If the parser ratios or Tmon full-frame regression trend
+move backward there, the focused changes should be reconsidered independently.
+
+PTY control traffic was hardened separately from the parser benchmark. Resize
+requests now coalesce out of band and close is a sticky cancellation signal, so
+neither waits behind a saturated input queue. A deterministic PTY test fills
+the old queue-sized backlog, verifies that the newest resize reaches the child,
+and confirms that every accepted input block remains in FIFO order. This is a
+correctness and tail-latency safeguard; the saved parser/grid table does not
+measure it.
+
 ## Allocation accounting
 
-macOS Allocations could not attach to the profiling binary under the current
-System Integrity Protection configuration. Tmon did not add an unsafe global
-allocator solely to manufacture a counter, so the figures below are static
-hot-path counts rather than whole-process allocation totals.
+Whole-process allocator requests are now measured by a separate, report-only
+pass after the timed comparison. The `benchmark-allocations` feature installs a
+`System` wrapper only in the example binary and requires
+`TMON_BENCH_ALLOCATIONS_ONLY=1`; a feature build refuses timed mode, while a
+normal build rejects allocation-only mode. The normal throughput executable
+therefore contains no allocator-counter overhead.
+
+For each engine/workload pair, the pass warms 2 MiB on an uncounted terminal,
+constructs a fresh terminal while counting is disabled, resets and enables the
+counter with an unwind-safe non-nestable guard, and counts only the same
+complete-payload `feed_output` loop used by timed samples. It reports the exact
+processed byte count, which can be slightly above the configured target. It
+atomically closes registration and waits for in-flight allocator hooks before
+observing a snapshot and before dropping the terminal. The output reports raw
+allocation totals (including zeroed allocations),
+deallocation totals, and successful realloc request totals plus a signed net
+requested-byte change; no allocation threshold is enforced.
+
+This is scoped allocator-request accounting, not a memory-usage measurement.
+The process-global wrapper also sees concurrent allocator traffic while the
+guard is active, and the signed net is requested bytes in that interval, not
+RSS, retained or usable heap, allocator metadata, or physical memory. Terminal
+construction, the warmup, snapshot creation, and terminal destruction are
+deliberately outside the count.
+
+Before this path existed, macOS Allocations could not attach to the profiling
+binary under the current System Integrity Protection configuration. The static
+hot-path estimates from that earlier audit remain useful context:
 
 | Workload | Removed temporary row-vector allocations per 32 MiB sample |
 | --- | ---: |
@@ -126,3 +203,32 @@ Packing is an intentional source-level API change in this experimental crate:
 direct flag fields become getters/setters, and full external `Cell` struct
 literals must become `Cell::default()` followed by field/setter updates. Public
 setters retain the ability to construct every former flag state.
+
+No terminal behavior was deliberately removed or weakened for speed. The only
+accepted compatibility tradeoff is the source-level `Cell` construction change
+above; the engine remains experimental and its broader VT/graphics parity is
+tracked separately from these benchmark results.
+
+## Remaining hotspots
+
+- `put_char`, cell writes, and row movement remain the largest plain/Unicode
+  costs. Future changes should be driven by fresh per-workload profiles because
+  the current targets already clear their required margins.
+- Erase-display and row shifts still dominate the edit trace. The rejected
+  blank-row shortcut shows that extra state checks can cost more than a bulk
+  fill, so another attempt needs an adversarial differential test and repeatable
+  measurements.
+- The two full-frame APIs perform different work. A truly comparable snapshot
+  benchmark needs a shared renderer-neutral output contract; the current ratio
+  must not be presented as a raw engine advantage.
+- Normal full-viewport scrolls currently become full damage at the desktop
+  adapter, so the renderer rebuilds the visible rows. Optimizing this needs a
+  renderer-inclusive benchmark and an ordered scroll-cache design; the current
+  parser/grid suite cannot validate the tradeoff.
+- Whole-process allocator requests are counted only during the allocation
+  pass's `feed_output` scopes. RSS, retained heap, allocator fragmentation and
+  metadata, terminal construction/destruction, snapshots, PTY I/O, and renderer
+  allocations remain outside what this report can claim.
+- Shared GitHub runners report a median and range but cannot guarantee CPU
+  frequency or isolation. Cross-push results are useful trend signals, not
+  laboratory-grade absolute measurements.
