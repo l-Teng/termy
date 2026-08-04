@@ -1,8 +1,6 @@
 use super::scrollbar as terminal_scrollbar;
 use super::*;
 use crate::ui::scrollbar::{self as ui_scrollbar, ScrollbarPaintStyle};
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 use gpui::prelude::FluentBuilder;
 use gpui::{ElementInputHandler, ObjectFit, StyledImage, canvas};
@@ -213,6 +211,18 @@ fn cell_text_attributes(flags: Flags) -> CellTextAttributes {
     }
 }
 
+fn terminal_cell_text_attributes(cell: TerminalCellRef<'_>) -> CellTextAttributes {
+    match cell {
+        TerminalCellRef::Alacritty(cell) => cell_text_attributes(cell.flags),
+        TerminalCellRef::Tmon(cell, _) => CellTextAttributes {
+            bold: cell.attributes.bold,
+            italic: cell.attributes.italic,
+            underline: cell.attributes.underline,
+            strikethrough: cell.attributes.strikethrough,
+        },
+    }
+}
+
 impl CellColorTransform {
     fn is_active(self) -> bool {
         self.fg_blend > f32::EPSILON
@@ -393,6 +403,7 @@ fn paint_damage_from_dirty_spans(
 #[derive(Clone, Copy)]
 struct PaneCellBuildContext<'a> {
     colors: &'a TerminalColors,
+    tmon_palette: Option<&'a tmon::Palette>,
     effective_background_opacity: f32,
     background_opacity_cells: bool,
     cell_color_transform: CellColorTransform,
@@ -429,30 +440,65 @@ fn resolved_default_cell_colors(context: PaneCellBuildContext<'_>) -> (gpui::Rgb
     )
 }
 
-fn resolve_cell_colors(
-    cell_content: &alacritty_terminal::term::cell::Cell,
+fn resolve_cell_colors<'a>(
+    cell_content: impl Into<TerminalCellRef<'a>>,
     context: PaneCellBuildContext<'_>,
 ) -> ResolvedCellColors {
-    let mut fg_source = cell_content.fg;
-    let mut bg_source = cell_content.bg;
-    if cell_content.flags.contains(Flags::INVERSE) {
-        std::mem::swap(&mut fg_source, &mut bg_source);
-    }
+    let cell_content = cell_content.into();
+    let (mut fg, mut bg, uses_terminal_default_bg, dim, character) = match cell_content {
+        TerminalCellRef::Alacritty(cell) => {
+            let mut fg_source = cell.fg;
+            let mut bg_source = cell.bg;
+            if cell.flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg_source, &mut bg_source);
+            }
+            (
+                context.colors.convert(fg_source),
+                context.colors.convert(bg_source),
+                uses_terminal_default_background(bg_source),
+                cell.flags.contains(Flags::DIM),
+                cell.c,
+            )
+        }
+        TerminalCellRef::Tmon(cell, _) => {
+            let mut fg = resolve_tmon_color(
+                cell.foreground,
+                context.colors.foreground,
+                context.colors,
+                context.tmon_palette,
+                context.tmon_palette.and_then(tmon::Palette::foreground),
+            );
+            let mut bg = resolve_tmon_color(
+                cell.background,
+                context.colors.background,
+                context.colors,
+                context.tmon_palette,
+                context.tmon_palette.and_then(tmon::Palette::background),
+            );
+            if cell.attributes.inverse {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            (
+                fg,
+                bg,
+                matches!(cell.background, tmon::Color::Default) && !cell.attributes.inverse,
+                cell.attributes.dim,
+                cell.character,
+            )
+        }
+    };
 
-    // Decide transparency from the terminal color source, not the resolved RGB.
-    // Block-element workloads like doom fire encode visible pixels in the cell
-    // background, so those explicit backgrounds must stay opaque even when they
-    // numerically match the theme background.
-    let mut fg = context.colors.convert(fg_source);
-    let mut bg = context.colors.convert(bg_source);
-    if cell_content.flags.contains(Flags::DIM) {
+    if dim {
         fg.r *= DIM_TEXT_FACTOR;
         fg.g *= DIM_TEXT_FACTOR;
         fg.b *= DIM_TEXT_FACTOR;
     }
-    let uses_terminal_default_bg = uses_terminal_default_background(bg_source);
+    // Decide transparency from the terminal color source, not the resolved RGB.
+    // Block-element workloads like doom fire encode visible pixels in the cell
+    // background, so those explicit backgrounds must stay opaque even when they
+    // numerically match the theme background.
     let apply_background_opacity = uses_terminal_default_bg
-        || (context.background_opacity_cells && !uses_block_element_background(cell_content.c));
+        || (context.background_opacity_cells && !uses_block_element_background(character));
     if apply_background_opacity {
         bg.a *= context.effective_background_opacity;
     }
@@ -471,6 +517,31 @@ fn resolve_cell_colors(
     }
 }
 
+fn resolve_tmon_color(
+    color: tmon::Color,
+    default: gpui::Rgba,
+    colors: &TerminalColors,
+    palette: Option<&tmon::Palette>,
+    default_override: Option<tmon::Rgb>,
+) -> gpui::Rgba {
+    match color {
+        tmon::Color::Default => default_override.map_or(default, tmon_rgb_to_rgba),
+        tmon::Color::Indexed(index) => palette
+            .and_then(|palette| palette.indexed(index))
+            .map_or_else(|| colors.indexed_color(index), tmon_rgb_to_rgba),
+        tmon::Color::Rgb { r, g, b } => tmon_rgb_to_rgba(tmon::Rgb { r, g, b }),
+    }
+}
+
+fn tmon_rgb_to_rgba(color: tmon::Rgb) -> gpui::Rgba {
+    gpui::Rgba {
+        r: f32::from(color.r) / 255.0,
+        g: f32::from(color.g) / 255.0,
+        b: f32::from(color.b) / 255.0,
+        a: 1.0,
+    }
+}
+
 fn selection_range_contains(
     selection_range: Option<(SelectionPos, SelectionPos)>,
     col: usize,
@@ -481,12 +552,6 @@ fn selection_range_contains(
     };
     let here = (line, col);
     here >= (start.line, start.col) && here <= (end.line, end.col)
-}
-
-fn term_line_from_viewport_row(row: usize, display_offset: usize) -> Option<i32> {
-    let row = i64::try_from(row).ok()?;
-    let display_offset = i64::try_from(display_offset).ok()?;
-    i32::try_from(row - display_offset).ok()
 }
 
 fn filtered_cursor_state(
@@ -554,6 +619,7 @@ fn pane_render_cells_match_dimensions(cells: &PaneRenderCells, cols: usize, rows
     cells.len() == rows && cells.iter().all(|row_cells| row_cells.len() == cols)
 }
 
+#[cfg(test)]
 fn patch_pane_render_row(
     cells: &mut [Arc<Vec<CellRenderInfo>>],
     rows: usize,
@@ -727,11 +793,11 @@ impl TerminalView {
         col: usize,
         row: usize,
         term_line: i32,
-        cell_content: &alacritty_terminal::term::cell::Cell,
+        cell_content: TerminalCellRef<'_>,
         context: PaneCellBuildContext<'_>,
     ) -> CellRenderInfo {
         let resolved_colors = resolve_cell_colors(cell_content, context);
-        let text_attributes = cell_text_attributes(cell_content.flags);
+        let text_attributes = terminal_cell_text_attributes(cell_content);
 
         let (search_current, search_match) = if let Some(results) = context.pane_search_results {
             let is_current = results.is_current_match(term_line, col);
@@ -744,7 +810,8 @@ impl TerminalView {
         CellRenderInfo {
             col,
             row,
-            char: cell_content.c,
+            char: cell_content.character(),
+            combining: cell_content.combining(),
             fg: resolved_colors.fg.into(),
             bg: resolved_colors.bg.into(),
             uses_terminal_default_bg: resolved_colors.uses_terminal_default_bg,
@@ -752,9 +819,7 @@ impl TerminalView {
             italic: text_attributes.italic,
             underline: text_attributes.underline,
             strikethrough: text_attributes.strikethrough,
-            render_text: !cell_content.flags.intersects(
-                Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN,
-            ),
+            render_text: !cell_content.is_wide_spacer() && !cell_content.is_hidden(),
             selected: selection_range_contains(context.selection_range, col, term_line),
             search_current,
             search_match,
@@ -840,6 +905,7 @@ impl TerminalView {
             col: 0,
             row: 0,
             char: ' ',
+            combining: None,
             fg: default_fg.into(),
             bg: default_bg.into(),
             uses_terminal_default_bg: true,
@@ -904,50 +970,31 @@ impl TerminalView {
         // dirty row is then made mutable once before all cells in its span are
         // patched, instead of checking both Arcs for every individual cell.
         let cells: &mut Vec<_> = Arc::make_mut(cells);
-        let _ = terminal.with_grid(|grid| {
-            let Some(screen_lines) = i32::try_from(grid.screen_lines()).ok() else {
-                return;
-            };
-            let Some(total_lines) = i32::try_from(grid.total_lines()).ok() else {
-                return;
-            };
-            let min_line = -(total_lines - screen_lines);
-            let max_line = screen_lines - 1;
-
-            for span in spans {
-                if span.row >= rows || cols == 0 {
-                    continue;
-                }
-
-                let Some(term_line) = term_line_from_viewport_row(span.row, display_offset) else {
-                    continue;
-                };
-                if term_line < min_line || term_line > max_line {
-                    continue;
-                }
-
-                let row = span.row;
-                let line_ref = &grid[Line(term_line)];
-                let left_col = span.left_col.min(cols.saturating_sub(1));
-                let right_col = span.right_col.min(cols.saturating_sub(1));
-                if left_col > right_col {
-                    continue;
-                }
-
-                patched_cell_count = patched_cell_count.saturating_add(patch_pane_render_row(
-                    cells,
-                    rows,
-                    cols,
-                    row,
-                    left_col,
-                    right_col,
-                    |col| {
-                        let cell_content = &line_ref[Column(col)];
-                        self.build_cell_render_info(col, row, term_line, cell_content, context)
-                    },
-                ));
+        let Some((min_line, max_line)) = terminal.line_bounds() else {
+            return (0, true);
+        };
+        for span in spans {
+            if span.row < rows {
+                let _ = Arc::make_mut(&mut cells[span.row]);
             }
-        });
+        }
+        let visited =
+            terminal.for_each_damage_cell(spans, |row, cell_offset, term_line, col, cell| {
+                if row >= rows
+                    || col >= cols
+                    || cell_offset != display_offset
+                    || term_line < min_line
+                    || term_line > max_line
+                {
+                    return;
+                }
+                Arc::make_mut(&mut cells[row])[col] =
+                    self.build_cell_render_info(col, row, term_line, cell, context);
+                patched_cell_count = patched_cell_count.saturating_add(1);
+            });
+        if !visited {
+            return (0, true);
+        }
 
         (patched_cell_count, false)
     }
@@ -1058,6 +1105,7 @@ impl TerminalView {
         cols: usize,
         rows: usize,
         colors: &TerminalColors,
+        cursor_color: gpui::Rgba,
         hovered_link_range: Option<(usize, usize, usize, usize)>,
         font_family: SharedString,
         font_size: Pixels,
@@ -1081,7 +1129,7 @@ impl TerminalView {
             // composite it twice and darken the viewport rectangle.
             clear_bg: gpui::Hsla::transparent_black(),
             terminal_surface_bg: terminal_surface_bg.into(),
-            cursor_color: colors.cursor.into(),
+            cursor_color: cursor_color.into(),
             selection_bg: selection_bg.into(),
             selection_fg: selection_fg.into(),
             search_match_bg: gpui::Hsla {
@@ -3046,6 +3094,7 @@ impl Render for TerminalView {
                     effective_background_opacity,
                 );
                 let (pane_display_offset, _) = terminal.scroll_state();
+                let tmon_palette = terminal.tmon_palette();
                 let pane_search_results = if search_active && is_active_pane {
                     Some(self.search_state.results())
                 } else {
@@ -3053,6 +3102,7 @@ impl Render for TerminalView {
                 };
                 let pane_build_context = PaneCellBuildContext {
                     colors: &colors,
+                    tmon_palette: tmon_palette.as_ref(),
                     effective_background_opacity,
                     background_opacity_cells: self.background_opacity_cells,
                     cell_color_transform,
@@ -3125,6 +3175,10 @@ impl Render for TerminalView {
                     cols,
                     rows,
                     &colors,
+                    tmon_palette
+                        .as_ref()
+                        .and_then(tmon::Palette::cursor)
+                        .map_or(colors.cursor, tmon_rgb_to_rgba),
                     hovered_link_range,
                     font_family.clone(),
                     pane_font_size,
@@ -3968,6 +4022,7 @@ mod tests {
             col,
             row,
             char: c,
+            combining: None,
             fg: gpui::Hsla::transparent_black(),
             bg: gpui::Hsla::transparent_black(),
             uses_terminal_default_bg: false,
@@ -3994,6 +4049,7 @@ mod tests {
             std::sync::LazyLock::new(TerminalColors::default);
         PaneCellBuildContext {
             colors: &COLORS,
+            tmon_palette: None,
             effective_background_opacity: opacity,
             background_opacity_cells,
             cell_color_transform: CellColorTransform::default(),
@@ -4014,6 +4070,7 @@ mod tests {
             std::sync::LazyLock::new(TerminalColors::default);
         PaneCellBuildContext {
             colors: &COLORS,
+            tmon_palette: None,
             effective_background_opacity: opacity,
             background_opacity_cells: false,
             cell_color_transform,
@@ -4412,6 +4469,73 @@ mod tests {
         );
         assert!(!rgb_background.uses_terminal_default_bg);
         assert!((rgb_background.bg.a - 1.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn resolve_cell_colors_accepts_tmon_palette_and_attributes() {
+        let context = test_build_context(0.25);
+        let cell = tmon::Cell {
+            character: 'x',
+            foreground: tmon::Color::Indexed(1),
+            background: tmon::Color::Default,
+            attributes: tmon::Attributes {
+                bold: true,
+                ..tmon::Attributes::default()
+            },
+            protected: false,
+            wide_spacer: false,
+            leading_wide_spacer: false,
+            wrapped: false,
+            hyperlink_id: None,
+            combining_id: None,
+        };
+
+        let resolved = resolve_cell_colors(&cell, context);
+        assert_eq!(resolved.fg, context.colors.ansi[1]);
+        assert!(resolved.uses_terminal_default_bg);
+        assert!((resolved.bg.a - 0.25).abs() <= f32::EPSILON);
+        assert!(terminal_cell_text_attributes((&cell).into()).bold);
+    }
+
+    #[test]
+    fn resolve_cell_colors_uses_tmon_live_palette_overrides() {
+        let terminal = tmon::Terminal::new_display(tmon::Size::default(), tmon::Config::default());
+        terminal.hydrate_output(b"\x1b]4;1;#123456\x07\x1b]10;#abcdef\x07\x1b]11;#010203\x07");
+        let palette = terminal.palette();
+        let mut context = test_build_context(1.0);
+        context.tmon_palette = Some(&palette);
+
+        let indexed = tmon::Cell {
+            foreground: tmon::Color::Indexed(1),
+            ..tmon::Cell::default()
+        };
+        let defaults = tmon::Cell::default();
+
+        assert_eq!(
+            resolve_cell_colors(&indexed, context).fg,
+            tmon_rgb_to_rgba(tmon::Rgb {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56
+            })
+        );
+        let resolved_defaults = resolve_cell_colors(&defaults, context);
+        assert_eq!(
+            resolved_defaults.fg,
+            tmon_rgb_to_rgba(tmon::Rgb {
+                r: 0xab,
+                g: 0xcd,
+                b: 0xef
+            })
+        );
+        assert_eq!(
+            resolved_defaults.bg,
+            tmon_rgb_to_rgba(tmon::Rgb {
+                r: 0x01,
+                g: 0x02,
+                b: 0x03
+            })
+        );
     }
 
     #[test]

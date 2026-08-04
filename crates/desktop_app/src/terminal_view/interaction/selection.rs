@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(test)]
 use alacritty_terminal::grid::Dimensions;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,6 +155,7 @@ fn cell_has_visible_foreground_text(line: &[Option<char>], col: usize) -> bool {
     }
 }
 
+#[cfg(test)]
 fn is_hidden_or_spacer(flags: Flags) -> bool {
     flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN)
 }
@@ -161,10 +163,12 @@ fn is_hidden_or_spacer(flags: Flags) -> bool {
 /// Trailing spacer occupies the right half of a wide character on the same
 /// line.  Only this variant should trigger the "go back one column" fallback
 /// when a selection endpoint or double-click lands on it.
+#[cfg(test)]
 fn is_trailing_wide_char_spacer(flags: Flags) -> bool {
     flags.contains(Flags::WIDE_CHAR_SPACER) && !flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
 }
 
+#[cfg(test)]
 fn terminal_line_bounds(
     grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
 ) -> Option<(i32, i32)> {
@@ -179,6 +183,7 @@ fn terminal_line_bounds(
     Some((min_line, max_line))
 }
 
+#[cfg(test)]
 fn grid_line_text(
     grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
     line_idx: i32,
@@ -216,6 +221,47 @@ fn grid_line_text(
     Some(line)
 }
 
+fn terminal_line_text(
+    terminal: &Terminal,
+    line_idx: i32,
+    cols: usize,
+) -> Option<Vec<Option<String>>> {
+    let (min_line, max_line) = terminal.line_bounds()?;
+    if line_idx < min_line || line_idx > max_line {
+        return None;
+    }
+
+    let mut line = vec![Some(" ".to_string()); cols];
+    if !terminal.for_each_line_cell(line_idx, |col, cell| {
+        if col >= cols {
+            return;
+        }
+        if cell.is_trailing_wide_spacer() {
+            line[col] = None;
+            return;
+        }
+        if cell.is_hidden() || cell.is_wide_spacer() {
+            return;
+        }
+        let character = cell.character();
+        if character != '\0' {
+            let mut text = String::new();
+            text.push(if character.is_control() {
+                ' '
+            } else {
+                character
+            });
+            if !character.is_control() {
+                cell.append_combining_to(&mut text);
+            }
+            line[col] = Some(text);
+        }
+    }) {
+        return None;
+    }
+    Some(line)
+}
+
 fn selected_text_from_terminal(
     terminal: &Terminal,
     start: SelectionPos,
@@ -242,51 +288,46 @@ fn selected_text_from_terminal(
             (clamped_start, clamped_end)
         };
 
+    let (min_line, max_line) = terminal.line_bounds()?;
+    let start_line = selection_start.line.max(min_line);
+    let end_line = selection_end.line.min(max_line);
+    if start_line > end_line {
+        return None;
+    }
+
     let mut lines = Vec::new();
-    let _ = terminal.with_grid(|grid| {
-        let Some((min_line, max_line)) = terminal_line_bounds(grid) else {
-            return;
+    for line_idx in start_line..=end_line {
+        let Some(line) = terminal_line_text(terminal, line_idx, cols) else {
+            continue;
         };
 
-        let start_line = selection_start.line.max(min_line);
-        let end_line = selection_end.line.min(max_line);
-        if start_line > end_line {
-            return;
+        let mut col_start = if line_idx == selection_start.line {
+            selection_start.col
+        } else {
+            0
+        };
+        let col_end = if line_idx == selection_end.line {
+            selection_end.col
+        } else {
+            cols.saturating_sub(1)
+        };
+        // If col_start falls on a wide char spacer, move back to the
+        // actual character so it is included in the copied text.
+        if col_start > 0 && line.get(col_start) == Some(&None) {
+            col_start -= 1;
+        }
+        if col_start > col_end {
+            continue;
         }
 
-        for line_idx in start_line..=end_line {
-            let Some(line) = grid_line_text(grid, line_idx, cols) else {
-                continue;
-            };
-
-            let mut col_start = if line_idx == selection_start.line {
-                selection_start.col
-            } else {
-                0
-            };
-            let col_end = if line_idx == selection_end.line {
-                selection_end.col
-            } else {
-                cols.saturating_sub(1)
-            };
-            // If col_start falls on a wide char spacer, move back to the
-            // actual character so it is included in the copied text.
-            if col_start > 0 && line.get(col_start) == Some(&None) {
-                col_start -= 1;
-            }
-            if col_start > col_end {
-                continue;
-            }
-
-            let rendered = line[col_start..=col_end]
-                .iter()
-                .filter_map(|c| *c)
-                .collect::<String>()
-                .trim_end()
-                .to_string();
-            lines.push(rendered);
-        }
-    });
+        let rendered = line[col_start..=col_end]
+            .iter()
+            .filter_map(|cell| cell.as_deref())
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        lines.push(rendered);
+    }
 
     if lines.is_empty() {
         None
@@ -306,15 +347,15 @@ fn row_text_from_terminal(terminal: &Terminal, row: usize, cols: usize) -> Vec<O
             return;
         }
 
-        if is_trailing_wide_char_spacer(cell.flags) {
+        if cell.is_trailing_wide_spacer() {
             line[col] = None;
             return;
         }
-        if is_hidden_or_spacer(cell.flags) {
+        if cell.is_hidden() || cell.is_wide_spacer() {
             return;
         }
 
-        let c = cell.c;
+        let c = cell.character();
         if c != '\0' {
             line[col] = Some(if c.is_control() { ' ' } else { c });
         }
@@ -1281,6 +1322,51 @@ mod tests {
     }
 
     #[test]
+    fn tmon_detects_wrapped_urls_and_osc8_links() {
+        let size = TerminalSize {
+            cols: 10,
+            rows: 4,
+            ..TerminalSize::default()
+        };
+        let terminal = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 0,
+            terminal: tmon::Terminal::new_display(
+                tmon_adapter::size(size),
+                tmon::Config::default(),
+            ),
+        });
+        terminal.hydrate_output(b"go https://example.com/path");
+
+        for (row, col) in [(0, 4), (1, 5), (2, 4)] {
+            let link = terminal
+                .link_at(row, col)
+                .expect("each wrapped URL segment should resolve");
+            assert_eq!((link.start_row, link.start_col), (0, 3));
+            assert_eq!((link.end_row, link.end_col), (2, 6));
+            assert_eq!(link.target, "https://example.com/path");
+        }
+
+        let osc8 = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 0,
+            terminal: tmon::Terminal::new_display(
+                tmon_adapter::size(TerminalSize {
+                    cols: 5,
+                    rows: 3,
+                    ..TerminalSize::default()
+                }),
+                tmon::Config::default(),
+            ),
+        });
+        osc8.hydrate_output(b"\x1b]8;;https://example.com\x1b\\read-more\x1b]8;;\x1b\\");
+        let link = osc8
+            .link_at(1, 2)
+            .expect("wrapped OSC 8 text should resolve as one link");
+        assert_eq!((link.start_row, link.start_col), (0, 0));
+        assert_eq!((link.end_row, link.end_col), (1, 3));
+        assert_eq!(link.target, "https://example.com");
+    }
+
+    #[test]
     fn selected_text_from_terminal_stays_stable_after_scrolling_display() {
         let size = TerminalSize {
             cols: 24,
@@ -1333,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_read_adapter_extracts_rows_for_both_runtime_variants() {
+    fn terminal_read_adapter_extracts_rows_for_all_runtime_variants() {
         let size = TerminalSize {
             cols: 16,
             rows: 3,
@@ -1366,6 +1452,71 @@ mod tests {
         assert_eq!(native_row.len(), usize::from(size.cols));
         let rendered_native_row: String = native_row.iter().filter_map(|c| *c).collect();
         assert!(rendered_native_row.contains(expected_native_token));
+
+        let tmon = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 0,
+            terminal: tmon::Terminal::new_display(
+                tmon_adapter::size(size),
+                tmon::Config::default(),
+            ),
+        });
+        tmon.hydrate_output(b"tmon-row-adapter");
+        let tmon_row = row_text_from_terminal(&tmon, 0, usize::from(size.cols));
+        let rendered_tmon_row: String =
+            tmon_row.iter().filter_map(|character| *character).collect();
+        assert!(rendered_tmon_row.contains("tmon-row"));
+    }
+
+    #[test]
+    fn selected_text_reads_tmon_cells_without_an_alacritty_grid() {
+        let size = TerminalSize {
+            cols: 12,
+            rows: 2,
+            ..TerminalSize::default()
+        };
+        let terminal = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 0,
+            terminal: tmon::Terminal::new_display(
+                tmon_adapter::size(size),
+                tmon::Config::default(),
+            ),
+        });
+        terminal.hydrate_output(b"hello tmon");
+
+        assert_eq!(
+            selected_text_from_terminal(
+                &terminal,
+                SelectionPos { col: 0, line: 0 },
+                SelectionPos { col: 9, line: 0 },
+            ),
+            Some("hello tmon".to_string())
+        );
+    }
+
+    #[test]
+    fn selected_text_preserves_tmon_combining_characters() {
+        let size = TerminalSize {
+            cols: 4,
+            rows: 2,
+            ..TerminalSize::default()
+        };
+        let terminal = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 0,
+            terminal: tmon::Terminal::new_display(
+                tmon_adapter::size(size),
+                tmon::Config::default(),
+            ),
+        });
+        terminal.hydrate_output("e\u{301}".as_bytes());
+
+        assert_eq!(
+            selected_text_from_terminal(
+                &terminal,
+                SelectionPos { col: 0, line: 0 },
+                SelectionPos { col: 0, line: 0 },
+            ),
+            Some("e\u{301}".to_string())
+        );
     }
 
     #[test]

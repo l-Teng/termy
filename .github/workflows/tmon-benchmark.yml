@@ -1,0 +1,71 @@
+name: Tmon vs Alacritty Benchmark
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      target_mib:
+        description: "MiB parsed by each engine per sample"
+        required: false
+        default: "32"
+      samples:
+        description: "Samples per engine and workload"
+        required: false
+        default: "7"
+      snapshots:
+        description: "Full-frame snapshots per sample"
+        required: false
+        default: "250"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Headless parser and grid comparison
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TMON_BENCH_TARGET_MIB: ${{ github.event_name == 'workflow_dispatch' && inputs.target_mib || '32' }}
+      TMON_BENCH_SAMPLES: ${{ github.event_name == 'workflow_dispatch' && inputs.samples || '7' }}
+      TMON_BENCH_SNAPSHOTS: ${{ github.event_name == 'workflow_dispatch' && inputs.snapshots || '250' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Run comparison
+        run: |
+          {
+            echo "Git commit: $GITHUB_SHA"
+            echo "Runner: $RUNNER_OS/$RUNNER_ARCH"
+            rustc --version
+            echo
+            cargo run --quiet -p tmon --release --example engine_compare
+          } | tee tmon-alacritty-benchmark.txt
+
+      - name: Add report to job summary
+        if: always()
+        run: |
+          if [[ -f tmon-alacritty-benchmark.txt ]]; then
+            echo '## Tmon vs Alacritty' >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            cat tmon-alacritty-benchmark.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload text report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tmon-alacritty-benchmark-${{ github.sha }}
+          path: tmon-alacritty-benchmark.txt
+          if-no-files-found: warn
+          retention-days: 30

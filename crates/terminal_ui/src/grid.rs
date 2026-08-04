@@ -17,6 +17,7 @@ pub struct CellRenderInfo {
     pub col: usize,
     pub row: usize,
     pub char: char,
+    pub combining: Option<SharedString>,
     pub fg: Hsla,
     pub bg: Hsla,
     pub uses_terminal_default_bg: bool,
@@ -521,11 +522,15 @@ impl TextBatchBuilder {
         start_col: usize,
         row: usize,
         initial_char: char,
+        initial_combining: Option<&str>,
         key: TextBatchKey,
         underline: Option<UnderlineStyle>,
     ) -> Self {
         let mut text = String::with_capacity(16);
         text.push(initial_char);
+        if let Some(combining) = initial_combining {
+            text.push_str(combining);
+        }
         Self {
             start_col,
             row,
@@ -555,8 +560,11 @@ impl TextBatchBuilder {
             && self.underline == *underline
     }
 
-    fn append_char(&mut self, c: char) {
+    fn append_cell(&mut self, c: char, combining: Option<&str>) {
         self.text.push(c);
+        if let Some(combining) = combining {
+            self.text.push_str(combining);
+        }
         self.cell_len += 1;
     }
 
@@ -1910,7 +1918,7 @@ impl TerminalGrid {
             }
 
             let fg = self.cell_fg_color(cell, cursor_fg, highlight_fg);
-            if rounded_corner_char(cell.char) {
+            if cell.combining.is_none() && rounded_corner_char(cell.char) {
                 Self::push_pending_text_batch(&mut current, ops);
                 ops.push(TextDrawOp::RoundedCorner(RoundedCornerDraw {
                     row: cell.row,
@@ -1921,7 +1929,7 @@ impl TerminalGrid {
                 continue;
             }
 
-            if diagonal_char(cell.char) {
+            if cell.combining.is_none() && diagonal_char(cell.char) {
                 Self::push_pending_text_batch(&mut current, ops);
                 ops.push(TextDrawOp::Diagonal(DiagonalDraw {
                     row: cell.row,
@@ -1932,7 +1940,9 @@ impl TerminalGrid {
                 continue;
             }
 
-            if let Some(packed) = sextant_char_to_packed(cell.char) {
+            if cell.combining.is_none()
+                && let Some(packed) = sextant_char_to_packed(cell.char)
+            {
                 Self::push_pending_text_batch(&mut current, ops);
                 ops.push(TextDrawOp::Sextant(SextantDraw {
                     row: cell.row,
@@ -1943,13 +1953,14 @@ impl TerminalGrid {
                 continue;
             }
 
-            if let Some(geometry) = block_element_geometry(cell.char)
-                .or_else(|| {
-                    should_render_braille_as_geometry(row_cells, index)
-                        .then(|| braille_geometry(cell.char))
-                        .flatten()
-                })
-                .or_else(|| box_draw_geometry_for_char(cell.char, cell_w, cell_h, font_sz))
+            if cell.combining.is_none()
+                && let Some(geometry) = block_element_geometry(cell.char)
+                    .or_else(|| {
+                        should_render_braille_as_geometry(row_cells, index)
+                            .then(|| braille_geometry(cell.char))
+                            .flatten()
+                    })
+                    .or_else(|| box_draw_geometry_for_char(cell.char, cell_w, cell_h, font_sz))
             {
                 Self::push_pending_text_batch(&mut current, ops);
                 ops.push(TextDrawOp::Block(BlockDraw {
@@ -1974,14 +1985,19 @@ impl TerminalGrid {
                 .is_some_and(|batch| batch.can_append(cell.col, cell.row, key, &underline));
             if should_append {
                 if let Some(batch) = current.as_mut() {
-                    batch.append_char(cell.char);
+                    batch.append_cell(cell.char, cell.combining.as_deref().map(|text| &**text));
                 }
                 continue;
             }
 
             Self::push_pending_text_batch(&mut current, ops);
             current = Some(TextBatchBuilder::new(
-                cell.col, cell.row, cell.char, key, underline,
+                cell.col,
+                cell.row,
+                cell.char,
+                cell.combining.as_deref().map(|text| &**text),
+                key,
+                underline,
             ));
         }
 
@@ -2523,7 +2539,10 @@ impl TerminalGrid {
 
     fn cell_is_drawable_text(cell: &CellRenderInfo) -> bool {
         cell.render_text
-            && (cell.char != ' ' || cell.underline || cell.strikethrough)
+            && (cell.char != ' '
+                || cell.combining.is_some()
+                || cell.underline
+                || cell.strikethrough)
             && cell.char != '\0'
             && !cell.char.is_control()
     }
@@ -2631,6 +2650,7 @@ mod tests {
             col,
             row,
             char: c,
+            combining: None,
             fg: test_color(0.4, 0.5, 0.6),
             bg: test_color(0.0, 0.0, 0.0),
             uses_terminal_default_bg: false,
@@ -3909,6 +3929,7 @@ mod tests {
                 5, // start_col
                 0, // row
                 'a',
+                None,
                 TextBatchKey {
                     bold: false,
                     italic: false,
@@ -3921,6 +3942,34 @@ mod tests {
         );
         // Single char batch: range is (5, 5)
         assert_eq!(draw_op_col_range(&batch), (5, 5));
+    }
+
+    #[test]
+    fn text_batches_preserve_combining_text_without_consuming_columns() {
+        let key = TextBatchKey {
+            bold: false,
+            italic: false,
+            strikethrough: false,
+            fg: Hsla::transparent_black(),
+        };
+        let mut builder = TextBatchBuilder::new(0, 0, 'e', Some("\u{301}"), key, None);
+        builder.append_cell('x', Some("\u{308}"));
+        let batch = builder.finalize();
+
+        assert_eq!(batch.text, "e\u{301}x\u{308}");
+        assert_eq!(batch.cell_len, 2);
+    }
+
+    #[test]
+    fn draw_ops_shape_combining_text_with_its_base_cell() {
+        let mut cell = test_cell(0, 0, 'e');
+        cell.combining = Some(SharedString::from("\u{301}"));
+        let grid = test_grid(vec![cell], None);
+        let ops = collect_draw_ops(&grid);
+
+        assert!(
+            matches!(&ops[..], [TextDrawOp::Batch(batch)] if batch.text == "e\u{301}" && batch.cell_len == 1)
+        );
     }
 
     #[test]

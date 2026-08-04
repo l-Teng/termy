@@ -130,7 +130,7 @@ impl TerminalColors {
         }
     }
 
-    fn indexed_color(&self, idx: u8) -> Rgba {
+    pub(crate) fn indexed_color(&self, idx: u8) -> Rgba {
         match idx {
             // Standard ANSI colors
             0..=15 => self.ansi[idx as usize],

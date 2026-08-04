@@ -30,6 +30,24 @@ pub struct TerminalKeyboardMode {
 }
 
 impl TerminalKeyboardMode {
+    pub const fn from_flags(
+        application_cursor_keys: bool,
+        disambiguate_escape_codes: bool,
+        report_event_types: bool,
+        report_alternate_keys: bool,
+        report_all_keys_as_esc: bool,
+        report_associated_text: bool,
+    ) -> Self {
+        Self {
+            application_cursor_keys,
+            disambiguate_escape_codes,
+            report_event_types,
+            report_alternate_keys,
+            report_all_keys_as_esc,
+            report_associated_text,
+        }
+    }
+
     pub fn from_term_mode(mode: TermMode) -> Self {
         Self {
             application_cursor_keys: mode.contains(TermMode::APP_CURSOR),

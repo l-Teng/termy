@@ -7,6 +7,17 @@ set shell := ["bash", "-cu"]
 run:
     cargo run -p termy --release
 
+# Compare the Tmon and Alacritty parser/grid engines and write a text report.
+benchmark-tmon:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    report="${TMON_BENCH_OUTPUT:-tmon-alacritty-benchmark.txt}"
+    {
+      rustc --version
+      echo
+      cargo run --quiet -p tmon --release --example engine_compare
+    } | tee "$report"
+
 run-cli *args:
     cargo run --bin termy-cli --release {{ args }}
 

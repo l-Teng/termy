@@ -9,7 +9,7 @@ use crate::config::{
 };
 use crate::keybindings;
 use crate::ui::scrollbar::{ScrollbarVisibilityController, ScrollbarVisibilityMode};
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::{grid::Dimensions, term::cell::Flags};
 use flume::{Sender, bounded};
 use gpui::AppContext;
 use gpui::{
@@ -47,7 +47,7 @@ use termy_terminal_ui::{
     TerminalMouseMode, TerminalOptions, TerminalQueryColors, TerminalReplyHost,
     TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, TmuxLaunchTarget,
     TmuxPaneMouseMode, WindowsShell as RuntimeWindowsShell,
-    WorkingDirFallback as RuntimeWorkingDirFallback, hyperlink_at_viewport_cell,
+    WorkingDirFallback as RuntimeWorkingDirFallback, find_link_in_line, hyperlink_at_viewport_cell,
     keystroke_to_input, link_at_viewport_cell, normalize_working_directory_candidate,
     resolve_launch_working_directory, resolve_working_directory_path,
 };
@@ -74,6 +74,7 @@ mod search;
 pub(crate) mod tab_strip;
 mod tabs;
 mod titles;
+mod tmon_adapter;
 mod update_toasts;
 mod workspaces;
 
@@ -136,6 +137,11 @@ impl NativeTerminalWakeupRouter {
     fn notifier(&self, wakeup_id: NativeTerminalWakeupId) -> TerminalWakeupNotifier {
         let router = self.clone();
         TerminalWakeupNotifier::new(move || router.mark_ready(wakeup_id))
+    }
+
+    fn tmon_notifier(&self, wakeup_id: NativeTerminalWakeupId) -> tmon::WakeupNotifier {
+        let router = self.clone();
+        tmon::WakeupNotifier::new(move || router.mark_ready(wakeup_id))
     }
 
     fn mark_ready(&self, wakeup_id: NativeTerminalWakeupId) {
@@ -462,11 +468,327 @@ enum PaneResizeResult {
 enum Terminal {
     Tmux(PaneTerminal),
     Native(NativeTerminalInstance),
+    Tmon(TmonTerminalInstance),
 }
 
 struct NativeTerminalInstance {
     wakeup_id: NativeTerminalWakeupId,
     terminal: Mutex<NativeTerminal>,
+}
+
+struct TmonTerminalInstance {
+    wakeup_id: NativeTerminalWakeupId,
+    terminal: tmon::Terminal,
+}
+
+#[derive(Clone, Copy)]
+struct TmonGridPosition {
+    line: i32,
+    col: usize,
+}
+
+struct TmonLinkRows<'a> {
+    terminal: &'a tmon::Terminal,
+    rows: RefCell<HashMap<i32, Vec<tmon::Cell>>>,
+}
+
+impl<'a> TmonLinkRows<'a> {
+    fn new(terminal: &'a tmon::Terminal) -> Self {
+        Self {
+            terminal,
+            rows: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn cell(&self, position: TmonGridPosition) -> Option<tmon::Cell> {
+        if !self.rows.borrow().contains_key(&position.line) {
+            let cells = self
+                .terminal
+                .with_line_cells(position.line, <[tmon::Cell]>::to_vec)?;
+            self.rows.borrow_mut().insert(position.line, cells);
+        }
+        self.rows
+            .borrow()
+            .get(&position.line)?
+            .get(position.col)
+            .copied()
+    }
+}
+
+fn tmon_previous_wrapped_position(
+    rows: &TmonLinkRows<'_>,
+    position: TmonGridPosition,
+    min_line: i32,
+    columns: usize,
+) -> Option<TmonGridPosition> {
+    if position.col > 0 {
+        return Some(TmonGridPosition {
+            line: position.line,
+            col: position.col - 1,
+        });
+    }
+    let previous_line = position.line.checked_sub(1)?;
+    if previous_line < min_line {
+        return None;
+    }
+    let previous = TmonGridPosition {
+        line: previous_line,
+        col: columns.checked_sub(1)?,
+    };
+    rows.cell(previous)?.wrapped.then_some(previous)
+}
+
+fn tmon_next_wrapped_position(
+    rows: &TmonLinkRows<'_>,
+    position: TmonGridPosition,
+    max_line: i32,
+    columns: usize,
+) -> Option<TmonGridPosition> {
+    if position.col + 1 < columns {
+        return Some(TmonGridPosition {
+            line: position.line,
+            col: position.col + 1,
+        });
+    }
+    if position.line >= max_line || !rows.cell(position)?.wrapped {
+        return None;
+    }
+    Some(TmonGridPosition {
+        line: position.line + 1,
+        col: 0,
+    })
+}
+
+fn tmon_cell_link_character(cell: tmon::Cell) -> char {
+    if cell.wide_spacer
+        || cell.attributes.hidden
+        || cell.character == '\0'
+        || cell.character.is_control()
+    {
+        ' '
+    } else {
+        cell.character
+    }
+}
+
+fn tmon_viewport_link_from_range(
+    start: TmonGridPosition,
+    end: TmonGridPosition,
+    target: String,
+    display_offset: usize,
+    screen_lines: usize,
+    columns: usize,
+) -> Option<termy_terminal_ui::DetectedViewportLink> {
+    let display_offset = i32::try_from(display_offset).ok()?;
+    let viewport_min_line = -display_offset;
+    let viewport_max_line = i32::try_from(screen_lines)
+        .ok()?
+        .checked_sub(1)?
+        .saturating_sub(display_offset);
+    let visible_start_line = start.line.max(viewport_min_line);
+    let visible_end_line = end.line.min(viewport_max_line);
+    if visible_start_line > visible_end_line {
+        return None;
+    }
+
+    Some(termy_terminal_ui::DetectedViewportLink {
+        start_row: usize::try_from(visible_start_line.saturating_add(display_offset)).ok()?,
+        start_col: if start.line < visible_start_line {
+            0
+        } else {
+            start.col
+        },
+        end_row: usize::try_from(visible_end_line.saturating_add(display_offset)).ok()?,
+        end_col: if end.line > visible_end_line {
+            columns.saturating_sub(1)
+        } else {
+            end.col
+        },
+        target,
+    })
+}
+
+fn tmon_link_at_viewport_cell(
+    terminal: &tmon::Terminal,
+    row: usize,
+    col: usize,
+) -> Option<termy_terminal_ui::DetectedViewportLink> {
+    let size = terminal.size();
+    let columns = usize::from(size.cols);
+    let screen_lines = usize::from(size.rows);
+    if row >= screen_lines || col >= columns || columns == 0 {
+        return None;
+    }
+
+    let (display_offset, _) = terminal.scroll_state();
+    let display_offset_i32 = i32::try_from(display_offset).ok()?;
+    let hovered = TmonGridPosition {
+        line: i32::try_from(row).ok()?.saturating_sub(display_offset_i32),
+        col,
+    };
+    let (min_line, max_line) = terminal.line_bounds();
+    let rows = TmonLinkRows::new(terminal);
+    let hovered_cell = rows.cell(hovered)?;
+
+    if let Some(hyperlink_id) = hovered_cell.hyperlink_id {
+        let target = terminal.hyperlink_at(row, col)?.target;
+        let mut start = hovered;
+        while let Some(previous) = tmon_previous_wrapped_position(&rows, start, min_line, columns) {
+            if rows.cell(previous)?.hyperlink_id == Some(hyperlink_id) {
+                start = previous;
+            } else {
+                break;
+            }
+        }
+
+        let mut end = hovered;
+        while let Some(next) = tmon_next_wrapped_position(&rows, end, max_line, columns) {
+            if rows.cell(next)?.hyperlink_id == Some(hyperlink_id) {
+                end = next;
+            } else {
+                break;
+            }
+        }
+
+        return tmon_viewport_link_from_range(
+            start,
+            end,
+            target,
+            display_offset,
+            screen_lines,
+            columns,
+        );
+    }
+
+    let hovered_character = tmon_cell_link_character(hovered_cell);
+    if hovered_character.is_whitespace() {
+        return None;
+    }
+
+    let mut positions_before = Vec::new();
+    let mut cursor = hovered;
+    while let Some(previous) = tmon_previous_wrapped_position(&rows, cursor, min_line, columns) {
+        let character = tmon_cell_link_character(rows.cell(previous)?);
+        if character.is_whitespace() {
+            break;
+        }
+        positions_before.push((previous, character));
+        cursor = previous;
+    }
+    positions_before.reverse();
+
+    let mut positions = Vec::with_capacity(positions_before.len().saturating_add(16));
+    positions.extend(positions_before);
+    let hovered_index = positions.len();
+    positions.push((hovered, hovered_character));
+
+    cursor = hovered;
+    while let Some(next) = tmon_next_wrapped_position(&rows, cursor, max_line, columns) {
+        let character = tmon_cell_link_character(rows.cell(next)?);
+        if character.is_whitespace() {
+            break;
+        }
+        positions.push((next, character));
+        cursor = next;
+    }
+
+    let token = positions
+        .iter()
+        .map(|(_, character)| *character)
+        .collect::<Vec<_>>();
+    let detected = find_link_in_line(&token, hovered_index)?;
+    let start = positions.get(detected.start_col)?.0;
+    let end = positions.get(detected.end_col)?.0;
+    tmon_viewport_link_from_range(
+        start,
+        end,
+        detected.target,
+        display_offset,
+        screen_lines,
+        columns,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum TerminalCellRef<'a> {
+    Alacritty(&'a alacritty_terminal::term::cell::Cell),
+    Tmon(&'a tmon::Cell, Option<tmon::Combining<'a>>),
+}
+
+impl<'a> From<&'a alacritty_terminal::term::cell::Cell> for TerminalCellRef<'a> {
+    fn from(cell: &'a alacritty_terminal::term::cell::Cell) -> Self {
+        Self::Alacritty(cell)
+    }
+}
+
+impl<'a> From<&'a tmon::Cell> for TerminalCellRef<'a> {
+    fn from(cell: &'a tmon::Cell) -> Self {
+        Self::Tmon(cell, None)
+    }
+}
+
+impl TerminalCellRef<'_> {
+    fn character(self) -> char {
+        match self {
+            Self::Alacritty(cell) => cell.c,
+            Self::Tmon(cell, _) => cell.character,
+        }
+    }
+
+    fn is_wide_spacer(self) -> bool {
+        match self {
+            Self::Alacritty(cell) => cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+            Self::Tmon(cell, _) => cell.wide_spacer || cell.leading_wide_spacer,
+        }
+    }
+
+    fn is_trailing_wide_spacer(self) -> bool {
+        match self {
+            Self::Alacritty(cell) => cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+            Self::Tmon(cell, _) => cell.wide_spacer,
+        }
+    }
+
+    fn is_hidden(self) -> bool {
+        match self {
+            Self::Alacritty(cell) => cell.flags.contains(Flags::HIDDEN),
+            Self::Tmon(cell, _) => cell.attributes.hidden,
+        }
+    }
+
+    fn combining(self) -> Option<SharedString> {
+        match self {
+            Self::Alacritty(_) => None,
+            Self::Tmon(_, combining) => combining
+                .map(tmon::Combining::to_owned_string)
+                .map(SharedString::from),
+        }
+    }
+
+    fn append_combining_to(self, text: &mut String) {
+        match self {
+            Self::Alacritty(_) => {}
+            Self::Tmon(_, combining) => {
+                if let Some(combining) = combining {
+                    combining.append_to(text);
+                }
+            }
+        }
+    }
+}
+
+fn tmon_engine_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| value == "1")
+}
+
+impl Deref for TmonTerminalInstance {
+    type Target = tmon::Terminal;
+
+    fn deref(&self) -> &Self::Target {
+        &self.terminal
+    }
 }
 
 impl Deref for NativeTerminalInstance {
@@ -520,6 +842,11 @@ impl TerminalReplyHost for GpuiClipboardReplyHost<'_, '_> {
 }
 
 impl Terminal {
+    fn tmon_enabled() -> bool {
+        let value = std::env::var_os("TERMY_EXPERIMENTAL_TMON_ENGINE");
+        tmon_engine_enabled(value.as_deref())
+    }
+
     fn new_tmux(size: TerminalSize, options: TerminalOptions) -> Self {
         Self::Tmux(PaneTerminal::new(size, options))
     }
@@ -533,6 +860,25 @@ impl Terminal {
         startup_command: Option<&str>,
     ) -> anyhow::Result<Self> {
         let wakeup_id = NEXT_NATIVE_TERMINAL_WAKEUP_ID.fetch_add(1, Ordering::Relaxed);
+        if Self::tmon_enabled() {
+            log::info!("using experimental Tmon terminal engine");
+            let launch = startup_command
+                .map(str::to_string)
+                .map(TerminalLaunch::ShellCommand);
+            return Ok(Self::Tmon(TmonTerminalInstance {
+                wakeup_id,
+                terminal: tmon::Terminal::new(
+                    tmon_adapter::size(size),
+                    tmon_adapter::config(
+                        configured_working_dir,
+                        tab_title_shell_integration,
+                        runtime_config,
+                        launch.as_ref(),
+                    ),
+                    wakeup_router.map(|router| router.tmon_notifier(wakeup_id)),
+                )?,
+            }));
+        }
         let wakeup_notifier = wakeup_router.map(|router| router.notifier(wakeup_id));
         Ok(Self::Native(NativeTerminalInstance {
             wakeup_id,
@@ -556,6 +902,22 @@ impl Terminal {
         launch: Option<&TerminalLaunch>,
     ) -> anyhow::Result<Self> {
         let wakeup_id = NEXT_NATIVE_TERMINAL_WAKEUP_ID.fetch_add(1, Ordering::Relaxed);
+        if Self::tmon_enabled() {
+            log::info!("using experimental Tmon terminal engine");
+            return Ok(Self::Tmon(TmonTerminalInstance {
+                wakeup_id,
+                terminal: tmon::Terminal::new(
+                    tmon_adapter::size(size),
+                    tmon_adapter::config(
+                        configured_working_dir,
+                        tab_title_shell_integration,
+                        runtime_config,
+                        launch,
+                    ),
+                    wakeup_router.map(|router| router.tmon_notifier(wakeup_id)),
+                )?,
+            }));
+        }
         let wakeup_notifier = wakeup_router.map(|router| router.notifier(wakeup_id));
         Ok(Self::Native(NativeTerminalInstance {
             wakeup_id,
@@ -574,6 +936,7 @@ impl Terminal {
         match self {
             Self::Tmux(_) => None,
             Self::Native(terminal) => Some(terminal.wakeup_id),
+            Self::Tmon(terminal) => Some(terminal.wakeup_id),
         }
     }
 
@@ -591,30 +954,43 @@ impl Terminal {
                     terminal.hydrate_output(bytes);
                 }
             }
+            Self::Tmon(terminal) => terminal.hydrate_output(bytes),
         }
     }
 
     fn write_input(&self, input: &[u8]) {
-        if let Self::Native(terminal) = self
-            && let Ok(terminal) = terminal.lock()
-        {
-            terminal.write(input);
+        match self {
+            Self::Native(terminal) => {
+                if let Ok(terminal) = terminal.lock() {
+                    terminal.write(input);
+                }
+            }
+            Self::Tmon(terminal) => terminal.write(input),
+            Self::Tmux(_) => {}
         }
     }
 
     fn write_input_owned(&self, input: Vec<u8>) {
-        if let Self::Native(terminal) = self
-            && let Ok(terminal) = terminal.lock()
-        {
-            terminal.write_owned(input);
+        match self {
+            Self::Native(terminal) => {
+                if let Ok(terminal) = terminal.lock() {
+                    terminal.write_owned(input);
+                }
+            }
+            Self::Tmon(terminal) => terminal.write_owned(input),
+            Self::Tmux(_) => {}
         }
     }
 
     fn set_wakeup_enabled(&self, enabled: bool) {
-        if let Self::Native(terminal) = self
-            && let Ok(terminal) = terminal.lock()
-        {
-            terminal.set_wakeup_enabled(enabled);
+        match self {
+            Self::Native(terminal) => {
+                if let Ok(terminal) = terminal.lock() {
+                    terminal.set_wakeup_enabled(enabled);
+                }
+            }
+            Self::Tmon(terminal) => terminal.set_wakeup_enabled(enabled),
+            Self::Tmux(_) => {}
         }
     }
 
@@ -626,6 +1002,23 @@ impl Terminal {
                 .lock()
                 .map(|terminal| terminal.drain_events(host))
                 .unwrap_or_default(),
+            Self::Tmon(terminal) => {
+                let (events, has_more) = terminal.drain_events();
+                let mut translated = Vec::with_capacity(events.len());
+                for event in events {
+                    match event {
+                        tmon::Event::ClipboardLoad(request) => {
+                            if let Some(text) = host
+                                .load_clipboard(tmon_adapter::clipboard_target(request.target()))
+                            {
+                                terminal.write(&request.format_reply(&text));
+                            }
+                        }
+                        event => translated.extend(tmon_adapter::event(event)),
+                    }
+                }
+                (translated, has_more)
+            }
         }
     }
 
@@ -637,15 +1030,20 @@ impl Terminal {
                     terminal.resize(new_size);
                 }
             }
+            Self::Tmon(terminal) => terminal.resize(tmon_adapter::size(new_size)),
         }
     }
 
     /// Re-send the current PTY size to deliver SIGWINCH without changing dimensions.
     fn nudge_resize(&self) {
-        if let Self::Native(terminal) = self
-            && let Ok(terminal) = terminal.lock()
-        {
-            terminal.nudge_resize();
+        match self {
+            Self::Native(terminal) => {
+                if let Ok(terminal) = terminal.lock() {
+                    terminal.nudge_resize();
+                }
+            }
+            Self::Tmon(terminal) => terminal.nudge_resize(),
+            Self::Tmux(_) => {}
         }
     }
 
@@ -656,6 +1054,7 @@ impl Terminal {
                 .lock()
                 .map(|terminal| terminal.size())
                 .unwrap_or_default(),
+            Self::Tmon(terminal) => tmon_adapter::terminal_size(terminal.size()),
         }
     }
 
@@ -666,6 +1065,7 @@ impl Terminal {
                 .lock()
                 .ok()
                 .and_then(|terminal| terminal.child_pid()),
+            Self::Tmon(terminal) => terminal.child_pid(),
         }
     }
 
@@ -675,6 +1075,7 @@ impl Terminal {
             Self::Native(terminal) => terminal
                 .lock()
                 .is_ok_and(|terminal| terminal.scroll_display(delta_lines)),
+            Self::Tmon(terminal) => terminal.scroll_display(delta_lines),
         }
     }
 
@@ -684,6 +1085,7 @@ impl Terminal {
             Self::Native(terminal) => terminal
                 .lock()
                 .is_ok_and(|terminal| terminal.scroll_to_bottom()),
+            Self::Tmon(terminal) => terminal.scroll_to_bottom(),
         }
     }
 
@@ -693,6 +1095,7 @@ impl Terminal {
             Self::Native(terminal) => terminal
                 .lock()
                 .map_or((0, 0), |terminal| terminal.scroll_state()),
+            Self::Tmon(terminal) => terminal.scroll_state(),
         }
     }
 
@@ -702,6 +1105,7 @@ impl Terminal {
             Self::Native(terminal) => terminal
                 .lock()
                 .map_or(None, |terminal| terminal.cursor_state()),
+            Self::Tmon(terminal) => terminal.cursor_state().map(tmon_adapter::cursor_state),
         }
     }
 
@@ -711,6 +1115,7 @@ impl Terminal {
             Self::Native(terminal) => terminal
                 .lock()
                 .map_or((0, 0), |terminal| terminal.cursor_position()),
+            Self::Tmon(terminal) => terminal.cursor_position(),
         }
     }
 
@@ -722,14 +1127,28 @@ impl Terminal {
                     terminal.set_term_options(options);
                 }
             }
+            Self::Tmon(terminal) => terminal.set_options(tmon_adapter::options(options)),
         }
     }
 
     fn set_query_colors(&self, query_colors: TerminalQueryColors) {
-        if let Self::Native(terminal) = self
-            && let Ok(mut terminal) = terminal.lock()
-        {
-            terminal.set_query_colors(query_colors);
+        match self {
+            Self::Native(terminal) => {
+                if let Ok(mut terminal) = terminal.lock() {
+                    terminal.set_query_colors(query_colors);
+                }
+            }
+            Self::Tmon(terminal) => {
+                terminal.set_query_colors(tmon_adapter::query_colors(query_colors));
+            }
+            Self::Tmux(_) => {}
+        }
+    }
+
+    fn tmon_palette(&self) -> Option<tmon::Palette> {
+        match self {
+            Self::Tmon(terminal) => Some(terminal.palette()),
+            Self::Native(_) | Self::Tmux(_) => None,
         }
     }
 
@@ -739,6 +1158,7 @@ impl Terminal {
             Self::Native(terminal) => terminal
                 .lock()
                 .is_ok_and(|terminal| terminal.bracketed_paste_mode()),
+            Self::Tmon(terminal) => terminal.bracketed_paste_mode(),
         }
     }
 
@@ -748,6 +1168,7 @@ impl Terminal {
             Self::Native(terminal) => terminal
                 .lock()
                 .is_ok_and(|terminal| terminal.alternate_screen_mode()),
+            Self::Tmon(terminal) => terminal.alternate_screen_mode(),
         }
     }
 
@@ -758,6 +1179,7 @@ impl Terminal {
                 .lock()
                 .map(|terminal| terminal.mouse_mode())
                 .unwrap_or_default(),
+            Self::Tmon(terminal) => tmon_adapter::mouse_mode(terminal.mouse_mode()),
         }
     }
 
@@ -768,6 +1190,7 @@ impl Terminal {
                 .lock()
                 .map(|terminal| terminal.keyboard_mode())
                 .unwrap_or_default(),
+            Self::Tmon(terminal) => tmon_adapter::keyboard_mode(terminal.keyboard_mode()),
         }
     }
 
@@ -784,6 +1207,7 @@ impl Terminal {
                     None
                 }
             }
+            Self::Tmon(_) => None,
         }
     }
 
@@ -795,6 +1219,7 @@ impl Terminal {
                 .map_or(TerminalDamageSnapshot::Full, |terminal| {
                     terminal.take_damage_snapshot()
                 }),
+            Self::Tmon(terminal) => tmon_adapter::damage(terminal.take_damage_snapshot()),
         }
     }
 
@@ -805,6 +1230,13 @@ impl Terminal {
                 .lock()
                 .ok()
                 .map(|terminal| terminal.kitty_graphics_placements()),
+            Self::Tmon(terminal) => Some(
+                terminal
+                    .kitty_graphics_placements()
+                    .into_iter()
+                    .map(tmon_adapter::kitty_graphics_placement)
+                    .collect(),
+            ),
         }
     }
 
@@ -822,6 +1254,15 @@ impl Terminal {
                 .lock()
                 .ok()
                 .and_then(|terminal| terminal.hyperlink_at(row, col)),
+            Self::Tmon(terminal) => {
+                terminal
+                    .hyperlink_at(row, col)
+                    .map(|link| termy_terminal_ui::DetectedLink {
+                        start_col: link.start_col,
+                        end_col: link.end_col,
+                        target: link.target,
+                    })
+            }
         }
     }
 
@@ -836,12 +1277,13 @@ impl Terminal {
                 .lock()
                 .ok()
                 .and_then(|terminal| terminal.link_at(row, col)),
+            Self::Tmon(terminal) => tmon_link_at_viewport_cell(terminal, row, col),
         }
     }
 
     fn for_each_renderable_cell(
         &self,
-        mut visitor: impl FnMut(usize, i32, usize, &alacritty_terminal::term::cell::Cell),
+        mut visitor: impl FnMut(usize, i32, usize, TerminalCellRef<'_>),
     ) -> Option<usize> {
         macro_rules! visit_term_cells {
             ($term:expr) => {{
@@ -852,7 +1294,7 @@ impl Terminal {
                         display_offset,
                         cell.point.line.0,
                         cell.point.column.0,
-                        cell.cell,
+                        TerminalCellRef::Alacritty(cell.cell),
                     );
                 }
                 display_offset
@@ -868,6 +1310,112 @@ impl Terminal {
                     None
                 }
             }
+            Self::Tmon(terminal) => Some(terminal.for_each_viewport_cell(
+                |display_offset, line, col, cell, combining| {
+                    visitor(
+                        display_offset,
+                        line,
+                        col,
+                        TerminalCellRef::Tmon(cell, combining),
+                    );
+                },
+            )),
+        }
+    }
+
+    fn for_each_damage_cell(
+        &self,
+        spans: &[TerminalDirtySpan],
+        mut visitor: impl FnMut(usize, usize, i32, usize, TerminalCellRef<'_>),
+    ) -> bool {
+        match self {
+            Self::Tmon(terminal) => {
+                terminal.for_each_viewport_range(
+                    spans
+                        .iter()
+                        .map(|span| (span.row, span.left_col, span.right_col)),
+                    |row, display_offset, line, col, cell, combining| {
+                        visitor(
+                            row,
+                            display_offset,
+                            line,
+                            col,
+                            TerminalCellRef::Tmon(cell, combining),
+                        );
+                    },
+                );
+                true
+            }
+            Self::Tmux(_) | Self::Native(_) => self
+                .with_grid(|grid| {
+                    let display_offset = grid.display_offset();
+                    let screen_lines = grid.screen_lines();
+                    let cols = grid.columns();
+                    for span in spans {
+                        if span.row >= screen_lines || span.left_col >= cols {
+                            continue;
+                        }
+                        let line = span.row as i32 - display_offset as i32;
+                        let row = &grid[alacritty_terminal::index::Line(line)];
+                        let right = span.right_col.min(cols.saturating_sub(1));
+                        for col in span.left_col..=right {
+                            visitor(
+                                span.row,
+                                display_offset,
+                                line,
+                                col,
+                                TerminalCellRef::Alacritty(
+                                    &row[alacritty_terminal::index::Column(col)],
+                                ),
+                            );
+                        }
+                    }
+                    true
+                })
+                .unwrap_or(false),
+        }
+    }
+
+    fn line_bounds(&self) -> Option<(i32, i32)> {
+        match self {
+            Self::Tmon(terminal) => Some(terminal.line_bounds()),
+            Self::Tmux(_) | Self::Native(_) => self.with_grid(|grid| {
+                let history = grid.total_lines().saturating_sub(grid.screen_lines());
+                (
+                    -(history as i32),
+                    grid.screen_lines().saturating_sub(1) as i32,
+                )
+            }),
+        }
+    }
+
+    fn for_each_line_cell(
+        &self,
+        line: i32,
+        mut visitor: impl FnMut(usize, TerminalCellRef<'_>),
+    ) -> bool {
+        match self {
+            Self::Tmon(terminal) => terminal.for_each_line_cell(line, |col, cell, combining| {
+                visitor(col, TerminalCellRef::Tmon(cell, combining));
+            }),
+            Self::Tmux(_) | Self::Native(_) => self
+                .with_grid(|grid| {
+                    let history = grid.total_lines().saturating_sub(grid.screen_lines());
+                    if line < -(history as i32) || line >= grid.screen_lines() as i32 {
+                        return false;
+                    }
+                    let row = &grid[alacritty_terminal::index::Line(line)];
+                    for col in 0..grid.columns() {
+                        visitor(
+                            col,
+                            TerminalCellRef::Alacritty(
+                                &row[alacritty_terminal::index::Column(col)],
+                            ),
+                        );
+                    }
+                    true
+                })
+                .unwrap_or(false),
         }
     }
 }
@@ -4746,6 +5294,14 @@ impl TerminalView {
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn tmon_engine_requires_explicit_opt_in() {
+        assert!(tmon_engine_enabled(Some(std::ffi::OsStr::new("1"))));
+        assert!(!tmon_engine_enabled(None));
+        assert!(!tmon_engine_enabled(Some(std::ffi::OsStr::new("0"))));
+        assert!(!tmon_engine_enabled(Some(std::ffi::OsStr::new("true"))));
+    }
 
     #[test]
     fn clipboard_text_cache_reads_the_host_lazily_once() {

@@ -54,6 +54,7 @@ termy_auto_update = { path = "../auto_update" }
 termy_auto_update_ui = { path = "../auto_update_ui" }
 termy_themes = { path = "../themes" }
 termy_terminal_ui = { path = "../terminal_ui" }
+tmon = { path = "../temon" }
 termy_ui = { path = "../ui" }
 termy_toast = { path = "../toast_sdk" }
 termy_search = { path = "../search" }

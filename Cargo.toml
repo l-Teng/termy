@@ -2,6 +2,7 @@
 members = [
   "crates/api",
   "crates/desktop_app",
+  "crates/temon",
   "crates/core",
   "crates/ffi",
   "crates/cli_install_core",

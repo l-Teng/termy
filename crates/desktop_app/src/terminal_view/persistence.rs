@@ -2,8 +2,6 @@ use super::*;
 use crate::workspace_store::{
     StoredPane, StoredSession, StoredTab, StoredWorkspace, WORKSPACE_STORE_FILE, WorkspaceStore,
 };
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
@@ -214,28 +212,23 @@ impl TerminalView {
         }
     }
 
-    fn extract_persisted_buffer_line(
-        grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
-        line_idx: i32,
-    ) -> Option<String> {
-        let line = Line(line_idx);
-        let cols = grid.columns();
-        let total_lines = grid.total_lines();
-        if line_idx < -(total_lines as i32 - grid.screen_lines() as i32)
-            || line_idx >= grid.screen_lines() as i32
-        {
+    fn extract_persisted_buffer_line(terminal: &Terminal, line_idx: i32) -> Option<String> {
+        let (min_line, max_line) = terminal.line_bounds()?;
+        if line_idx < min_line || line_idx > max_line {
             return None;
         }
 
-        let mut text = String::with_capacity(cols);
-        for col in 0..cols {
-            let cell = &grid[line][Column(col)];
-            let c = cell.c;
-            if c == '\0' || cell.flags.contains(Flags::WIDE_CHAR_SPACER) || c.is_control() {
+        let mut text = String::with_capacity(usize::from(terminal.size().cols));
+        if !terminal.for_each_line_cell(line_idx, |_, cell| {
+            let character = cell.character();
+            if character == '\0' || cell.is_trailing_wide_spacer() || character.is_control() {
                 text.push(' ');
             } else {
-                text.push(c);
+                text.push(character);
+                cell.append_combining_to(&mut text);
             }
+        }) {
+            return None;
         }
 
         Some(text.trim_end().to_string())
@@ -248,16 +241,14 @@ impl TerminalView {
 
         let (_, history_size) = terminal.scroll_state();
         let rows = i32::from(terminal.size().rows);
-        terminal.with_grid(|grid| {
-            let mut lines = Vec::with_capacity(history_size.saturating_add(rows as usize));
-            for line_idx in -(history_size as i32)..rows {
-                if let Some(text) = Self::extract_persisted_buffer_line(grid, line_idx) {
-                    lines.push(text);
-                }
+        let mut lines = Vec::with_capacity(history_size.saturating_add(rows as usize));
+        for line_idx in -(history_size as i32)..rows {
+            if let Some(text) = Self::extract_persisted_buffer_line(terminal, line_idx) {
+                lines.push(text);
             }
-            let joined = lines.join("\r\n");
-            (!joined.trim().is_empty()).then_some(joined)
-        })?
+        }
+        let joined = lines.join("\r\n");
+        (!joined.trim().is_empty()).then_some(joined)
     }
 
     fn should_sync_persisted_native_workspace(&self) -> bool {
@@ -1321,9 +1312,34 @@ impl TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{PersistedNativeLayoutNode, TerminalView};
+    use super::{
+        PersistedNativeLayoutNode, Terminal, TerminalSize, TerminalView, TmonTerminalInstance,
+        tmon_adapter,
+    };
     use crate::terminal_view::PaneResizeAxis;
     use crate::workspace_store::{StoredPane, StoredTab, StoredWorkspace};
+
+    #[test]
+    fn persisted_tmon_buffer_preserves_combining_characters() {
+        let size = TerminalSize {
+            cols: 4,
+            rows: 2,
+            ..TerminalSize::default()
+        };
+        let terminal = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 0,
+            terminal: tmon::Terminal::new_display(
+                tmon_adapter::size(size),
+                tmon::Config::default(),
+            ),
+        });
+        terminal.hydrate_output("e\u{301}".as_bytes());
+
+        assert_eq!(
+            TerminalView::extract_persisted_buffer_line(&terminal, 0),
+            Some("e\u{301}".to_string())
+        );
+    }
 
     #[test]
     fn restored_inactive_workspace_keeps_pty_descriptors_cold() {

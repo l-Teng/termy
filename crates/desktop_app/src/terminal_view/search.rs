@@ -1,5 +1,4 @@
 use super::*;
-use alacritty_terminal::grid::Dimensions;
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -635,51 +634,31 @@ fn collect_search_line_texts(
 ) -> SearchLineSnapshot {
     let line_count = (end_line - start_line + 1).max(0) as usize;
     let mut line_texts = SearchLineSnapshot::new(start_line, line_count);
-    let _ = terminal.with_grid(|grid| {
-        line_texts
-            .text
-            .reserve(line_count.saturating_mul(grid.columns()));
-        for line_idx in start_line..=end_line {
-            let start = line_texts.text.len();
-            let range = if append_line_text(grid, line_idx, &mut line_texts.text) {
-                start..line_texts.text.len()
-            } else {
-                SearchLineSnapshot::MISSING_LINE..SearchLineSnapshot::MISSING_LINE
-            };
-            line_texts.ranges.push(range);
-        }
-    });
+    line_texts
+        .text
+        .reserve(line_count.saturating_mul(usize::from(terminal.size().cols)));
+    for line_idx in start_line..=end_line {
+        let start = line_texts.text.len();
+        let range = if append_terminal_line_text(terminal, line_idx, &mut line_texts.text) {
+            start..line_texts.text.len()
+        } else {
+            SearchLineSnapshot::MISSING_LINE..SearchLineSnapshot::MISSING_LINE
+        };
+        line_texts.ranges.push(range);
+    }
     line_texts
 }
 
-fn append_line_text(
-    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
-    line_idx: i32,
-    text: &mut String,
-) -> bool {
-    use alacritty_terminal::index::{Column, Line};
-
-    let line = Line(line_idx);
-    let cols = grid.columns();
-
-    let total_lines = grid.total_lines();
-    if line_idx < -(total_lines as i32 - grid.screen_lines() as i32)
-        || line_idx >= grid.screen_lines() as i32
-    {
-        return false;
-    }
-
-    for col in 0..cols {
-        let cell = &grid[line][Column(col)];
-        let c = cell.c;
-        if c == '\0' || cell.flags.contains(Flags::WIDE_CHAR_SPACER) || c.is_control() {
+fn append_terminal_line_text(terminal: &Terminal, line_idx: i32, text: &mut String) -> bool {
+    terminal.for_each_line_cell(line_idx, |_, cell| {
+        let character = cell.character();
+        if character == '\0' || cell.is_trailing_wide_spacer() || character.is_control() {
             text.push(' ');
         } else {
-            text.push(c);
+            text.push(character);
+            cell.append_combining_to(text);
         }
-    }
-
-    true
+    })
 }
 
 #[cfg(test)]
@@ -763,6 +742,26 @@ mod tests {
             native_has_non_empty_buffer,
             "native terminal read adapter should expose at least one non-empty line buffer"
         );
+    }
+
+    #[test]
+    fn terminal_read_adapter_preserves_tmon_combining_characters() {
+        let size = TerminalSize {
+            cols: 4,
+            rows: 2,
+            ..TerminalSize::default()
+        };
+        let terminal = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 0,
+            terminal: tmon::Terminal::new_display(
+                tmon_adapter::size(size),
+                tmon::Config::default(),
+            ),
+        });
+        terminal.hydrate_output("e\u{301}".as_bytes());
+
+        let lines = collect_search_line_texts(&terminal, 0, 0);
+        assert_eq!(lines.line(0), Some("e\u{301}   "));
     }
 
     #[test]

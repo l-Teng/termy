@@ -455,6 +455,11 @@ impl TerminalView {
             RuntimeKind::Native => "native",
             RuntimeKind::Tmux => "tmux",
         };
+        let engine_label = match self.active_terminal() {
+            Some(Terminal::Tmon(_)) => "tmon",
+            Some(Terminal::Native(_) | Terminal::Tmux(_)) => "alacritty",
+            None => "-",
+        };
         let tab_summary = self.inspector_active_tab_snapshot();
         let panes = self.inspector_pane_snapshots();
         let font_size: f32 = self.font_size.into();
@@ -463,6 +468,12 @@ impl TerminalView {
         content = content.child(Self::inspector_row(
             "Runtime",
             runtime_label.to_string(),
+            text_muted,
+            text_primary,
+        ));
+        content = content.child(Self::inspector_row(
+            "Engine",
+            engine_label.to_string(),
             text_muted,
             text_primary,
         ));
