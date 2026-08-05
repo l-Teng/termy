@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -23,8 +23,6 @@ const TRACE_PADDING_SECS: u64 = 5;
 // Keep a hard outer deadline so one wedged recording cannot consume the job.
 const XCTRACE_FINALIZATION_GRACE_SECS: u64 = 45;
 const XCTRACE_ATTEMPTS: usize = 2;
-const DRIVER_START_TIMEOUT: Duration = Duration::from_secs(15);
-const DRIVER_START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const BENCHMARK_EVENTS_PATH_ENV: &str = "TERMY_BENCHMARK_EVENTS_PATH";
 const DRIVER_START_MARKER: &str = "driver_start";
 const IDLE_BURST_PRE_IDLE: Duration = Duration::from_millis(1500);
@@ -1208,8 +1206,8 @@ fn run_single_benchmark(
     let time_limit_secs = duration_secs.saturating_add(TRACE_PADDING_SECS);
     let _activity_pid = match build.kind {
         BenchmarkTargetKind::Termy | BenchmarkTargetKind::Native => {
-            let command = benchmark_driver_command(driver, scenario, duration_secs);
-            run_attached_termy_trace(
+            let benchmark_command = benchmark_driver_command(driver, scenario, duration_secs);
+            run_launched_termy_trace(
                 build,
                 "Activity Monitor",
                 &trace_path,
@@ -1217,11 +1215,12 @@ fn run_single_benchmark(
                 &metrics_dir,
                 &activity_markers_path,
                 scenario,
-                &command,
+                &benchmark_command,
                 duration_secs,
                 time_limit_secs,
                 &raw_dir.join("activity-target.log"),
-            )?
+            )?;
+            0
         }
         BenchmarkTargetKind::Ghostty => {
             let mut activity_command = activity_monitor_ghostty_command(
@@ -1287,8 +1286,8 @@ fn run_single_benchmark(
         let animation_metrics_dir = raw_dir.join("animation-app");
         let attached_animation_pid = match build.kind {
             BenchmarkTargetKind::Termy | BenchmarkTargetKind::Native => {
-                let command = benchmark_driver_command(driver, scenario, duration_secs);
-                run_attached_termy_trace(
+                let benchmark_command = benchmark_driver_command(driver, scenario, duration_secs);
+                run_launched_termy_trace(
                     build,
                     "Animation Hitches",
                     &animation_trace_path,
@@ -1296,11 +1295,12 @@ fn run_single_benchmark(
                     &animation_metrics_dir,
                     &animation_markers_path,
                     scenario,
-                    &command,
+                    &benchmark_command,
                     duration_secs,
                     time_limit_secs,
                     &raw_dir.join("animation-target.log"),
-                )?
+                )?;
+                0
             }
             BenchmarkTargetKind::Ghostty => {
                 let mut animation_command = animation_hitches_ghostty_command(
@@ -1429,7 +1429,7 @@ fn create_ghostty_launch_artifacts(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_attached_termy_trace(
+fn run_launched_termy_trace(
     build: &BenchmarkTargetSpec,
     template: &str,
     trace_path: &Path,
@@ -1441,44 +1441,28 @@ fn run_attached_termy_trace(
     duration_secs: u64,
     time_limit_secs: u64,
     target_log_path: &Path,
-) -> Result<u32> {
+) -> Result<()> {
     for attempt in 1..=XCTRACE_ATTEMPTS {
         remove_file_if_present(markers_path)?;
         remove_xctrace_output_if_present(trace_path)?;
-        let mut child = spawn_termy_benchmark_target(
+        let mut trace_command = termy_trace_command(
             build,
+            template,
+            trace_path,
             config_root,
             metrics_dir,
             markers_path,
             scenario,
             benchmark_command,
             duration_secs,
+            time_limit_secs,
             target_log_path,
-        )?;
-        let pid = child.id();
-        if let Err(error) =
-            wait_for_driver_start(&mut child, markers_path, build, scenario, target_log_path)
-        {
-            stop_benchmark_target(&mut child);
-            return Err(error);
-        }
-
-        let mut trace_command = Command::new("xctrace");
-        trace_command
-            .arg("record")
-            .arg("--template")
-            .arg(template)
-            .arg("--time-limit")
-            .arg(format!("{time_limit_secs}s"))
-            .arg("--output")
-            .arg(trace_path)
-            .arg("--attach")
-            .arg(pid.to_string());
+        );
 
         let trace_result = run_xctrace_record_command(
             &mut trace_command,
             format!(
-                "xctrace {template} attach for {} ({}) {}",
+                "xctrace {template} launch for {} ({}) {}",
                 build.label,
                 build.display_name(),
                 scenario.as_str()
@@ -1486,9 +1470,26 @@ fn run_attached_termy_trace(
             trace_path,
             xctrace_timeout(time_limit_secs),
         );
-        stop_benchmark_target(&mut child);
         match trace_result {
-            Ok(()) => return Ok(pid),
+            Ok(()) if marker_file_contains(markers_path, DRIVER_START_MARKER)? => return Ok(()),
+            Ok(()) if attempt < XCTRACE_ATTEMPTS => {
+                eprintln!(
+                    "{} ({}) exited without starting the {} driver; retrying xctrace {template} once",
+                    build.label,
+                    build.display_name(),
+                    scenario.as_str()
+                );
+            }
+            Ok(()) => {
+                bail!(
+                    "{} ({}) exited without starting the {} driver; see {} and {}",
+                    build.label,
+                    build.display_name(),
+                    scenario.as_str(),
+                    target_log_path.display(),
+                    markers_path.display()
+                );
+            }
             Err(error) if attempt < XCTRACE_ATTEMPTS => {
                 eprintln!(
                     "{error:#}; retrying xctrace {template} once for {} ({}) {}",
@@ -1501,6 +1502,71 @@ fn run_attached_termy_trace(
         }
     }
     unreachable!("xctrace attempt loop always returns")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn termy_trace_command(
+    build: &BenchmarkTargetSpec,
+    template: &str,
+    trace_path: &Path,
+    config_root: &Path,
+    metrics_dir: &Path,
+    markers_path: &Path,
+    scenario: Scenario,
+    benchmark_command: &str,
+    duration_secs: u64,
+    time_limit_secs: u64,
+    target_log_path: &Path,
+) -> Command {
+    let mut command = Command::new("xctrace");
+    command
+        .arg("record")
+        .arg("--template")
+        .arg(template)
+        .arg("--time-limit")
+        .arg(format!("{time_limit_secs}s"))
+        .arg("--output")
+        .arg(trace_path)
+        .arg("--target-stdout")
+        .arg(target_log_path)
+        .arg("--env")
+        .arg(format!("XDG_CONFIG_HOME={}", config_root.display()))
+        .arg("--env")
+        .arg(format!("TERMY_BENCHMARK_COMMAND={benchmark_command}"))
+        .arg("--env")
+        .arg(format!("TERMY_BENCHMARK_SCENARIO={}", scenario.as_str()))
+        .arg("--env")
+        .arg(format!(
+            "TERMY_BENCHMARK_METRICS_PATH={}",
+            metrics_dir.display()
+        ))
+        .arg("--env")
+        .arg(format!("TERMY_BENCHMARK_DURATION_SECS={duration_secs}"))
+        .arg("--env")
+        .arg(format!(
+            "{BENCHMARK_EVENTS_PATH_ENV}={}",
+            markers_path.display()
+        ))
+        .arg("--env")
+        .arg("TERMY_BENCHMARK_EXIT_ON_COMPLETE=1")
+        .arg("--env")
+        .arg(format!("TERMY_BENCHMARK_BUILD_LABEL={}", build.label))
+        .arg("--env")
+        .arg(format!(
+            "TERMY_BENCHMARK_GIT_SHA={}",
+            build.git_sha.as_deref().unwrap_or("unknown")
+        ));
+    if let Some(value) = env::var_os("TERMY_EXPERIMENTAL_TMON_ENGINE") {
+        command.arg("--env").arg(format!(
+            "TERMY_EXPERIMENTAL_TMON_ENGINE={}",
+            value.to_string_lossy()
+        ));
+    }
+    command
+        .arg("--launch")
+        .arg("--")
+        .arg(&build.executable_path);
+    command
 }
 
 fn remove_file_if_present(path: &Path) -> Result<()> {
@@ -1520,45 +1586,6 @@ fn remove_xctrace_output_if_present(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn wait_for_driver_start(
-    child: &mut Child,
-    markers_path: &Path,
-    build: &BenchmarkTargetSpec,
-    scenario: Scenario,
-    target_log_path: &Path,
-) -> Result<()> {
-    let deadline = Instant::now() + DRIVER_START_TIMEOUT;
-    loop {
-        if marker_file_contains(markers_path, DRIVER_START_MARKER)? {
-            return Ok(());
-        }
-        if let Some(status) = child
-            .try_wait()
-            .context("failed to poll benchmark target")?
-        {
-            bail!(
-                "{} ({}) exited with {status} before the {} driver started; see {} and {}",
-                build.label,
-                build.display_name(),
-                scenario.as_str(),
-                target_log_path.display(),
-                markers_path.display()
-            );
-        }
-        if Instant::now() >= deadline {
-            bail!(
-                "timed out waiting for the {} ({}) {} driver to start; see {} and {}",
-                build.label,
-                build.display_name(),
-                scenario.as_str(),
-                target_log_path.display(),
-                markers_path.display()
-            );
-        }
-        thread::sleep(DRIVER_START_POLL_INTERVAL);
-    }
-}
-
 fn marker_file_contains(path: &Path, kind: &str) -> Result<bool> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -1570,54 +1597,6 @@ fn marker_file_contains(path: &Path, kind: &str) -> Result<bool> {
     Ok(contents.lines().any(|line| {
         serde_json::from_str::<MarkerEvent>(line).is_ok_and(|marker| marker.kind == kind)
     }))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_termy_benchmark_target(
-    build: &BenchmarkTargetSpec,
-    config_root: &Path,
-    metrics_dir: &Path,
-    markers_path: &Path,
-    scenario: Scenario,
-    benchmark_command: &str,
-    duration_secs: u64,
-    target_log_path: &Path,
-) -> Result<Child> {
-    let log = fs::File::create(target_log_path)
-        .with_context(|| format!("failed to create {}", target_log_path.display()))?;
-    let error_log = log
-        .try_clone()
-        .with_context(|| format!("failed to clone {}", target_log_path.display()))?;
-    Command::new(&build.executable_path)
-        .env("XDG_CONFIG_HOME", config_root)
-        .env("TERMY_BENCHMARK_COMMAND", benchmark_command)
-        .env("TERMY_BENCHMARK_SCENARIO", scenario.as_str())
-        .env("TERMY_BENCHMARK_METRICS_PATH", metrics_dir)
-        .env("TERMY_BENCHMARK_DURATION_SECS", duration_secs.to_string())
-        .env(BENCHMARK_EVENTS_PATH_ENV, markers_path)
-        .env("TERMY_BENCHMARK_EXIT_ON_COMPLETE", "1")
-        .env("TERMY_BENCHMARK_BUILD_LABEL", build.label)
-        .env(
-            "TERMY_BENCHMARK_GIT_SHA",
-            build.git_sha.as_deref().unwrap_or("unknown"),
-        )
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(error_log))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to launch {} benchmark target at {}",
-                build.display_name(),
-                build.executable_path.display()
-            )
-        })
-}
-
-fn stop_benchmark_target(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
 }
 
 fn activity_monitor_ghostty_command(
@@ -3239,11 +3218,12 @@ fn format_option_f32(value: Option<f32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BenchmarkDriverSpec, FrameCaptureStatus, FrameEvent, GhosttyVersion, MarkerEvent, Scenario,
-        benchmark_config_contents, create_ghostty_launch_artifacts, marker_file_contains,
-        parse_animation_summary, parse_displayed_frame_starts, parse_ghostty_version,
-        parse_hitch_durations, parse_single_row_table, render_report, resolve_native_executable,
-        summarize_echo_train_latency, summarize_idle_burst_latency,
+        BenchmarkDriverSpec, BenchmarkTargetKind, BenchmarkTargetSpec, FrameCaptureStatus,
+        FrameEvent, GhosttyVersion, MarkerEvent, Scenario, benchmark_config_contents,
+        create_ghostty_launch_artifacts, marker_file_contains, parse_animation_summary,
+        parse_displayed_frame_starts, parse_ghostty_version, parse_hitch_durations,
+        parse_single_row_table, render_report, resolve_native_executable,
+        summarize_echo_train_latency, summarize_idle_burst_latency, termy_trace_command,
     };
     use std::{fs, path::PathBuf};
 
@@ -3322,6 +3302,45 @@ mod tests {
         assert!(config.contains("initial-command = direct:"));
         assert!(config.contains("quit-after-last-window-closed = true"));
         assert!(config.contains("window-width = 128"));
+    }
+
+    #[test]
+    fn termy_trace_launches_under_xctrace_instead_of_attaching_after_startup() {
+        let build = BenchmarkTargetSpec {
+            label: "candidate",
+            kind: BenchmarkTargetKind::Termy,
+            source_path: PathBuf::from("/tmp/termy"),
+            executable_path: PathBuf::from("/tmp/termy/target/release/termy"),
+            git_sha: Some("abc123".to_string()),
+        };
+        let command = termy_trace_command(
+            &build,
+            "Animation Hitches",
+            PathBuf::from("/tmp/trace").as_path(),
+            PathBuf::from("/tmp/config").as_path(),
+            PathBuf::from("/tmp/metrics").as_path(),
+            PathBuf::from("/tmp/markers").as_path(),
+            Scenario::SteadyScroll,
+            "'/tmp/xtask' benchmark-driver",
+            13,
+            18,
+            PathBuf::from("/tmp/target.log").as_path(),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.iter().any(|arg| arg == "--launch"));
+        assert!(!args.iter().any(|arg| arg == "--attach"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "TERMY_BENCHMARK_SCENARIO=steady-scroll")
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("/tmp/termy/target/release/termy")
+        );
     }
 
     #[test]
