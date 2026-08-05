@@ -435,6 +435,13 @@ impl Parser {
                 }
             }
             if self.state == State::Ground && bytes[offset] == 0x1b {
+                let consumed = self.advance_complete_csi(grid, &bytes[offset..], &mut output);
+                if consumed > 0 {
+                    offset += consumed;
+                    continue;
+                }
+            }
+            if self.state == State::Ground && bytes[offset] == 0x1b {
                 candidate_sequence_start = Some(offset);
             }
             let was_synchronized = self.synchronized_update_started.is_some();
@@ -569,6 +576,13 @@ impl Parser {
         while offset < bytes.len() {
             if self.state == State::Ground && !self.utf8.is_pending() {
                 let consumed = self.advance_ground_text(grid, &bytes[offset..], output);
+                if consumed > 0 {
+                    offset += consumed;
+                    continue;
+                }
+            }
+            if self.state == State::Ground && bytes[offset] == 0x1b {
+                let consumed = self.advance_complete_csi(grid, &bytes[offset..], output);
                 if consumed > 0 {
                     offset += consumed;
                     continue;
@@ -980,6 +994,87 @@ impl Parser {
         self.csi_has_params = false;
         self.csi_intermediate_count = 0;
         self.csi_ignored = false;
+    }
+
+    fn advance_complete_csi(
+        &mut self,
+        grid: &mut Grid,
+        bytes: &[u8],
+        output: &mut ParseOutput,
+    ) -> usize {
+        if bytes.get(0..2) != Some(b"\x1b[") {
+            return 0;
+        }
+        let Some(relative_final) = bytes[2..]
+            .iter()
+            .position(|byte| (0x40..=0x7e).contains(byte))
+        else {
+            return 0;
+        };
+        let final_index = relative_final + 2;
+        let final_byte = bytes[final_index];
+        if matches!(final_byte, b'h' | b'l') {
+            return 0;
+        }
+        let body = &bytes[2..final_index];
+        if body.iter().any(|byte| !matches!(byte, 0x20..=0x3f)) {
+            return 0;
+        }
+
+        self.start_csi();
+        for &byte in body {
+            match byte {
+                b'0'..=b'9' => {
+                    if self.csi_intermediate_count != 0 {
+                        self.csi_ignored = true;
+                        continue;
+                    }
+                    self.csi_has_params = true;
+                    let index = self.param_count.saturating_sub(1);
+                    if index < MAX_CSI_PARAMS {
+                        self.params[index] = self.params[index]
+                            .saturating_mul(10)
+                            .saturating_add(u16::from(byte - b'0'));
+                    }
+                }
+                b';' | b':' => {
+                    if self.csi_intermediate_count != 0 {
+                        self.csi_ignored = true;
+                        continue;
+                    }
+                    self.csi_has_params = true;
+                    if self.param_count < MAX_CSI_PARAMS {
+                        self.separators[self.param_count] = byte;
+                        self.param_count += 1;
+                    } else {
+                        self.csi_ignored = true;
+                    }
+                }
+                b'?' | b'>' | b'<' | b'='
+                    if !self.csi_has_params
+                        && self.csi_intermediate_count == 0
+                        && self.private_marker == 0 =>
+                {
+                    self.private_marker = byte;
+                    self.csi_has_params = true;
+                }
+                b'?' | b'>' | b'<' | b'=' => self.csi_ignored = true,
+                0x20..=0x2f => {
+                    self.csi_intermediate_count = self.csi_intermediate_count.saturating_add(1);
+                    if self.csi_intermediate_count == 1 {
+                        self.intermediate = byte;
+                    } else {
+                        self.csi_ignored = true;
+                    }
+                }
+                _ => unreachable!("complete CSI preflight accepts only parameter bytes"),
+            }
+        }
+        if !self.csi_ignored {
+            self.dispatch_csi(grid, final_byte, output);
+        }
+        self.state = State::Ground;
+        final_index + 1
     }
 
     fn advance_csi(&mut self, grid: &mut Grid, byte: u8, output: &mut ParseOutput) {

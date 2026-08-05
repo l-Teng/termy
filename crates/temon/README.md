@@ -174,12 +174,15 @@ avoid rescanning known-default tails when scrolling without changing the dense
 live-grid representation.
 
 For complete default-style `CRLF` batches, a guarded parser/grid path moves cold
-rows directly into compact history and rebuilds only the final viewport. It
-handles printable ASCII plus validated UTF-8 rows with wide cells and one
-inline combining mark per cell. It activates only at the bottom of a full
-primary scroll region with default modes and style; partial or more complex
-input, alternate screens, custom charsets, and every ambiguous state keep using
-the normal scalar path.
+primary rows directly into compact history and rebuilds only the final
+viewport. On the alternate screen, the ASCII form rotates and rewrites the
+dense rows in place without allocating or recording history. The primary path
+also handles validated UTF-8 rows with wide cells and one inline combining mark
+per cell. It activates only at the bottom of a full-screen scroll region with
+default modes and style; partial or more complex input, custom charsets, and
+every ambiguous state keep using the normal scalar path. Complete ordinary CSI
+sequences also bypass the byte-at-a-time state machine; private mode changes
+stay on the scalar path so synchronized-update boundaries remain unchanged.
 
 The ten-sample macOS ARM64 results and tradeoffs are recorded in
 [PERFORMANCE.md](PERFORMANCE.md). The compact uncompressed representation meets
@@ -196,10 +199,12 @@ just benchmark-tmon
 ```
 
 The separate macOS harness compares Tmon with pinned, statically linked
-`libghostty-vt`. Its memory mode uses fresh processes and its balanced feed
-mode compares identical 64 KiB input chunks after semantic preflight. Run both
-locally with a Ghostty source checkout, or manually dispatch the **Tmon vs
-Ghostty Benchmark** GitHub Actions workflow:
+`libghostty-vt`. Its memory mode uses fresh processes for 13 empty, primary,
+alternate, interactive, and scrollback states. Its balanced feed mode compares
+eight semantically checked workloads using identical 64 KiB scrollback chunks,
+row-aligned alternate-screen chunks, or one complete interactive operation
+batch per call. Run both locally with a Ghostty source checkout, or manually
+dispatch the **Tmon vs Ghostty Benchmark** GitHub Actions workflow:
 
 ```sh
 GHOSTTY_DIR=../ghostty just benchmark-tmon-ghostty-memory

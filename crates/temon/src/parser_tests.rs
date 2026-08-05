@@ -113,6 +113,21 @@ fn bulk_plain_lines_match_row_split_parsing_and_repeat_state() {
 }
 
 #[test]
+fn bulk_alternate_lines_match_byte_split_parsing() {
+    let mut bytes = b"\x1b[?1049h".to_vec();
+    for row in 0..100 {
+        bytes.extend_from_slice(format!("A{row:03} cafe\u{301} \u{754c}\r\n").as_bytes());
+    }
+    bytes.extend_from_slice(b"\x1b[2b");
+
+    let bulk = replay_chunks(&bytes, &[]);
+    let every_byte = (1..bytes.len()).collect::<Vec<_>>();
+
+    assert!(bulk.alternate_screen);
+    assert_eq!(bulk, replay_chunks(&bytes, &every_byte));
+}
+
+#[test]
 fn complete_default_unicode_lines_match_byte_split_parsing() {
     let mut bytes = Vec::new();
     for row in 0..20 {
@@ -126,6 +141,18 @@ fn complete_default_unicode_lines_match_byte_split_parsing() {
     let every_byte = (1..bytes.len()).collect::<Vec<_>>();
 
     assert_eq!(one_shot, replay_chunks(&bytes, &every_byte));
+}
+
+#[test]
+fn single_default_line_matches_byte_split_parsing_on_both_screens() {
+    for prefix in [b"".as_slice(), b"\x1b[?1049h".as_slice()] {
+        let mut fixture = prefix.to_vec();
+        fixture.extend_from_slice("ASCII cafe\u{301} \u{754c}\r\n".as_bytes());
+        let expected = replay_chunks(&fixture, &[]);
+        let every_byte = (1..fixture.len()).collect::<Vec<_>>();
+
+        assert_eq!(replay_chunks(&fixture, &every_byte), expected);
+    }
 }
 
 #[test]
@@ -341,6 +368,16 @@ fn every_input_split_matches_one_shot_parsing() {
             "parser state diverged at byte split {split}"
         );
     }
+}
+
+#[test]
+fn complete_csi_batches_match_byte_split_parsing() {
+    let fixture = b"\x1b[2;3H\x1b[31;1mred\x1b[0m\x1b[2K\
+        \x1b[3A\x1b[4:3;58:2::12:34:56mU\x1b[?25lX\x1b[?25h\x1b[6n";
+    let expected = replay_chunks(fixture, &[]);
+    let every_byte = (1..fixture.len()).collect::<Vec<_>>();
+
+    assert_eq!(replay_chunks(fixture, &every_byte), expected);
 }
 
 #[test]

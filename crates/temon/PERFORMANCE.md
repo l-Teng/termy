@@ -21,12 +21,16 @@ persistent dense storage; the few mutable history paths materialize temporarily
 and re-encode immediately.
 
 A conservative line path handles complete default-style `CRLF` rows only while
-the cursor is at the bottom of the primary full-screen scroll region. It moves
-cold rows directly into compact history and materializes only the final
-viewport. The batched form supports printable ASCII and validated UTF-8 rows
-with wide cells and one inline combining mark per cell; more complex input and
-all other modes fall back to the normal parser/grid path. The byte encoder also
-has dedicated default-style and single-byte ASCII paths.
+the cursor is at the bottom of a full-screen scroll region. On the primary
+screen it moves cold rows directly into compact history and materializes only
+the final viewport. On the alternate screen, the ASCII form rotates and
+rewrites dense rows in place without allocating or retaining history. The
+primary batched form also supports validated UTF-8 rows with wide cells and one
+inline combining mark per cell. More complex input falls back to the normal
+parser/grid path. Complete ordinary CSI sequences now bypass the byte-at-a-time
+state machine, while private mode changes retain the scalar synchronized-update
+handling. The byte encoder also has dedicated default-style and single-byte
+ASCII paths.
 
 The physical-memory result below is a local macOS ARM64 run with rustc 1.96.0,
 the pinned Ghostty revision `9e30f70f23418fecbdca1088673000417527c4e4`,
@@ -36,39 +40,50 @@ the hosted first-format result from run `31012483654`.
 
 | Workload | Prior Tmon | Current Tmon | Ghostty | Ghostty compressed | Tmon below compressed |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Plain | 4.77 MiB | 2.73 MiB | 11.66 MiB | 3.45 MiB | 20.9% |
-| Styled | 7.70 MiB | 2.70 MiB | 13.25 MiB | 3.88 MiB | 30.4% |
-| Unicode | 6.77 MiB | 2.72 MiB | 12.64 MiB | 3.27 MiB | 16.8% |
-| Mixed | 10.20 MiB | 3.33 MiB | 13.23 MiB | 4.19 MiB | 20.5% |
+| Plain | 4.77 MiB | 2.75 MiB | 11.64 MiB | 3.44 MiB | 20.1% |
+| Styled | 7.70 MiB | 2.72 MiB | 13.23 MiB | 3.87 MiB | 29.7% |
+| Unicode | 6.77 MiB | 2.73 MiB | 12.63 MiB | 3.25 MiB | 16.0% |
+| Mixed | 10.20 MiB | 3.34 MiB | 13.23 MiB | 4.17 MiB | 19.9% |
 
-Tmon's empty and screen-only medians were 1.69 MiB, below Ghostty's 1.72 MiB
-empty median and 1.73-1.77 MiB screen medians. Tmon's scrollback payload deltas
-were 1.05, 1.02, 1.03, and 1.64 MiB respectively, versus compressed Ghostty's
-1.73, 2.16, 1.55, and 2.47 MiB. The complete report records every raw byte
-sample and P05/P95 range; cursor, history size, and sampled semantic cells
-matched before each result was accepted. The benchmark now fails unless Tmon's
-median is strictly lower than every corresponding Ghostty result.
+Tmon's empty and screen-only medians were 1.67 MiB, below Ghostty's 1.69 MiB
+empty median and 1.73-1.75 MiB screen medians. Alternate plain, alternate
+mixed, TUI redraw, and cursor-edit states measured 1.83, 1.80, 1.81, and
+1.67 MiB for Tmon versus 1.88, 1.88, 1.86, and 1.73 MiB for Ghostty. Tmon's
+scrollback payload deltas were 1.08, 1.05, 1.06, and 1.67 MiB respectively,
+versus compressed Ghostty's 1.75, 2.18, 1.56, and 2.48 MiB. The complete report
+records every raw byte sample and P05/P95 range; cursor, history size, and
+sampled semantic cells matched before each result was accepted. The benchmark
+now fails unless Tmon's median is strictly lower than every corresponding
+Ghostty result across all 13 states.
 
-The direct Tmon/Ghostty feed comparison used eight balanced samples, a 2 MiB
-warmup, 32 MiB timed per engine/sample, and identical 64 KiB calls. A fresh
-10,040-row preflight matched bytes, cursor, history size, and semantic digest:
+The expanded direct Tmon/Ghostty feed comparison used eight balanced samples
+and a 2 MiB warmup. Scrollback uses identical 64 KiB calls and a 32 MiB timed
+target, alternate rows use identical row-aligned calls and the same target, and
+the more expensive TUI/edit traces use one identical operation batch per call
+with 4 MiB and 2 MiB timed targets. Fresh complete-workload preflights matched
+bytes, cursor, history size, and semantic digest:
 
-| Workload | Tmon | Ghostty | Median paired ratio |
-| --- | ---: | ---: | ---: |
-| Plain scrollback | 1185.9 MiB/s | 910.6 MiB/s | 1.303x |
-| Styled scrollback | 143.8 MiB/s | 96.3 MiB/s | 1.478x |
-| Unicode scrollback | 271.1 MiB/s | 130.0 MiB/s | 2.091x |
-| Mixed scrollback | 134.8 MiB/s | 99.3 MiB/s | 1.357x |
+| Workload | Timed target | Tmon | Ghostty | Median paired ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Plain scrollback | 32 MiB | 1590.5 MiB/s | 903.0 MiB/s | 1.759x |
+| Styled scrollback | 32 MiB | 249.6 MiB/s | 97.4 MiB/s | 2.564x |
+| Unicode scrollback | 32 MiB | 296.4 MiB/s | 135.3 MiB/s | 2.182x |
+| Mixed scrollback | 32 MiB | 219.6 MiB/s | 101.6 MiB/s | 2.163x |
+| Plain alternate screen | 32 MiB | 1754.5 MiB/s | 1373.4 MiB/s | 1.269x |
+| Mixed alternate screen | 32 MiB | 284.3 MiB/s | 115.4 MiB/s | 2.458x |
+| TUI redraw | 4 MiB | 355.0 MiB/s | 315.7 MiB/s | 1.125x |
+| Cursor and line edits | 2 MiB | 188.1 MiB/s | 30.7 MiB/s | 6.121x |
 
 These are integrated feed results, not a raw-parser or feature-parity score.
 Ghostty's compression is an explicit post-feed operation, so it appears in the
-memory comparison rather than its normal feed-throughput path. The GitHub
+memory comparison rather than its normal feed-throughput path. Every individual
+paired ratio in this local acceptance run was above `1.000x`; the GitHub
 workflow runs both measurements and rejects any workload whose median paired
 Tmon/Ghostty throughput ratio is not above `1.000x`.
 
 The repository's existing eight-sample Tmon/Alacritty parser gate also passed
-on the same machine: plain `1.110x`, styled `1.269x`, Unicode `1.051x`, and
-edits `1.327x`. Its exact full-grid preflight passed before timing.
+on the same machine: plain `1.321x`, styled `2.539x`, Unicode `1.231x`, and
+edits `1.413x`. Its exact full-grid preflight passed before timing.
 
 ## Result
 

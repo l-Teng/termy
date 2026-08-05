@@ -18,6 +18,7 @@ pub(super) struct Screen {
     pub(super) saved_wrap_pending: bool,
     pub(super) scroll_top: usize,
     pub(super) scroll_bottom: usize,
+    pub(super) plain_ascii_cells: bool,
 }
 
 impl Screen {
@@ -39,6 +40,7 @@ impl Screen {
             saved_wrap_pending: false,
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
+            plain_ascii_cells: true,
         }
     }
 
@@ -69,11 +71,19 @@ impl Screen {
     }
 
     pub(super) fn fill(&mut self, cell: Cell) {
-        for row in &mut self.cells {
-            row.fill(cell);
+        if cell == DEFAULT_CELL {
+            for (row, extent) in self.cells.iter_mut().zip(&self.row_extents) {
+                let clear_len = (*extent).min(row.len());
+                row[..clear_len].fill(cell);
+            }
+        } else {
+            for row in &mut self.cells {
+                row.fill(cell);
+            }
         }
         self.row_extents
             .fill(if cell == DEFAULT_CELL { 0 } else { self.cols });
+        self.plain_ascii_cells = cell == DEFAULT_CELL;
     }
 
     pub(super) fn reset(&mut self) {
@@ -168,6 +178,7 @@ impl Screen {
         self.saved_cursor_row = self.saved_cursor_row.min(rows.saturating_sub(1));
         self.scroll_top = 0;
         self.scroll_bottom = rows.saturating_sub(1);
+        self.plain_ascii_cells = false;
         removed
     }
 }

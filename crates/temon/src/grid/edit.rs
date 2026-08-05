@@ -62,9 +62,12 @@ impl Grid {
 
     pub(super) fn active_mut(&mut self) -> &mut Screen {
         if self.alternate_active {
-            self.alternate
+            let screen = self
+                .alternate
                 .as_mut()
-                .expect("the active alternate screen is initialized")
+                .expect("the active alternate screen is initialized");
+            screen.plain_ascii_cells = false;
+            screen
         } else {
             &mut self.primary
         }
@@ -773,17 +776,22 @@ impl Grid {
                 screen.cols,
             )
         };
+        let clears_empty_rows = self.pen().blank() != DEFAULT_CELL;
         match mode {
             0 => {
                 self.erase_row_range(row, col, cols.saturating_sub(1), selective);
                 for target in row + 1..rows {
-                    self.erase_row_range(target, 0, cols.saturating_sub(1), selective);
+                    if clears_empty_rows || self.active().row_extent(target) > 0 {
+                        self.erase_row_range(target, 0, cols.saturating_sub(1), selective);
+                    }
                 }
             }
             1 => {
                 if row > 1 {
                     for target in 0..row {
-                        self.erase_row_range(target, 0, cols.saturating_sub(1), selective);
+                        if clears_empty_rows || self.active().row_extent(target) > 0 {
+                            self.erase_row_range(target, 0, cols.saturating_sub(1), selective);
+                        }
                     }
                 }
                 self.erase_row_range(row, 0, col, selective);
@@ -877,27 +885,50 @@ impl Grid {
             }
         }
         let blank = self.pen().blank();
-        let row_cells = self.active_mut().row_mut(row);
-        if selective {
-            let mut col = left;
-            while col <= right {
-                let pair_start = if row_cells[col].wide_spacer() {
-                    col.saturating_sub(1)
-                } else {
-                    col
-                };
-                let pair_end = if pair_start + 1 < cols && row_cells[pair_start + 1].wide_spacer() {
-                    pair_start + 1
-                } else {
-                    pair_start
-                };
-                if !row_cells[pair_start..=pair_end].iter().any(Cell::protected) {
-                    row_cells[pair_start..=pair_end].fill(blank);
-                }
-                col = pair_end.saturating_add(1);
-            }
+        let old_extent = self.active().row_extent(row);
+        if !selective && blank == DEFAULT_CELL && (old_extent == 0 || left >= old_extent) {
+            return;
+        }
+        let fill_right = if !selective && blank == DEFAULT_CELL {
+            right.min(old_extent - 1)
         } else {
-            row_cells[left..=right].fill(blank);
+            right
+        };
+        {
+            let screen = self.active_mut();
+            let row_cells = &mut screen.cells[row];
+            if selective {
+                let mut col = left;
+                while col <= right {
+                    let pair_start = if row_cells[col].wide_spacer() {
+                        col.saturating_sub(1)
+                    } else {
+                        col
+                    };
+                    let pair_end =
+                        if pair_start + 1 < cols && row_cells[pair_start + 1].wide_spacer() {
+                            pair_start + 1
+                        } else {
+                            pair_start
+                        };
+                    if !row_cells[pair_start..=pair_end].iter().any(Cell::protected) {
+                        row_cells[pair_start..=pair_end].fill(blank);
+                    }
+                    col = pair_end.saturating_add(1);
+                }
+            } else {
+                row_cells[left..=fill_right].fill(blank);
+            }
+
+            screen.row_extents[row] = if blank != DEFAULT_CELL {
+                old_extent.max(right.saturating_add(1))
+            } else if selective {
+                HistoryRow::stored_len_for(row_cells, cols)
+            } else if right.saturating_add(1) >= old_extent {
+                old_extent.min(left)
+            } else {
+                old_extent
+            };
         }
         self.damage.mark(row, left, right);
     }
@@ -1054,7 +1085,12 @@ impl Grid {
             screen.cells[top..=bottom].rotate_right(count);
             screen.row_extents[top..=bottom].rotate_right(count);
             for target in top..top + count {
-                screen.cells[target].fill(blank);
+                let clear_len = if blank == DEFAULT_CELL {
+                    screen.row_extents[target]
+                } else {
+                    cols
+                };
+                screen.cells[target][..clear_len].fill(blank);
                 screen.row_extents[target] = if blank == DEFAULT_CELL { 0 } else { cols };
             }
         }

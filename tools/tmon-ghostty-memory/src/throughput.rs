@@ -11,17 +11,26 @@ const MIN_TARGET_MIB: usize = 1;
 const MAX_TARGET_MIB: usize = 512;
 const FEED_CHUNK_BYTES: usize = 64 * 1024;
 
-const WORKLOADS: [Workload; 4] = [
+const WORKLOADS: [Workload; 8] = [
     Workload::ScrollbackPlain,
     Workload::ScrollbackStyled,
     Workload::ScrollbackUnicode,
     Workload::ScrollbackMixed,
+    Workload::AlternatePlain,
+    Workload::AlternateMixed,
+    Workload::TuiRedraw,
+    Workload::CursorEdits,
 ];
 
 #[derive(Clone, Copy)]
 struct Measurement {
     bytes: u64,
     elapsed_seconds: f64,
+}
+
+struct WorkloadInput {
+    setup: &'static [u8],
+    chunks: Vec<Vec<u8>>,
 }
 
 impl Measurement {
@@ -47,30 +56,51 @@ pub(super) fn run() -> Result<(), String> {
         .checked_mul(1024 * 1024)
         .ok_or_else(|| "throughput target overflowed usize".to_string())?;
     let warmup_bytes = WARMUP_MIB * 1024 * 1024;
+    let workloads = match env::var("TMON_GHOSTTY_THROUGHPUT_WORKLOAD") {
+        Ok(name) => {
+            let workload = Workload::parse(&name)?;
+            if !WORKLOADS.contains(&workload) {
+                return Err(format!(
+                    "workload {name:?} is not part of the throughput benchmark"
+                ));
+            }
+            vec![workload]
+        }
+        Err(env::VarError::NotPresent) => WORKLOADS.to_vec(),
+        Err(error) => {
+            return Err(format!(
+                "could not read TMON_GHOSTTY_THROUGHPUT_WORKLOAD: {error}"
+            ));
+        }
+    };
 
     println!("Tmon vs Ghostty terminal feed throughput");
     println!("=========================================");
     println!("Grid: {COLS}x{ROWS}, scrollback: {SCROLLBACK_LIMIT} lines");
     println!("Samples: {samples}, target: {target_mib} MiB/engine/sample");
     println!("Warmup: {WARMUP_MIB} MiB/engine/sample\n");
-    println!("Feed chunk: {} KiB\n", FEED_CHUNK_BYTES / 1024);
+    println!(
+        "Feed chunks: 64 KiB scrollback, 4 KiB alternate rows, one operation batch for traces\n"
+    );
 
     println!("Correctness preflight (fresh complete workload)");
-    for workload in WORKLOADS {
+    for &workload in &workloads {
         preflight(workload)?;
         println!("  {:<28} matched", workload.name());
     }
 
     println!("\nIntegrated feed throughput (median MiB/s; higher is better)");
     println!(
-        "{:<28} {:>12} {:>12} {:>13}",
-        "Workload", "Tmon", "Ghostty", "Tmon/Ghostty"
+        "{:<28} {:>8} {:>12} {:>12} {:>13}",
+        "Workload", "Target", "Tmon", "Ghostty", "Tmon/Ghostty"
     );
-    println!("{}", "-".repeat(70));
+    println!("{}", "-".repeat(79));
 
     let mut failed = Vec::new();
-    for workload in WORKLOADS {
-        let chunks = build_chunks(workload)?;
+    for &workload in &workloads {
+        let input = build_input(workload)?;
+        let workload_target = scaled_target(workload, target_bytes);
+        let workload_warmup = scaled_target(workload, warmup_bytes);
         let mut tmon = Vec::with_capacity(samples);
         let mut ghostty = Vec::with_capacity(samples);
         let mut ratios = Vec::with_capacity(samples);
@@ -78,12 +108,12 @@ pub(super) fn run() -> Result<(), String> {
         for sample in 0..samples {
             let (tmon_measurement, ghostty_measurement) = if sample % 2 == 0 {
                 (
-                    measure_tmon(&chunks, warmup_bytes, target_bytes)?,
-                    measure_ghostty(&chunks, warmup_bytes, target_bytes)?,
+                    measure_tmon(&input, workload_warmup, workload_target)?,
+                    measure_ghostty(&input, workload_warmup, workload_target)?,
                 )
             } else {
-                let ghostty = measure_ghostty(&chunks, warmup_bytes, target_bytes)?;
-                let tmon = measure_tmon(&chunks, warmup_bytes, target_bytes)?;
+                let ghostty = measure_ghostty(&input, workload_warmup, workload_target)?;
+                let tmon = measure_tmon(&input, workload_warmup, workload_target)?;
                 (tmon, ghostty)
             };
             let tmon_speed = tmon_measurement.mib_per_second();
@@ -97,14 +127,15 @@ pub(super) fn run() -> Result<(), String> {
         let ghostty_median = median(&ghostty);
         let ratio_median = median(&ratios);
         println!(
-            "{:<28} {:>12.1} {:>12.1} {:>12.3}x",
+            "{:<28} {:>7.2}M {:>12.1} {:>12.1} {:>12.3}x",
             workload.name(),
+            workload_target as f64 / (1024.0 * 1024.0),
             tmon_median,
             ghostty_median,
             ratio_median
         );
         println!(
-            "  ranges                  {:>7.1}-{:<7.1} {:>7.1}-{:<7.1} {:>7.3}-{:<7.3}x",
+            "  ranges                           {:>7.1}-{:<7.1} {:>7.1}-{:<7.1} {:>7.3}-{:<7.3}x",
             minimum(&tmon),
             maximum(&tmon),
             minimum(&ghostty),
@@ -159,24 +190,60 @@ fn preflight(workload: Workload) -> Result<(), String> {
     Ok(())
 }
 
-fn build_chunks(workload: Workload) -> Result<Vec<Vec<u8>>, String> {
+fn build_input(workload: Workload) -> Result<WorkloadInput, String> {
+    let setup = if workload.enters_alternate_screen() {
+        ENTER_ALTERNATE_SCREEN
+    } else {
+        &[]
+    };
+    if let Some((trace, _)) = workload.trace() {
+        return Ok(WorkloadInput {
+            setup,
+            chunks: vec![trace.to_vec()],
+        });
+    }
+    let alternate_rows = workload.enters_alternate_screen();
     let mut stream = Vec::new();
+    let mut chunks = Vec::new();
     let mut row = String::new();
     for row_index in 0..workload.row_count() {
         row.clear();
         workload.build_row(row_index, &mut row);
         validate_payload_row(&row, workload, row_index)?;
         row.push_str("\r\n");
-        stream.extend_from_slice(row.as_bytes());
+        if alternate_rows {
+            if !stream.is_empty() && stream.len() + row.len() > 4 * 1024 {
+                chunks.push(std::mem::take(&mut stream));
+            }
+            stream.extend_from_slice(row.as_bytes());
+        } else {
+            stream.extend_from_slice(row.as_bytes());
+        }
     }
-    Ok(stream
-        .chunks(FEED_CHUNK_BYTES)
-        .map(<[u8]>::to_vec)
-        .collect())
+    if alternate_rows {
+        if !stream.is_empty() {
+            chunks.push(stream);
+        }
+    } else {
+        chunks = stream
+            .chunks(FEED_CHUNK_BYTES)
+            .map(<[u8]>::to_vec)
+            .collect();
+    }
+    Ok(WorkloadInput { setup, chunks })
+}
+
+fn scaled_target(workload: Workload, target_bytes: usize) -> usize {
+    let divisor = match workload {
+        Workload::TuiRedraw => 8,
+        Workload::CursorEdits => 16,
+        _ => 1,
+    };
+    (target_bytes / divisor).max(64 * 1024)
 }
 
 fn measure_tmon(
-    chunks: &[Vec<u8>],
+    input: &WorkloadInput,
     warmup_bytes: usize,
     target_bytes: usize,
 ) -> Result<Measurement, String> {
@@ -192,12 +259,13 @@ fn measure_tmon(
             ..Config::default()
         },
     );
-    feed_until(chunks, warmup_bytes, |chunk| {
+    terminal.feed_output(input.setup);
+    feed_until(&input.chunks, warmup_bytes, |chunk| {
         terminal.feed_output(chunk);
         Ok(())
     })?;
     let start = Instant::now();
-    let bytes = feed_until(chunks, target_bytes, |chunk| {
+    let bytes = feed_until(&input.chunks, target_bytes, |chunk| {
         terminal.feed_output(chunk);
         Ok(())
     })?;
@@ -210,14 +278,15 @@ fn measure_tmon(
 }
 
 fn measure_ghostty(
-    chunks: &[Vec<u8>],
+    input: &WorkloadInput,
     warmup_bytes: usize,
     target_bytes: usize,
 ) -> Result<Measurement, String> {
     let terminal = GhosttyTerminal::new()?;
-    feed_until(chunks, warmup_bytes, |chunk| terminal.feed(chunk))?;
+    terminal.feed(input.setup)?;
+    feed_until(&input.chunks, warmup_bytes, |chunk| terminal.feed(chunk))?;
     let start = Instant::now();
-    let bytes = feed_until(chunks, target_bytes, |chunk| terminal.feed(chunk))?;
+    let bytes = feed_until(&input.chunks, target_bytes, |chunk| terminal.feed(chunk))?;
     let elapsed_seconds = start.elapsed().as_secs_f64();
     black_box(terminal.query_state()?);
     Ok(Measurement {
@@ -286,4 +355,47 @@ fn minimum(values: &[f64]) -> f64 {
 
 fn maximum(values: &[f64]) -> f64 {
     values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alternate_input_keeps_setup_outside_row_aligned_chunks() {
+        let input = build_input(Workload::AlternatePlain).unwrap();
+
+        assert_eq!(input.setup, ENTER_ALTERNATE_SCREEN);
+        assert!(input.chunks.len() > 1);
+        assert!(input.chunks.iter().all(|chunk| {
+            chunk.len() <= 4 * 1024
+                && chunk.ends_with(b"\r\n")
+                && !chunk.windows(ENTER_ALTERNATE_SCREEN.len()).any(|window| {
+                    window == ENTER_ALTERNATE_SCREEN
+                })
+        }));
+    }
+
+    #[test]
+    fn interactive_input_uses_one_operation_batch() {
+        let redraw = build_input(Workload::TuiRedraw).unwrap();
+        assert_eq!(redraw.setup, ENTER_ALTERNATE_SCREEN);
+        assert_eq!(redraw.chunks, [TUI_REDRAW]);
+
+        let edits = build_input(Workload::CursorEdits).unwrap();
+        assert!(edits.setup.is_empty());
+        assert_eq!(edits.chunks, [CURSOR_EDITS]);
+    }
+
+    #[test]
+    fn interactive_targets_are_scaled_but_bounded() {
+        let target = 32 * 1024 * 1024;
+        assert_eq!(scaled_target(Workload::ScrollbackPlain, target), target);
+        assert_eq!(scaled_target(Workload::TuiRedraw, target), target / 8);
+        assert_eq!(scaled_target(Workload::CursorEdits, target), target / 16);
+        assert_eq!(
+            scaled_target(Workload::CursorEdits, 1024),
+            64 * 1024
+        );
+    }
 }

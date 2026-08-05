@@ -13,10 +13,27 @@ const COLS: u16 = 120;
 const ROWS: u16 = 40;
 const SCROLLBACK_LIMIT: usize = 10_000;
 const SCROLLBACK_TOTAL_ROWS: usize = SCROLLBACK_LIMIT + ROWS as usize;
+const ALTERNATE_TOTAL_ROWS: usize = ROWS as usize * 16;
 const DEFAULT_SAMPLES: usize = 10;
 const MIN_SAMPLES: usize = 2;
 const MAX_SAMPLES: usize = 50;
 const CHILD_PREFIX: &str = "TMON_GHOSTTY_MEMORY_CHILD";
+const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
+const TUI_REDRAW: &[u8] = concat!(
+    "\x1b[H",
+    "\x1b[38;2;120;180;255;48;5;234;1mstatus\x1b[0m",
+    "\x1b[2;1H\x1b[2Kbuild complete cafe\u{301} \u{754c}",
+    "\x1b[3;1H\x1b[2Kprogress: 100%",
+    "\x1b[4;1H\x1b[38;5;81;48;5;235;4:3mworker 07 ready\x1b[0m",
+    "\x1b[5;1H\x1b[2Klatency 08.4 ms",
+)
+.as_bytes();
+const CURSOR_EDITS: &[u8] = concat!(
+    "\x1b[10;20Habcdef\x1b[3DXYZ\x1b[K",
+    "\x1b[4;1H\x1b[2Linserted cafe\u{301} \u{754c}",
+    "\x1b[1M\x1b[0J\x1b[H",
+)
+.as_bytes();
 
 const SHIM_OK: i32 = 0;
 const SHIM_INVALID_ARGUMENT: i32 = 1;
@@ -105,6 +122,10 @@ enum Workload {
     ScreenStyled,
     ScreenUnicode,
     ScreenMixed,
+    AlternatePlain,
+    AlternateMixed,
+    TuiRedraw,
+    CursorEdits,
     ScrollbackPlain,
     ScrollbackStyled,
     ScrollbackUnicode,
@@ -112,12 +133,16 @@ enum Workload {
 }
 
 impl Workload {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 13] = [
         Self::Empty,
         Self::ScreenPlain,
         Self::ScreenStyled,
         Self::ScreenUnicode,
         Self::ScreenMixed,
+        Self::AlternatePlain,
+        Self::AlternateMixed,
+        Self::TuiRedraw,
+        Self::CursorEdits,
         Self::ScrollbackPlain,
         Self::ScrollbackStyled,
         Self::ScrollbackUnicode,
@@ -138,6 +163,10 @@ impl Workload {
             Self::ScreenStyled => "screen-styled",
             Self::ScreenUnicode => "screen-unicode",
             Self::ScreenMixed => "screen-mixed",
+            Self::AlternatePlain => "alternate-plain",
+            Self::AlternateMixed => "alternate-mixed",
+            Self::TuiRedraw => "tui-redraw",
+            Self::CursorEdits => "cursor-edits",
             Self::ScrollbackPlain => "scrollback-plain",
             Self::ScrollbackStyled => "scrollback-styled",
             Self::ScrollbackUnicode => "scrollback-unicode",
@@ -148,9 +177,12 @@ impl Workload {
     const fn row_count(self) -> usize {
         match self {
             Self::Empty => 0,
-            Self::ScreenPlain | Self::ScreenStyled | Self::ScreenUnicode | Self::ScreenMixed => {
-                ROWS as usize
-            }
+            Self::ScreenPlain
+            | Self::ScreenStyled
+            | Self::ScreenUnicode
+            | Self::ScreenMixed => ROWS as usize,
+            Self::AlternatePlain | Self::AlternateMixed => ALTERNATE_TOTAL_ROWS,
+            Self::TuiRedraw | Self::CursorEdits => 0,
             Self::ScrollbackPlain
             | Self::ScrollbackStyled
             | Self::ScrollbackUnicode
@@ -164,7 +196,11 @@ impl Workload {
             | Self::ScreenPlain
             | Self::ScreenStyled
             | Self::ScreenUnicode
-            | Self::ScreenMixed => 0,
+            | Self::ScreenMixed
+            | Self::AlternatePlain
+            | Self::AlternateMixed
+            | Self::TuiRedraw
+            | Self::CursorEdits => 0,
             Self::ScrollbackPlain
             | Self::ScrollbackStyled
             | Self::ScrollbackUnicode
@@ -190,13 +226,32 @@ impl Workload {
         }
     }
 
+    const fn enters_alternate_screen(self) -> bool {
+        matches!(
+            self,
+            Self::AlternatePlain | Self::AlternateMixed | Self::TuiRedraw
+        )
+    }
+
+    const fn trace(self) -> Option<(&'static [u8], usize)> {
+        match self {
+            Self::TuiRedraw => Some((TUI_REDRAW, 64)),
+            Self::CursorEdits => Some((CURSOR_EDITS, 128)),
+            _ => None,
+        }
+    }
+
     fn build_row(self, row_index: usize, out: &mut String) {
         match self {
-            Self::Empty => {}
-            Self::ScreenPlain | Self::ScrollbackPlain => build_plain_row(row_index, out),
+            Self::Empty | Self::TuiRedraw | Self::CursorEdits => {}
+            Self::ScreenPlain | Self::AlternatePlain | Self::ScrollbackPlain => {
+                build_plain_row(row_index, out)
+            }
             Self::ScreenStyled | Self::ScrollbackStyled => build_styled_row(row_index, out),
             Self::ScreenUnicode | Self::ScrollbackUnicode => build_unicode_row(row_index, out),
-            Self::ScreenMixed | Self::ScrollbackMixed => build_mixed_row(row_index, out),
+            Self::ScreenMixed | Self::AlternateMixed | Self::ScrollbackMixed => {
+                build_mixed_row(row_index, out)
+            }
         }
     }
 }
@@ -791,6 +846,19 @@ fn feed_workload(
         return Ok(0);
     }
     let mut total_bytes = 0u64;
+    if workload.enters_alternate_screen() {
+        feed(ENTER_ALTERNATE_SCREEN)?;
+        total_bytes = ENTER_ALTERNATE_SCREEN.len() as u64;
+    }
+    if let Some((trace, repetitions)) = workload.trace() {
+        for _ in 0..repetitions {
+            feed(trace)?;
+            total_bytes = total_bytes
+                .checked_add(trace.len() as u64)
+                .ok_or_else(|| "payload byte count overflowed".to_string())?;
+        }
+        return Ok(total_bytes);
+    }
     let mut row = String::new();
     for row_index in 0..workload.row_count() {
         row.clear();
@@ -1246,6 +1314,18 @@ mod tests {
             (Workload::ScreenStyled, "screen-styled", 40),
             (Workload::ScreenUnicode, "screen-unicode", 40),
             (Workload::ScreenMixed, "screen-mixed", 40),
+            (
+                Workload::AlternatePlain,
+                "alternate-plain",
+                ALTERNATE_TOTAL_ROWS,
+            ),
+            (
+                Workload::AlternateMixed,
+                "alternate-mixed",
+                ALTERNATE_TOTAL_ROWS,
+            ),
+            (Workload::TuiRedraw, "tui-redraw", 0),
+            (Workload::CursorEdits, "cursor-edits", 0),
             (Workload::ScrollbackPlain, "scrollback-plain", 10_040),
             (Workload::ScrollbackStyled, "scrollback-styled", 10_040),
             (Workload::ScrollbackUnicode, "scrollback-unicode", 10_040),
@@ -1301,5 +1381,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn interactive_traces_cover_alternate_and_edit_paths() {
+        assert!(Workload::TuiRedraw.enters_alternate_screen());
+        assert!(!Workload::CursorEdits.enters_alternate_screen());
+        assert_eq!(Workload::TuiRedraw.trace(), Some((TUI_REDRAW, 64)));
+        assert_eq!(Workload::CursorEdits.trace(), Some((CURSOR_EDITS, 128)));
+        assert!(TUI_REDRAW.windows(2).any(|window| window == b"[H"));
+        assert!(CURSOR_EDITS.windows(2).any(|window| window == b"[K"));
     }
 }
