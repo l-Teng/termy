@@ -39,6 +39,7 @@ use terminal_view::{TerminalView, initial_window_background_appearance};
 use termy_terminal_ui::TmuxClient;
 
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const APP_ID: &str = "termy";
 
 const MIN_WINDOW_WIDTH: f32 = 480.0;
 const MIN_WINDOW_HEIGHT: f32 = 320.0;
@@ -199,6 +200,7 @@ fn open_main_window(
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar,
             window_background,
+            app_id: Some(APP_ID.to_string()),
             // Keep both sides of the xctrace comparison visible even when the
             // benchmark is launched from an IDE or another frontmost app.
             // Normal product windows retain the standard level.
@@ -218,8 +220,19 @@ fn open_main_window(
         },
         move |window, cx| {
             if benchmark_mode {
-                cx.activate(true);
-                window.activate_window();
+                #[cfg(target_os = "macos")]
+                if let Err(error) =
+                    macos_titlebar_drag::keep_benchmark_panel_visible_when_inactive(window)
+                {
+                    log::error!(
+                        "Failed to keep the macOS benchmark panel visible while inactive: {error}"
+                    );
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    cx.activate(true);
+                    window.activate_window();
+                }
             }
             #[cfg(target_os = "windows")]
             {

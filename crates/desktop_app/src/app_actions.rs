@@ -1,3 +1,4 @@
+use crate::APP_ID;
 use crate::config;
 use crate::settings_view::{SettingsSection, SettingsWindow};
 use crate::terminal_view::TerminalView;
@@ -188,6 +189,7 @@ fn open_settings_window_with_section(
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar,
             window_background,
+            app_id: Some(APP_ID.to_string()),
             is_resizable: true,
             window_min_size: Some(minimum_window_size),
             ..Default::default()

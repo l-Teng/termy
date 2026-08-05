@@ -1,4 +1,7 @@
-use cocoa::base::{BOOL, NO, YES, id, nil};
+use cocoa::{
+    appkit::{NSWindow, NSWindowCollectionBehavior},
+    base::{BOOL, NO, YES, id, nil},
+};
 use gpui::Window;
 use objc::{
     declare::ClassDecl,
@@ -30,6 +33,7 @@ pub(crate) enum NativeTitlebarDragError {
     MissingViewClass,
     ClassRegistration,
     FirstResponder,
+    PanelVisibility,
 }
 
 impl fmt::Display for NativeTitlebarDragError {
@@ -56,8 +60,52 @@ impl fmt::Display for NativeTitlebarDragError {
                 f,
                 "macOS terminal content view could not become the first responder.",
             ),
+            Self::PanelVisibility => write!(
+                f,
+                "macOS benchmark window does not support persistent panel visibility.",
+            ),
         }
     }
+}
+
+pub(crate) fn keep_benchmark_panel_visible_when_inactive(
+    window: &Window,
+) -> Result<(), NativeTitlebarDragError> {
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|_| NativeTitlebarDragError::WindowHandle)?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err(NativeTitlebarDragError::NonAppKitHandle);
+    };
+
+    let ns_view = handle.ns_view.as_ptr().cast::<Object>();
+    if ns_view.is_null() {
+        return Err(NativeTitlebarDragError::MissingView);
+    }
+
+    let ns_window: id = unsafe { msg_send![ns_view, window] };
+    if ns_window == nil {
+        return Err(NativeTitlebarDragError::MissingWindow);
+    }
+
+    let supports_visibility: BOOL =
+        unsafe { msg_send![ns_window, respondsToSelector: sel!(setHidesOnDeactivate:)] };
+    if supports_visibility != YES {
+        return Err(NativeTitlebarDragError::PanelVisibility);
+    }
+
+    // GPUI implements floating windows with NSPanel. AppKit hides panels when
+    // their app resigns active by default and confines them to their launch
+    // Space, which makes xctrace record only the first burst of frames. Keep
+    // this benchmark-only panel composited across focus and Space changes.
+    unsafe {
+        let _: () = msg_send![ns_window, setHidesOnDeactivate: NO];
+        let collection_behavior = NSWindow::collectionBehavior(ns_window)
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary;
+        NSWindow::setCollectionBehavior_(ns_window, collection_behavior);
+        let _: () = msg_send![ns_window, orderFrontRegardless];
+    }
+    Ok(())
 }
 
 pub(crate) fn disable_automatic_content_view_window_drag(
