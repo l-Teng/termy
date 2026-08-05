@@ -24,6 +24,7 @@ pub enum Combining<'a> {
 }
 
 impl Combining<'_> {
+    #[inline]
     pub fn append_to(self, output: &mut String) {
         match self {
             Self::Character(character) => output.push(character),
@@ -229,6 +230,7 @@ impl Attributes {
         *self = self.with_flag(flag, enabled);
     }
 
+    #[inline]
     pub const fn bold(self) -> bool {
         self.contains(Self::BOLD)
     }
@@ -241,6 +243,7 @@ impl Attributes {
         self.with_flag(Self::BOLD, enabled)
     }
 
+    #[inline]
     pub const fn dim(self) -> bool {
         self.contains(Self::DIM)
     }
@@ -253,6 +256,7 @@ impl Attributes {
         self.with_flag(Self::DIM, enabled)
     }
 
+    #[inline]
     pub const fn italic(self) -> bool {
         self.contains(Self::ITALIC)
     }
@@ -265,10 +269,12 @@ impl Attributes {
         self.with_flag(Self::ITALIC, enabled)
     }
 
+    #[inline]
     pub const fn underline(self) -> bool {
         !matches!(self.underline_style(), UnderlineStyle::None)
     }
 
+    #[inline]
     pub const fn underline_style(self) -> UnderlineStyle {
         match (self.0 & Self::UNDERLINE_MASK) >> Self::UNDERLINE_SHIFT {
             1 => UnderlineStyle::Single,
@@ -313,6 +319,7 @@ impl Attributes {
         })
     }
 
+    #[inline]
     pub const fn inverse(self) -> bool {
         self.contains(Self::INVERSE)
     }
@@ -325,6 +332,7 @@ impl Attributes {
         self.with_flag(Self::INVERSE, enabled)
     }
 
+    #[inline]
     pub const fn hidden(self) -> bool {
         self.contains(Self::HIDDEN)
     }
@@ -337,6 +345,7 @@ impl Attributes {
         self.with_flag(Self::HIDDEN, enabled)
     }
 
+    #[inline]
     pub const fn strikethrough(self) -> bool {
         self.contains(Self::STRIKETHROUGH)
     }
@@ -403,26 +412,32 @@ impl Default for Cell {
 }
 
 impl Cell {
+    #[inline]
     pub const fn protected(&self) -> bool {
         self.state.contains(CellState::PROTECTED)
     }
 
+    #[inline]
     pub const fn wide_spacer(&self) -> bool {
         self.state.contains(CellState::WIDE_SPACER)
     }
 
+    #[inline]
     pub const fn leading_wide_spacer(&self) -> bool {
         self.state.contains(CellState::LEADING_WIDE_SPACER)
     }
 
+    #[inline]
     pub const fn wrapped(&self) -> bool {
         self.state.contains(CellState::WRAPPED)
     }
 
+    #[inline]
     pub const fn has_hyperlink(&self) -> bool {
         self.state.contains(CellState::HAS_HYPERLINK)
     }
 
+    #[inline]
     pub const fn has_combining(&self) -> bool {
         self.state.contains(CellState::HAS_COMBINING)
     }

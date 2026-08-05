@@ -1,0 +1,251 @@
+You are a senior Rust performance engineer working in the Termy repository. Improve Tmon’s retained scrollback memory without weakening terminal correctness, compatibility, throughput, or safety.
+
+Repository context
+==================
+
+Termy is a Rust terminal emulator. Tmon is the experimental, dependency-free terminal engine in `crates/temon` (Cargo package name `tmon`). Read the root `CLAUDE.md`, `crates/temon/README.md`, and `crates/temon/PERFORMANCE.md` before editing. Match existing naming, error handling, test style, and comment density.
+
+Do not overwrite unrelated working-tree changes. Before editing, run `git status --short`, inspect every modified file you need to touch, and preserve the user’s edits. At the time this prompt was written, unrelated changes existed in:
+
+- `Cargo.lock`
+- `crates/temon/src/grid/view.rs`
+- `crates/temon/src/tests/terminal.rs`
+
+The relevant benchmark landed in commit `f99e778ebd393ce400df23879bc563720de13191`:
+
+- Harness: `tools/tmon-ghostty-memory/`
+- Manual Actions workflow: `.github/workflows/tmon-ghostty-memory.yml`
+- Local recipe: `GHOSTTY_DIR=../ghostty just benchmark-tmon-ghostty-memory`
+- Successful GitHub Actions run: https://github.com/lassejlv/termy/actions/runs/31000737571
+
+Measured baseline
+=================
+
+The benchmark uses one 120x40 terminal, 10,000 history rows plus the viewport, identical deterministic VT byte streams, ten fresh macOS ARM64 processes per case, and macOS `ri_phys_footprint`. It measures memory before semantic traversal. Cursor, history size, and sampled semantic cells must match Ghostty.
+
+Median final physical footprint from the hosted run:
+
+| Workload | Tmon | Ghostty uncompressed | Ghostty compressed |
+| --- | ---: | ---: | ---: |
+| Plain | 31.56 MiB | 11.67 MiB | 3.54 MiB |
+| Styled | 31.56 MiB | 13.33 MiB | 3.92 MiB |
+| Unicode | 31.56 MiB | 12.67 MiB | 3.30 MiB |
+| Mixed | 31.58 MiB | 13.32 MiB | 4.31 MiB |
+
+Median payload after subtracting each engine’s empty baseline:
+
+| Workload | Tmon | Ghostty uncompressed | Ghostty compressed |
+| --- | ---: | ---: | ---: |
+| Plain | 29.70 MiB | 9.91 MiB | 1.77 MiB |
+| Styled | 29.70 MiB | 11.56 MiB | 2.16 MiB |
+| Unicode | 29.70 MiB | 10.91 MiB | 1.53 MiB |
+| Mixed | 29.72 MiB | 11.55 MiB | 2.55 MiB |
+
+Why Tmon uses this memory
+=========================
+
+Confirm these facts against the current checkout before changing anything:
+
+- `Cell` is 24 bytes and carries character, foreground/background colors, attributes, underline color, state bits, and rare metadata identity (`crates/temon/src/grid.rs`).
+- Live primary and alternate screens use dense `Vec<Vec<Cell>>` rows.
+- Scrollback is `VecDeque<Vec<Cell>>`.
+- `push_history` resizes every history row to the full terminal width before storing it (`crates/temon/src/grid/edit.rs`).
+- At 120 columns and 10,000 history rows, dense cell storage alone is approximately `120 * 10,000 * 24` bytes, explaining the roughly 30 MiB payload.
+- The parser’s transient buffers are not the steady-state memory problem.
+- Existing public and internal consumers assume dense rows or `&[Cell]`, especially line traversal, snapshots, selection/search, persisted output, resize/reflow, and scrollback viewing.
+
+Primary objective
+=================
+
+Reduce Tmon’s retained 10,000-row scrollback memory substantially while preserving exact behavior.
+
+Acceptance targets, in order:
+
+1. Required first milestone: reduce every 10K scrollback payload by at least 40% from the hosted Tmon baseline, with no workload exceeding 20 MiB final footprint on a comparable macOS run.
+2. Preferred uncompressed target: approach Ghostty’s 11–13 MiB final footprint without adding a third-party dependency.
+3. Stretch target: investigate compressed cold-history pages only after the compact uncompressed representation is correct and measured. Do not jump directly to a complex compression subsystem.
+4. Keep empty and full-screen-only footprints effectively unchanged.
+5. Keep Tmon’s parser/grid throughput and snapshot regression gates passing. A memory win that causes a material throughput regression is not complete.
+
+Do not “fix” the benchmark
+==========================
+
+The following are prohibited:
+
+- Do not reduce the 10,000-row workload, terminal dimensions, sample count, payload complexity, or semantic checks.
+- Do not lower Tmon’s configured scrollback limit.
+- Do not change `ri_phys_footprint` to RSS, allocator-request counts, static-size estimates, or another easier metric.
+- Do not special-case benchmark strings or detect the benchmark process.
+- Do not drop styles, underline colors, combining text, hyperlinks, wide-cell roles, wrapping, protection, alternate-screen behavior, reflow, search/selection content, or graphics anchoring.
+- Do not add `unsafe` Rust or a production dependency to `crates/temon`.
+- Do not weaken, delete, ignore, or rewrite failing tests to accept changed behavior.
+- Do not cache a permanently decoded copy of compact history; that would hide the memory rather than remove it.
+- Do not refactor unrelated PTY, parser, renderer, or desktop code.
+
+Recommended implementation direction
+====================================
+
+Use a staged compact-history design. Keep live primary and alternate screens dense for parser and renderer speed. Compact a row only when it leaves the live primary screen and enters scrollback.
+
+Start by introducing one explicit history-row representation owned by the grid, near the current `Grid`/`Cell` definitions. Choose its exact encoding after measuring realistic rows, but it must preserve the full logical row and all `Cell` semantics. A sensible first design to evaluate is:
+
+- Store logical width separately.
+- Omit or run-length encode trailing default cells instead of retaining 120 full `Cell` values.
+- Consider a compact history cell using a small inline codepoint/state record plus row-local or page-local style IDs, with rare metadata retained out of line.
+- Preserve a lossless conversion between compact history cells and public `Cell` values.
+- Keep empty rows extremely cheap.
+- Avoid one heap allocation per default cell or per ordinary character.
+- Reuse row storage where practical, but do not retain dense capacity after encoding.
+
+Do not assume trimming blank tails alone will reach the preferred target. Quantify it on all four benchmark workloads. If it misses badly, add a compact cell/style representation rather than stacking cosmetic container changes.
+
+Introduce a narrow row-view/visitor abstraction rather than spreading `match Dense/Compact` through the codebase. It must support:
+
+- Reading a logical cell by column, returning a default cell for omitted tail positions.
+- Visiting all logical columns without allocating when the caller accepts a visitor.
+- Materializing a temporary dense row only for legacy APIs that require `&[Cell]`.
+- Decoding a history row back to a dense mutable row when resize/reflow or the previous-row wide-cell repair path genuinely needs mutation.
+- Re-encoding immediately after such mutation; do not leave cold history dense.
+
+Migrate the existing history read/write choke points instead of adding a parallel history path:
+
+- History insertion and eviction in `crates/temon/src/grid/edit.rs`.
+- `line`, `for_each_line_cell`, `for_each_line_cell_range`, viewport traversal, hyperlink lookup, and combining lookup in `crates/temon/src/grid/view.rs`.
+- Public wrappers such as `snapshot`, `with_line_cells`, `for_each_line_cell_range`, selection/search, and persisted-buffer extraction in `crates/temon/src/lib.rs` and their callers.
+- Resize and reflow paths that pull rows back from history or rebuild logical lines.
+- History clearing and history-limit shrinking; memory must actually be released.
+
+Correctness invariants and traps
+================================
+
+Preserve all of these explicitly:
+
+1. Wide characters
+   - Keep leading wide characters, tail spacers, and leading spacers coherent.
+   - `clear_leading_wide_spacer_before` may mutate the previous row, including the newest history row.
+   - One-column terminals and width-changing reflow must still make progress.
+
+2. Combining text and rare metadata
+   - Preserve inline and pooled combining text exactly.
+   - Respect existing unique-owner assumptions and metadata IDs.
+   - Do not duplicate or prematurely free pooled extras when encoding, decoding, evicting, or reflowing.
+
+3. Hyperlinks and styles
+   - Preserve OSC 8 identity, hyperlink presence, foreground/background/underline colors, all five underline styles, bold/dim/italic/inverse/hidden/strikethrough, and protected cells.
+   - A visually blank but styled, protected, linked, or combining-bearing cell is not semantically default and cannot be trimmed as an empty tail.
+
+4. Wrapping, tabs, and reflow
+   - Preserve soft-wrap markers, tab cells, cursor continuation behavior, and logical line joining.
+   - Resizing while scrolled and changing rows and columns together must remain differential with the pinned Alacritty behavior.
+
+5. Scrollback and public reads
+   - Preserve `history_size`, `display_offset`, line numbering, line bounds, viewport mapping, snapshots, search, selection, persisted text, and inspector state.
+   - Traversal APIs must observe one coherent terminal lock/state.
+
+6. Damage and rendering
+   - Keep viewport damage and chronological scroll operations unchanged.
+   - History compaction must not force full-frame damage during ordinary live scrolling.
+
+7. Graphics anchors
+   - Preserve line-based Kitty graphics placement through scroll, eviction, resize, reflow, clear, and alternate-screen transitions.
+
+8. Memory release
+   - Lowering the history limit and clearing scrollback must release compact storage and rare metadata.
+   - Repeated fill/clear cycles must not grow retained memory without bound.
+
+Required tests
+==============
+
+Add focused tests following existing test style. At minimum cover:
+
+- Compact-row round trips for all-default, full-width non-default, short text with default tail, one-column, and maximum-width rows.
+- Every `Cell` field and state bit survives encode/decode.
+- Indexed/RGB foreground, background, and underline colors.
+- Single/double/curly/dotted/dashed underline styles.
+- Wide characters at the beginning, middle, and right edge; leading/tail spacer repair across a history boundary.
+- Single and long combining sequences, both with and without hyperlinks.
+- Protected and styled blank cells are not trimmed.
+- History eviction frees associated rare metadata.
+- Clear scrollback and shrink history release rows while keeping the terminal usable.
+- Scrollback traversal, snapshots, search, selection, and persisted text return the same cells/text before and after compaction.
+- Resize/reflow matrices while scrolled, including simultaneous row/column changes and a one-column destination.
+- Primary/alternate screen transitions do not compact or expose the wrong screen.
+- Randomized differential traces continue matching the existing Alacritty-backed fixtures.
+- A regression test demonstrates that a 120x10,000 mostly plain history no longer stores 1.2 million dense 24-byte `Cell` values. Prefer a deterministic internal retained-byte/capacity inspection for this unit test; do not pretend it replaces the process-footprint benchmark.
+
+Verification sequence
+=====================
+
+Run the smallest checks while iterating, then the full relevant gates before declaring success:
+
+```sh
+cargo test -p tmon
+cargo clippy -p tmon --all-targets -- -D warnings
+cargo test -p termy_core
+cargo check -p termy
+just check-boundaries
+```
+
+Run Tmon’s existing performance suite and preserve its correctness preflight and regression gates:
+
+```sh
+just benchmark-tmon
+```
+
+Run the physical-memory comparison against the pinned Ghostty revision:
+
+```sh
+GHOSTTY_DIR=../ghostty just benchmark-tmon-ghostty-memory
+```
+
+For quick iteration, use two samples only, clearly labeled as a smoke run:
+
+```sh
+TMON_GHOSTTY_MEMORY_SAMPLES=2 \
+GHOSTTY_DIR=../ghostty \
+just benchmark-tmon-ghostty-memory
+```
+
+Final evidence requires ten samples and a report containing raw bytes, median, P05/P95, and delta versus empty for all workloads. If GitHub access is available, manually dispatch `.github/workflows/tmon-ghostty-memory.yml` and link the successful run.
+
+Compare against the hosted baseline above. Report absolute final MiB, payload delta, percentage reduction, and any throughput change for every workload. Do not claim success from `size_of`, allocator-request counts, or a two-sample smoke run alone.
+
+Working method
+==============
+
+1. Inspect current code and working-tree changes before editing.
+2. Measure or calculate which allocations dominate; verify the dense history diagnosis.
+3. Write characterization and compact-row round-trip tests first.
+4. Implement the smallest lossless compact-history representation.
+5. Migrate centralized history insertion and read paths.
+6. Handle mutation/reflow by temporary decode and immediate re-encode.
+7. Run correctness and differential tests.
+8. Profile throughput and remove avoidable decode/allocation work from hot read paths.
+9. Run the official memory benchmark and compare to baseline.
+10. Only if the compact uncompressed design is correct, stable, and still materially above target, write a short design note for optional cold-page compression. Do not implement speculative compression in the same change unless explicitly asked.
+
+Stop conditions
+===============
+
+Stop and report findings instead of improvising if:
+
+- Preserving `with_line_cells` or another public API requires a breaking API change.
+- Compacting metadata cannot preserve current ownership/lifetime guarantees without unsafe Rust.
+- The implementation needs a production dependency.
+- Correctness requires touching unrelated PTY/desktop architecture.
+- The 40% memory target cannot be reached without more than a 5% regression in an enforced throughput gate.
+- Existing unrelated working-tree changes conflict with the required files.
+
+Definition of done
+==================
+
+The work is done only when:
+
+- All existing and new correctness tests pass.
+- Clippy passes with `-D warnings`.
+- No feature or semantic field was dropped.
+- The existing Tmon benchmark correctness preflight and regression gates pass.
+- Ten-sample `ri_phys_footprint` results meet the required first milestone for plain, styled, Unicode, and mixed scrollback.
+- The report includes before/after numbers and raw evidence.
+- Documentation in `crates/temon/README.md` and `crates/temon/PERFORMANCE.md` accurately describes the new representation, measured result, tradeoffs, and remaining work.
+- The final response lists changed files, tests run, benchmark run URL or report path, memory reductions, throughput changes, and any unresolved risks.

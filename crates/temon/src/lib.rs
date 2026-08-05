@@ -1090,6 +1090,7 @@ impl Terminal {
         engine.parser.graphics_placements(&engine.grid)
     }
 
+    #[inline]
     pub fn for_each_viewport_cell(
         &self,
         visitor: impl FnMut(usize, i32, usize, &Cell, Option<Combining<'_>>),
@@ -1098,6 +1099,7 @@ impl Terminal {
     }
 
     /// Visit every visible cell and return metadata from the same engine lock.
+    #[inline]
     pub fn visit_viewport_cells(
         &self,
         visitor: impl FnMut(usize, i32, usize, &Cell, Option<Combining<'_>>),
@@ -1114,6 +1116,7 @@ impl Terminal {
     /// Incremental renderers use this for fallback rebuilds. Clearing pending
     /// row permutations under the same lock prevents a freshly rebuilt cache
     /// from replaying those permutations a second time on its next update.
+    #[inline]
     pub fn visit_viewport_cells_and_clear_damage(
         &self,
         visitor: impl FnMut(usize, i32, usize, &Cell, Option<Combining<'_>>),

@@ -492,6 +492,7 @@ impl Grid {
         }
     }
 
+    #[inline]
     pub(crate) fn visit_viewport_cells(
         &self,
         mut visitor: impl FnMut(usize, i32, usize, &Cell, Option<Combining<'_>>),
@@ -499,14 +500,23 @@ impl Grid {
         let offset = self.display_offset();
         let rows = self.rows();
         let cols = self.cols();
-        for row in 0..rows {
-            let term_line = row as i32 - offset as i32;
-            if let Some(line) = self.line(term_line) {
-                line.for_each(|col, cell| {
-                    if col < cols {
-                        visitor(offset, term_line, col, cell, self.combining_text(cell));
-                    }
-                });
+        if offset == 0 {
+            for (row, cells) in self.active().cells.iter().take(rows).enumerate() {
+                let term_line = row as i32;
+                for (col, cell) in cells.iter().take(cols).enumerate() {
+                    visitor(0, term_line, col, cell, self.combining_text(cell));
+                }
+            }
+        } else {
+            for row in 0..rows {
+                let term_line = row as i32 - offset as i32;
+                if let Some(line) = self.line(term_line) {
+                    line.for_each(|col, cell| {
+                        if col < cols {
+                            visitor(offset, term_line, col, cell, self.combining_text(cell));
+                        }
+                    });
+                }
             }
         }
         ViewportMetadata {
@@ -830,6 +840,7 @@ impl Grid {
         }
     }
 
+    #[inline]
     pub(super) fn combining_text(&self, cell: &Cell) -> Option<Combining<'_>> {
         if !cell.has_combining() {
             return None;

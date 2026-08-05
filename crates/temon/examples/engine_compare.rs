@@ -841,18 +841,34 @@ fn run_profile_mode(target_bytes: usize) -> bool {
     let Ok(workload_id) = env::var("TMON_PROFILE_WORKLOAD") else {
         return false;
     };
-    let workload = WORKLOADS
-        .iter()
-        .find(|workload| workload.id == workload_id)
-        .unwrap_or_else(|| {
-            panic!("TMON_PROFILE_WORKLOAD must be plain, styled, unicode, or edits")
-        });
     let engine = match env::var("TMON_PROFILE_ENGINE").as_deref() {
         Ok("alacritty") => Engine::Alacritty,
         Ok("tmon") | Err(_) => Engine::Tmon,
         Ok(other) => panic!("TMON_PROFILE_ENGINE must be tmon or alacritty, got {other:?}"),
     };
     let repetitions = setting("TMON_PROFILE_REPETITIONS", 1, 1, 100);
+    if workload_id == "normalized" {
+        let snapshots = setting("TMON_BENCH_SNAPSHOTS", 250, 10, 10_000);
+        println!(
+            "Profiling {} normalized full-frame construction for {repetitions} repetitions",
+            match engine {
+                Engine::Tmon => "Tmon",
+                Engine::Alacritty => "Alacritty",
+            },
+        );
+        for _ in 0..repetitions {
+            black_box(normalized_snapshot_sample(engine, snapshots));
+        }
+        return true;
+    }
+    let workload = WORKLOADS
+        .iter()
+        .find(|workload| workload.id == workload_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "TMON_PROFILE_WORKLOAD must be plain, styled, unicode, edits, or normalized"
+            )
+        });
     println!(
         "Profiling {} with {} MiB of {} output per repetition",
         match engine {
