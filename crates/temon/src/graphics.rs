@@ -1,7 +1,6 @@
-#[cfg(unix)]
-use std::ffi::{c_int, c_ulong};
 use std::{
-    collections::{HashMap, VecDeque},
+    borrow::Cow,
+    collections::{HashMap, HashSet, VecDeque},
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -11,15 +10,22 @@ use std::{
 use crate::{
     Size, decode_base64,
     grid::{Grid, GridEffect},
+    inflate::{InflateError, OutputLimit, decompress_zlib as inflate_zlib},
 };
 
-const MAX_IMAGE_BYTES: usize = 128 * 1024 * 1024;
-pub(crate) const MAX_COMMAND_BYTES: usize = MAX_IMAGE_BYTES / 3 * 4 + 4096;
+const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_STORED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_STORED_IMAGES: usize = 4096;
+const MAX_PNG_SCANLINE_BYTES: usize = MAX_UPLOAD_BYTES + MAX_DIMENSION as usize * 2;
+pub(crate) const MAX_CONTROL_BYTES: usize = 4096;
+const MAX_CONTROL_FIELDS: usize = 64;
+pub(crate) const MAX_COMMAND_BYTES: usize =
+    MAX_UPLOAD_BYTES.div_ceil(3) * 4 + MAX_CONTROL_BYTES + 1;
 const MAX_DIMENSION: u32 = 32_768;
-const MAX_PIXELS: u64 = (MAX_IMAGE_BYTES / 4) as u64;
+const MAX_PIXELS: u64 = (MAX_UPLOAD_BYTES / 4) as u64;
 const MAX_PLACEMENTS: usize = 4096;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct GraphicsCommand {
     control: Vec<(char, String)>,
     payload: Vec<u8>,
@@ -27,21 +33,45 @@ pub(crate) struct GraphicsCommand {
 }
 
 impl GraphicsCommand {
-    pub(crate) fn parse(bytes: Vec<u8>, oversized: bool) -> Self {
-        let separator = bytes.iter().position(|byte| *byte == b';');
-        let (control, payload) = match separator {
-            Some(index) => (&bytes[..index], bytes[index + 1..].to_vec()),
-            None => (bytes.as_slice(), Vec::new()),
-        };
-        let control = String::from_utf8_lossy(control)
-            .split(',')
+    pub(crate) fn parse(mut bytes: Vec<u8>, oversized: bool) -> Self {
+        // A missing separator must not turn a payload-sized command into a control string.
+        // Inspect one byte past the limit so a separator at the exact boundary is accepted.
+        let separator = bytes[..bytes.len().min(MAX_CONTROL_BYTES + 1)]
+            .iter()
+            .position(|byte| *byte == b';');
+        let control_oversized = separator.is_none() && bytes.len() > MAX_CONTROL_BYTES;
+        let control_end = separator.unwrap_or(bytes.len().min(MAX_CONTROL_BYTES));
+        let field_count = bytes[..control_end]
+            .split(|byte| *byte == b',')
+            .take(MAX_CONTROL_FIELDS + 1)
+            .count();
+        let fields_oversized = field_count > MAX_CONTROL_FIELDS;
+        let control = bytes[..control_end]
+            .split(|byte| *byte == b',')
+            .take(MAX_CONTROL_FIELDS)
             .filter_map(|field| {
-                let (key, value) = field.split_once('=')?;
-                let mut chars = key.chars();
-                let key = chars.next()?;
-                (chars.next().is_none() && key.is_ascii()).then(|| (key, value.to_string()))
+                let (&key, value) = field.split_first()?;
+                let value = value.strip_prefix(b"=")?;
+                if !key.is_ascii() {
+                    return None;
+                }
+                let value = std::str::from_utf8(value).ok()?;
+                Some((char::from(key), value.to_owned()))
             })
             .collect();
+        let oversized = oversized || control_oversized || fields_oversized;
+        let payload = if oversized {
+            // Drop an already-rejected payload with its original allocation instead of
+            // shifting up to MAX_COMMAND_BYTES only for `apply` to discard it.
+            Vec::new()
+        } else if let Some(index) = separator {
+            // Keep the potentially large payload in the parser's allocation. Draining the
+            // small control prefix moves it in place instead of cloning it into another Vec.
+            bytes.drain(..=index);
+            bytes
+        } else {
+            Vec::new()
+        };
         Self {
             control,
             payload,
@@ -76,6 +106,7 @@ struct StoredImage {
     png: Arc<[u8]>,
     width: u32,
     height: u32,
+    number: Option<u32>,
     generation: u64,
 }
 
@@ -100,10 +131,15 @@ struct Placement {
     z_index: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct PendingUpload {
     command: GraphicsCommand,
     decoded: Vec<u8>,
+    context: UploadContext,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UploadContext {
     cursor_col: usize,
     cursor_row: usize,
     history_size: usize,
@@ -210,38 +246,70 @@ impl GraphicsState {
 
     pub(crate) fn apply(
         &mut self,
-        command: GraphicsCommand,
+        mut command: GraphicsCommand,
         grid: &mut Grid,
         size: Size,
     ) -> ApplyResult {
         if command.oversized {
+            command.payload = Vec::new();
             let response_command = self
                 .pending
                 .take()
-                .map_or_else(|| command.clone(), |pending| pending.command);
+                .map_or(command, |pending| pending.command);
             return failure(
                 &response_command,
                 "EFBIG:image command exceeds storage limit",
             );
         }
+        if command.value('i').is_some() && command.value('I').is_some() {
+            command.payload = Vec::new();
+            self.pending = None;
+            return failure(
+                &command,
+                "EINVAL:image id and image number are mutually exclusive",
+            );
+        }
         let action = command.char_value('a').unwrap_or('t');
         if action == 'd' {
+            command.payload = Vec::new();
             return self.delete(&command, grid);
         }
         if action == 'p' {
+            command.payload = Vec::new();
             return self.put(&command, grid, size);
         }
         if !matches!(action, 't' | 'T' | 'q') {
+            command.payload = Vec::new();
             return failure(&command, "EINVAL:unsupported graphics action");
         }
 
-        let decoded = match decode_base64(&command.payload) {
-            Some(decoded) if decoded.len() <= MAX_IMAGE_BYTES => decoded,
+        let encoded = std::mem::take(&mut command.payload);
+        let remaining_capacity = self.pending.as_ref().map_or(MAX_UPLOAD_BYTES, |pending| {
+            MAX_UPLOAD_BYTES.saturating_sub(pending.decoded.len())
+        });
+        // Padding can reduce the exact decoded length by at most two bytes. Reject
+        // larger chunks before allocating their decoded form so a nearly complete
+        // continuation cannot transiently allocate another full upload.
+        if base64_decoded_upper_bound(&encoded) > remaining_capacity.saturating_add(2) {
+            drop(encoded);
+            let response_command = self
+                .pending
+                .take()
+                .map_or(command, |pending| pending.command);
+            return failure(
+                &response_command,
+                "EFBIG:image payload exceeds storage limit",
+            );
+        }
+        let decoded = decode_base64(&encoded);
+        drop(encoded);
+        let mut decoded = match decoded {
+            Some(decoded) if decoded.len() <= remaining_capacity => decoded,
             Some(_) => {
                 let response_command = self
                     .pending
                     .take()
-                    .map_or_else(|| command.clone(), |pending| pending.command);
+                    .map_or(command, |pending| pending.command);
                 return failure(
                     &response_command,
                     "EFBIG:image payload exceeds storage limit",
@@ -251,37 +319,38 @@ impl GraphicsState {
                 let response_command = self
                     .pending
                     .take()
-                    .map_or_else(|| command.clone(), |pending| pending.command);
+                    .map_or(command, |pending| pending.command);
                 return failure(&response_command, "EINVAL:invalid base64 payload");
             }
         };
         let more = command.u32_value('m').unwrap_or(0) == 1;
         if let Some(mut pending) = self.pending.take() {
-            if pending.decoded.len().saturating_add(decoded.len()) > MAX_IMAGE_BYTES {
+            if command
+                .control
+                .iter()
+                .any(|(key, _)| !matches!(key, 'm' | 'q'))
+            {
                 return failure(
                     &pending.command,
-                    "EFBIG:image payload exceeds storage limit",
+                    "EINVAL:continuation contains unsupported control data",
                 );
             }
-            pending.decoded.extend_from_slice(&decoded);
+            pending.decoded.append(&mut decoded);
             if more {
                 self.pending = Some(pending);
                 return ApplyResult::default();
             }
-            let mut first = pending.command.clone();
+            let mut first = pending.command;
             for (key, value) in command.control {
-                if key != 'm' {
+                if key == 'q' {
                     first.control.push((key, value));
                 }
             }
-            let decoded = std::mem::take(&mut pending.decoded);
-            return self.finish_upload(first, decoded, pending, grid);
+            return self.finish_upload(first, pending.decoded, pending.context, grid);
         }
 
         let (cursor_col, cursor_row) = grid.cursor_position();
-        let pending = PendingUpload {
-            command: command.clone(),
-            decoded: Vec::new(),
+        let context = UploadContext {
             cursor_col,
             cursor_row,
             history_size: grid.history_size(),
@@ -289,17 +358,21 @@ impl GraphicsState {
             alternate: grid.alternate_screen_mode(),
         };
         if more {
-            self.pending = Some(PendingUpload { decoded, ..pending });
+            self.pending = Some(PendingUpload {
+                command,
+                decoded,
+                context,
+            });
             return ApplyResult::default();
         }
-        self.finish_upload(command, decoded, pending, grid)
+        self.finish_upload(command, decoded, context, grid)
     }
 
     fn finish_upload(
         &mut self,
         command: GraphicsCommand,
         decoded: Vec<u8>,
-        context: PendingUpload,
+        context: UploadContext,
         grid: &mut Grid,
     ) -> ApplyResult {
         let data = match resolve_transmission_data(&command, decoded) {
@@ -308,13 +381,13 @@ impl GraphicsState {
         };
         let data = match command.char_value('o') {
             None => data,
-            Some('z') => match decompress_zlib(&command, &data) {
+            Some('z') => match decompress_zlib(&command, data) {
                 Ok(data) => data,
                 Err(error) => return failure(&command, &error),
             },
             Some(_) => return failure(&command, "EINVAL:unsupported compression"),
         };
-        let (png, width, height) = match normalize_image(&command, &data) {
+        let (png, width, height) = match normalize_image(&command, data) {
             Ok(image) => image,
             Err(error) => return failure(&command, &error),
         };
@@ -323,6 +396,7 @@ impl GraphicsState {
         }
 
         let requested_id = command.u32_value('i').unwrap_or(0);
+        let image_number = command.u32_value('I').filter(|number| *number != 0);
         let image_id = if requested_id == 0 {
             self.allocate_anonymous_id()
         } else {
@@ -337,6 +411,7 @@ impl GraphicsState {
                 png: Arc::from(png),
                 width,
                 height,
+                number: image_number,
                 generation: self.next_generation,
             },
         );
@@ -369,14 +444,13 @@ impl GraphicsState {
                 advance_cursor_after_placement(grid, cols, rows);
             }
         }
-        success(&command, true)
+        success_for_image(&command, true, image_id)
     }
 
     fn put(&mut self, command: &GraphicsCommand, grid: &mut Grid, size: Size) -> ApplyResult {
-        let image_id = command.u32_value('i').unwrap_or(0);
-        if image_id == 0 || !self.images.contains_key(&image_id) {
+        let Some(image_id) = self.resolve_image_id(command) else {
             return failure(command, "ENOENT:image id not found");
-        }
+        };
         let (cursor_col, cursor_row) = grid.cursor_position();
         match self.add_placement(
             image_id,
@@ -391,7 +465,7 @@ impl GraphicsState {
                 if let Some((cols, rows)) = advance {
                     advance_cursor_after_placement(grid, cols, rows);
                 }
-                success(command, true)
+                success_for_image(command, true, image_id)
             }
             Err(error) => failure(command, &error),
         }
@@ -515,20 +589,37 @@ impl GraphicsState {
         let selector = selector.to_ascii_lowercase();
         let alternate = grid.alternate_screen_mode();
         let before = self.placements.len();
+        let mut affected_images = HashSet::new();
+        let mut resolved_image_id = None;
         match selector {
-            'a' => self
-                .placements
-                .retain(|placement| placement.alternate != alternate),
+            'a' => self.placements.retain(|placement| {
+                let remove = placement.alternate == alternate;
+                if remove {
+                    affected_images.insert(placement.image_id);
+                }
+                !remove
+            }),
             'i' => {
                 let image_id = command.u32_value('i').unwrap_or(0);
                 let placement_id = command.u32_value('p').unwrap_or(0);
+                if image_id != 0 {
+                    affected_images.insert(image_id);
+                    resolved_image_id = Some(image_id);
+                }
                 self.placements.retain(|placement| {
-                    placement.alternate != alternate
-                        || placement.image_id != image_id
+                    placement.image_id != image_id
                         || (placement_id != 0 && placement.placement_id != placement_id)
                 });
-                if free_data && !self.placements.iter().any(|p| p.image_id == image_id) {
-                    self.remove_image(image_id);
+            }
+            'n' => {
+                let placement_id = command.u32_value('p').unwrap_or(0);
+                if let Some(image_id) = self.resolve_image_id(command) {
+                    affected_images.insert(image_id);
+                    resolved_image_id = Some(image_id);
+                    self.placements.retain(|placement| {
+                        placement.image_id != image_id
+                            || (placement_id != 0 && placement.placement_id != placement_id)
+                    });
                 }
             }
             'c' => {
@@ -539,7 +630,12 @@ impl GraphicsState {
                     grid.history_size() as i64 + row as i64
                 };
                 self.placements.retain(|placement| {
-                    placement.alternate != alternate || !placement_contains(placement, line, col)
+                    let remove = placement.alternate == alternate
+                        && placement_contains(placement, line, col);
+                    if remove {
+                        affected_images.insert(placement.image_id);
+                    }
+                    !remove
                 });
             }
             'p' | 'q' => {
@@ -552,21 +648,44 @@ impl GraphicsState {
                     };
                 let z_index = command.i32_value('z');
                 self.placements.retain(|placement| {
-                    placement.alternate != alternate
-                        || !placement_contains(placement, row, col)
-                        || (selector == 'q'
-                            && z_index.is_some_and(|z_index| placement.z_index != z_index))
+                    let remove = placement.alternate == alternate
+                        && placement_contains(placement, row, col)
+                        && (selector != 'q'
+                            || z_index.is_none_or(|z_index| placement.z_index == z_index));
+                    if remove {
+                        affected_images.insert(placement.image_id);
+                    }
+                    !remove
                 });
+            }
+            'r' => {
+                let first = command.u32_value('x').unwrap_or(0);
+                let last = command.u32_value('y').unwrap_or(u32::MAX);
+                if first > last {
+                    return failure(command, "EINVAL:invalid image id range");
+                }
+                affected_images.extend(
+                    self.images
+                        .keys()
+                        .copied()
+                        .filter(|image_id| (first..=last).contains(image_id)),
+                );
+                self.placements
+                    .retain(|placement| !(first..=last).contains(&placement.image_id));
             }
             'x' => {
                 let col = command.u32_value('x').unwrap_or(1).saturating_sub(1) as usize;
                 self.placements.retain(|placement| {
-                    placement.alternate != alternate
-                        || col < placement.col
-                        || col
-                            >= placement
+                    let remove = placement.alternate == alternate
+                        && col >= placement.col
+                        && col
+                            < placement
                                 .col
-                                .saturating_add(placement.occupied_cols as usize)
+                                .saturating_add(placement.occupied_cols as usize);
+                    if remove {
+                        affected_images.insert(placement.image_id);
+                    }
+                    !remove
                 });
             }
             'y' => {
@@ -577,26 +696,46 @@ impl GraphicsState {
                         grid.history_size() as i64
                     };
                 self.placements.retain(|placement| {
-                    placement.alternate != alternate
-                        || row < placement.anchor_line
-                        || row
-                            >= placement
+                    let remove = placement.alternate == alternate
+                        && row >= placement.anchor_line
+                        && row
+                            < placement
                                 .anchor_line
-                                .saturating_add(i64::from(placement.occupied_rows))
+                                .saturating_add(i64::from(placement.occupied_rows));
+                    if remove {
+                        affected_images.insert(placement.image_id);
+                    }
+                    !remove
                 });
             }
             'z' => {
                 let z_index = command.i32_value('z').unwrap_or(0);
                 self.placements.retain(|placement| {
-                    placement.alternate != alternate || placement.z_index != z_index
+                    let remove = placement.alternate == alternate && placement.z_index == z_index;
+                    if remove {
+                        affected_images.insert(placement.image_id);
+                    }
+                    !remove
                 });
             }
             _ => return failure(command, "EINVAL:unsupported delete selector"),
         }
         if free_data {
-            self.drop_unplaced_images();
+            for image_id in affected_images {
+                if !self
+                    .placements
+                    .iter()
+                    .any(|placement| placement.image_id == image_id)
+                {
+                    self.remove_image(image_id);
+                }
+            }
         }
-        success(command, before != self.placements.len())
+        if let Some(image_id) = resolved_image_id {
+            success_for_image(command, before != self.placements.len(), image_id)
+        } else {
+            success(command, before != self.placements.len())
+        }
     }
 
     pub(crate) fn render_placements(&self, grid: &Grid) -> Vec<GraphicsRenderPlacement> {
@@ -769,7 +908,7 @@ impl GraphicsState {
         if self
             .pending
             .as_ref()
-            .is_some_and(|pending| pending.alternate == alternate)
+            .is_some_and(|pending| pending.context.alternate == alternate)
         {
             self.pending = None;
         }
@@ -808,61 +947,59 @@ impl GraphicsState {
         before != self.placements.len()
     }
 
+    fn resolve_image_id(&self, command: &GraphicsCommand) -> Option<u32> {
+        if let Some(image_id) = command.u32_value('i').filter(|image_id| *image_id != 0) {
+            return self.images.contains_key(&image_id).then_some(image_id);
+        }
+        let image_number = command.u32_value('I').filter(|number| *number != 0)?;
+        self.images
+            .iter()
+            .filter(|(_, image)| image.number == Some(image_number))
+            .max_by_key(|(_, image)| image.generation)
+            .map(|(image_id, _)| *image_id)
+    }
+
     fn allocate_anonymous_id(&mut self) -> u32 {
-        if self.next_anonymous_id == 0 {
-            self.next_anonymous_id = u32::MAX;
+        let mut candidate = if self.next_anonymous_id == 0 {
+            u32::MAX
+        } else {
+            self.next_anonymous_id
+        };
+        for _ in 0..=self.images.len() {
+            if !self.images.contains_key(&candidate) {
+                self.next_anonymous_id = previous_image_id(candidate);
+                return candidate;
+            }
+            candidate = previous_image_id(candidate);
         }
-        while self.images.contains_key(&self.next_anonymous_id) {
-            self.next_anonymous_id = self.next_anonymous_id.saturating_sub(1).max(1);
-        }
-        let id = self.next_anonymous_id;
-        self.next_anonymous_id = self.next_anonymous_id.saturating_sub(1).max(1);
-        id
+
+        unreachable!("the bounded image store always has a free image ID")
     }
 
     fn enforce_quota(&mut self, protected: Option<u32>) -> bool {
-        while self.stored_bytes > MAX_IMAGE_BYTES {
-            let Some(candidate) = self.insertion_order.pop_front() else {
-                break;
-            };
-            if protected == Some(candidate)
-                || self
-                    .placements
-                    .iter()
-                    .any(|placement| placement.image_id == candidate)
-            {
-                self.insertion_order.push_back(candidate);
-                if self.insertion_order.iter().all(|id| {
-                    protected == Some(*id)
-                        || self
-                            .placements
-                            .iter()
-                            .any(|placement| placement.image_id == *id)
-                }) {
-                    break;
-                }
-            } else {
-                self.remove_image(candidate);
-            }
+        if self.stored_bytes <= MAX_STORED_IMAGE_BYTES && self.images.len() <= MAX_STORED_IMAGES {
+            return true;
         }
-        self.stored_bytes <= MAX_IMAGE_BYTES
-    }
 
-    fn drop_unplaced_images(&mut self) {
-        let ids = self
-            .images
-            .keys()
+        let placed = self
+            .placements
+            .iter()
+            .map(|placement| placement.image_id)
+            .collect::<HashSet<_>>();
+        let candidates = self
+            .insertion_order
+            .iter()
             .copied()
-            .filter(|id| {
-                !self
-                    .placements
-                    .iter()
-                    .any(|placement| placement.image_id == *id)
-            })
+            .filter(|candidate| protected != Some(*candidate) && !placed.contains(candidate))
             .collect::<Vec<_>>();
-        for id in ids {
-            self.remove_image(id);
+        for candidate in candidates {
+            if self.stored_bytes <= MAX_STORED_IMAGE_BYTES && self.images.len() <= MAX_STORED_IMAGES
+            {
+                break;
+            }
+            self.remove_image(candidate);
         }
+        self.stored_bytes <= MAX_STORED_IMAGE_BYTES && self.images.len() <= MAX_STORED_IMAGES
     }
 
     fn remove_image(&mut self, image_id: u32) {
@@ -872,6 +1009,14 @@ impl GraphicsState {
         self.placements
             .retain(|placement| placement.image_id != image_id);
         self.insertion_order.retain(|id| *id != image_id);
+    }
+}
+
+fn previous_image_id(image_id: u32) -> u32 {
+    if image_id <= 1 {
+        u32::MAX
+    } else {
+        image_id - 1
     }
 }
 
@@ -903,30 +1048,64 @@ fn placement_contains(placement: &Placement, line: i64, col: usize) -> bool {
 }
 
 fn success(command: &GraphicsCommand, changed: bool) -> ApplyResult {
+    success_with_resolved_image(command, changed, None)
+}
+
+fn success_for_image(command: &GraphicsCommand, changed: bool, image_id: u32) -> ApplyResult {
+    success_with_resolved_image(command, changed, Some(image_id))
+}
+
+fn success_with_resolved_image(
+    command: &GraphicsCommand,
+    changed: bool,
+    image_id: Option<u32>,
+) -> ApplyResult {
     ApplyResult {
-        replies: response(command, true, "OK").unwrap_or_default(),
+        replies: response(command, true, "OK", image_id).unwrap_or_default(),
         changed,
     }
 }
 
 fn failure(command: &GraphicsCommand, message: &str) -> ApplyResult {
     ApplyResult {
-        replies: response(command, false, message).unwrap_or_default(),
+        replies: response(command, false, message, None).unwrap_or_default(),
         changed: false,
     }
 }
 
-fn response(command: &GraphicsCommand, successful: bool, message: &str) -> Option<Vec<u8>> {
+fn response(
+    command: &GraphicsCommand,
+    successful: bool,
+    message: &str,
+    resolved_image_id: Option<u32>,
+) -> Option<Vec<u8>> {
     let quiet = command.u32_value('q').unwrap_or(0);
     if (successful && quiet >= 1) || (!successful && quiet >= 2) {
         return None;
     }
-    let image_id = command.u32_value('i').or_else(|| command.u32_value('I'))?;
-    let mut control = format!("i={image_id}");
+    let image_id = resolved_image_id
+        .or_else(|| command.u32_value('i'))
+        .filter(|image_id| *image_id != 0);
+    let image_number = command.u32_value('I').filter(|number| *number != 0);
+    let mut control = match (image_id, image_number) {
+        (Some(image_id), Some(image_number)) => format!("i={image_id},I={image_number}"),
+        (Some(image_id), None) => format!("i={image_id}"),
+        (None, Some(image_number)) => format!("I={image_number}"),
+        (None, None) => return None,
+    };
     if let Some(placement_id) = command.u32_value('p') {
         control.push_str(&format!(",p={placement_id}"));
     }
     Some(format!("\x1b_G{control};{message}\x1b\\").into_bytes())
+}
+
+fn base64_decoded_upper_bound(input: &[u8]) -> usize {
+    input
+        .iter()
+        .filter(|byte| !matches!(byte, b'\r' | b'\n' | b'\t' | b' '))
+        .count()
+        .div_ceil(4)
+        .saturating_mul(3)
 }
 
 fn resolve_transmission_data(
@@ -959,7 +1138,14 @@ fn resolve_transmission_data(
 }
 
 fn read_regular_file(path: &Path, offset: u64, size: Option<u64>) -> Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|_| "ENOENT:unable to open image file".to_string())?;
+    // Reject FIFOs and devices before opening: a child controls this path and a
+    // blocking FIFO open would otherwise stall the parser thread indefinitely.
+    let initial_metadata =
+        std::fs::metadata(path).map_err(|_| "ENOENT:unable to open image file".to_string())?;
+    if !initial_metadata.is_file() {
+        return Err("EINVAL:invalid image file".into());
+    }
+    let mut file = open_image_file(path)?;
     let metadata = file
         .metadata()
         .map_err(|_| "EIO:unable to inspect image file".to_string())?;
@@ -969,7 +1155,7 @@ fn read_regular_file(path: &Path, offset: u64, size: Option<u64>) -> Result<Vec<
     let length = size
         .unwrap_or(metadata.len() - offset)
         .min(metadata.len() - offset);
-    if length > MAX_IMAGE_BYTES as u64 {
+    if length > MAX_UPLOAD_BYTES as u64 {
         return Err("EFBIG:image file exceeds storage limit".into());
     }
     file.seek(SeekFrom::Start(offset))
@@ -979,6 +1165,52 @@ fn read_regular_file(path: &Path, offset: u64, size: Option<u64>) -> Result<Vec<
         .read_to_end(&mut output)
         .map_err(|_| "EIO:unable to read image file".to_string())?;
     Ok(output)
+}
+
+fn open_image_file(path: &Path) -> Result<File, String> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const NONBLOCK: i32 = 0o4000;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    const NONBLOCK: i32 = 0x0004;
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
+
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(NONBLOCK)
+            .open(path)
+            .map_err(|_| "ENOENT:unable to open image file".to_string())
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    File::open(path).map_err(|_| "ENOENT:unable to open image file".to_string())
 }
 
 fn temporary_path_can_be_removed(path: &Path) -> bool {
@@ -1005,1285 +1237,8 @@ fn temporary_path_can_be_removed(path: &Path) -> bool {
     })
 }
 
-fn normalize_image(command: &GraphicsCommand, data: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
-    match command.u32_value('f').unwrap_or(32) {
-        100 => {
-            #[cfg(not(unix))]
-            {
-                let _ = data;
-                Err("ENOTSUP:PNG images are unavailable on this host".into())
-            }
-            #[cfg(unix)]
-            {
-                let (width, height) = validate_png(data)?;
-                Ok((data.to_vec(), width, height))
-            }
-        }
-        format @ (24 | 32) => {
-            let width = command.u32_value('s').unwrap_or(0);
-            let height = command.u32_value('v').unwrap_or(0);
-            let channels = if format == 24 { 3 } else { 4 };
-            let expected = validate_dimensions(width, height, channels)?;
-            if data.len() != expected {
-                return Err("EINVAL:pixel data length does not match dimensions".into());
-            }
-            Ok((
-                encode_png(width, height, channels as u8, data),
-                width,
-                height,
-            ))
-        }
-        _ => Err("EINVAL:unsupported image format".into()),
-    }
-}
-
-fn validate_dimensions(width: u32, height: u32, channels: usize) -> Result<usize, String> {
-    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
-        return Err("EINVAL:invalid image dimensions".into());
-    }
-    let pixels = u64::from(width) * u64::from(height);
-    if pixels > MAX_PIXELS {
-        return Err("EFBIG:image dimensions exceed storage limit".into());
-    }
-    usize::try_from(pixels)
-        .ok()
-        .and_then(|pixels| pixels.checked_mul(channels))
-        .ok_or_else(|| "EFBIG:image dimensions overflow".into())
-}
-
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug)]
-struct PngHeader {
-    width: u32,
-    height: u32,
-    bit_depth: u8,
-    color_type: u8,
-    interlace: u8,
-}
-
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, Default)]
-struct PngPass {
-    row_bytes: usize,
-    rows: usize,
-}
-
-#[cfg(unix)]
-fn validate_png(data: &[u8]) -> Result<(u32, u32), String> {
-    if data.len() < 8 || &data[..8] != b"\x89PNG\r\n\x1a\n" {
-        return Err("EINVAL:invalid PNG image".into());
-    }
-    let mut offset = 8usize;
-    let mut header = None;
-    let mut saw_palette = false;
-    let mut saw_idat = false;
-    let mut idat_ended = false;
-    let mut idat_bytes = 0usize;
-    while offset.checked_add(12).is_some_and(|end| end <= data.len()) {
-        let length = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-        let kind = &data[offset + 4..offset + 8];
-        if !kind.iter().all(u8::is_ascii_alphabetic) || !kind[2].is_ascii_uppercase() {
-            return Err("EINVAL:invalid PNG image".into());
-        }
-        let payload_start = offset + 8;
-        let Some(payload_end) = payload_start.checked_add(length) else {
-            return Err("EINVAL:invalid PNG image".into());
-        };
-        let Some(chunk_end) = payload_end.checked_add(4) else {
-            return Err("EINVAL:invalid PNG image".into());
-        };
-        if chunk_end > data.len() {
-            return Err("EINVAL:invalid PNG image".into());
-        }
-        let expected_crc = u32::from_be_bytes(data[payload_end..chunk_end].try_into().unwrap());
-        if crc32_parts(&[kind, &data[payload_start..payload_end]]) != expected_crc {
-            return Err("EINVAL:invalid PNG image".into());
-        }
-
-        if saw_idat && kind != b"IDAT" {
-            idat_ended = true;
-        }
-        match kind {
-            b"IHDR" if offset == 8 && length == 13 && header.is_none() => {
-                let payload = &data[payload_start..payload_end];
-                let width = u32::from_be_bytes(payload[0..4].try_into().unwrap());
-                let height = u32::from_be_bytes(payload[4..8].try_into().unwrap());
-                if !valid_png_format(payload[8], payload[9])
-                    || payload[10] != 0
-                    || payload[11] != 0
-                    || payload[12] > 1
-                {
-                    return Err("EINVAL:invalid PNG image".into());
-                }
-                validate_dimensions(width, height, 4)?;
-                header = Some(PngHeader {
-                    width,
-                    height,
-                    bit_depth: payload[8],
-                    color_type: payload[9],
-                    interlace: payload[12],
-                });
-            }
-            b"IHDR" => return Err("EINVAL:invalid PNG image".into()),
-            b"PLTE" => {
-                let Some(header) = header else {
-                    return Err("EINVAL:invalid PNG image".into());
-                };
-                if saw_palette
-                    || saw_idat
-                    || matches!(header.color_type, 0 | 4)
-                    || !(3..=768).contains(&length)
-                    || !length.is_multiple_of(3)
-                    || length / 3 > 1usize << header.bit_depth
-                {
-                    return Err("EINVAL:invalid PNG image".into());
-                }
-                saw_palette = true;
-            }
-            b"IDAT" if header.is_some() && !idat_ended => {
-                if header.is_some_and(|header| header.color_type == 3) && !saw_palette {
-                    return Err("EINVAL:invalid PNG image".into());
-                }
-                saw_idat = true;
-                idat_bytes = idat_bytes
-                    .checked_add(length)
-                    .ok_or_else(|| "EFBIG:PNG payload exceeds storage limit".to_string())?;
-            }
-            b"IDAT" => return Err("EINVAL:invalid PNG image".into()),
-            b"IEND" if length == 0 && header.is_some() && saw_idat => {
-                if chunk_end != data.len() {
-                    return Err("EINVAL:invalid PNG image".into());
-                }
-                let header = header.unwrap();
-                if header.color_type == 3 && !saw_palette {
-                    return Err("EINVAL:invalid PNG image".into());
-                }
-                let (expected, passes, pass_count) = png_scanline_layout(header)?;
-                let compressed = concatenate_png_idat(data, idat_bytes)?;
-                let filtered = decompress_png_idat(&compressed, expected)?;
-                validate_png_filters(&filtered, &passes[..pass_count])?;
-                return Ok((header.width, header.height));
-            }
-            b"IEND" => return Err("EINVAL:invalid PNG image".into()),
-            _ if kind[0].is_ascii_uppercase() => {
-                return Err("EINVAL:invalid PNG image".into());
-            }
-            _ => {}
-        }
-        offset = chunk_end;
-    }
-    Err("EINVAL:invalid PNG image".into())
-}
-
-#[cfg(unix)]
-fn png_scanline_layout(header: PngHeader) -> Result<(usize, [PngPass; 7], usize), String> {
-    const ADAM7: [(u64, u64, u64, u64); 7] = [
-        (0, 0, 8, 8),
-        (4, 0, 8, 8),
-        (0, 4, 4, 8),
-        (2, 0, 4, 4),
-        (0, 2, 2, 4),
-        (1, 0, 2, 2),
-        (0, 1, 1, 2),
-    ];
-    const NON_INTERLACED: [(u64, u64, u64, u64); 1] = [(0, 0, 1, 1)];
-
-    let samples = match header.color_type {
-        0 | 3 => 1u64,
-        2 => 3,
-        4 => 2,
-        6 => 4,
-        _ => return Err("EINVAL:invalid PNG image".into()),
-    };
-    let patterns = if header.interlace == 0 {
-        NON_INTERLACED.as_slice()
-    } else {
-        ADAM7.as_slice()
-    };
-    let mut passes = [PngPass::default(); 7];
-    let mut expected = 0u64;
-    let width = u64::from(header.width);
-    let height = u64::from(header.height);
-    for (index, &(start_x, start_y, step_x, step_y)) in patterns.iter().enumerate() {
-        let pass_width = pass_extent(width, start_x, step_x)?;
-        let pass_height = pass_extent(height, start_y, step_y)?;
-        if pass_width == 0 || pass_height == 0 {
-            continue;
-        }
-        let row_bits = pass_width
-            .checked_mul(samples)
-            .and_then(|bits| bits.checked_mul(u64::from(header.bit_depth)))
-            .ok_or_else(|| "EFBIG:PNG dimensions overflow".to_string())?;
-        let row_bytes = row_bits
-            .checked_add(7)
-            .ok_or_else(|| "EFBIG:PNG dimensions overflow".to_string())?
-            / 8;
-        let pass_bytes = row_bytes
-            .checked_add(1)
-            .and_then(|bytes| bytes.checked_mul(pass_height))
-            .ok_or_else(|| "EFBIG:PNG dimensions overflow".to_string())?;
-        expected = expected
-            .checked_add(pass_bytes)
-            .ok_or_else(|| "EFBIG:PNG dimensions overflow".to_string())?;
-        if expected > MAX_IMAGE_BYTES as u64 {
-            return Err("EFBIG:PNG scanlines exceed storage limit".into());
-        }
-        passes[index] = PngPass {
-            row_bytes: usize::try_from(row_bytes)
-                .map_err(|_| "EFBIG:PNG dimensions overflow".to_string())?,
-            rows: usize::try_from(pass_height)
-                .map_err(|_| "EFBIG:PNG dimensions overflow".to_string())?,
-        };
-    }
-    let expected =
-        usize::try_from(expected).map_err(|_| "EFBIG:PNG dimensions overflow".to_string())?;
-    Ok((expected, passes, patterns.len()))
-}
-
-#[cfg(unix)]
-fn pass_extent(total: u64, start: u64, step: u64) -> Result<u64, String> {
-    if total <= start {
-        return Ok(0);
-    }
-    total
-        .checked_sub(start)
-        .and_then(|remaining| remaining.checked_add(step - 1))
-        .map(|remaining| remaining / step)
-        .ok_or_else(|| "EFBIG:PNG dimensions overflow".into())
-}
-
-#[cfg(unix)]
-fn concatenate_png_idat(data: &[u8], total: usize) -> Result<Vec<u8>, String> {
-    let mut compressed = Vec::new();
-    compressed
-        .try_reserve_exact(total)
-        .map_err(|_| "ENOMEM:unable to validate PNG image".to_string())?;
-    let mut offset = 8usize;
-    while offset + 12 <= data.len() {
-        let length = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-        let payload_start = offset + 8;
-        let payload_end = payload_start + length;
-        if &data[offset + 4..offset + 8] == b"IDAT" {
-            compressed.extend_from_slice(&data[payload_start..payload_end]);
-        }
-        offset = payload_end + 4;
-    }
-    if compressed.len() != total {
-        return Err("EINVAL:invalid PNG image".into());
-    }
-    Ok(compressed)
-}
-
-#[cfg(unix)]
-fn decompress_png_idat(compressed: &[u8], expected: usize) -> Result<Vec<u8>, String> {
-    const Z_OK: c_int = 0;
-
-    let mut filtered = Vec::new();
-    filtered
-        .try_reserve_exact(expected)
-        .map_err(|_| "ENOMEM:unable to validate PNG image".to_string())?;
-    filtered.resize(expected, 0);
-    let mut destination_length = c_ulong::try_from(expected)
-        .map_err(|_| "EFBIG:PNG scanlines exceed storage limit".to_string())?;
-    let mut source_length = c_ulong::try_from(compressed.len())
-        .map_err(|_| "EFBIG:PNG payload exceeds storage limit".to_string())?;
-    // SAFETY: both vectors remain allocated for the call. The destination has exactly
-    // `destination_length` writable bytes and libz only reads up to `source_length` bytes.
-    let status = unsafe {
-        uncompress2(
-            filtered.as_mut_ptr(),
-            &mut destination_length,
-            compressed.as_ptr(),
-            &mut source_length,
-        )
-    };
-    if status != Z_OK
-        || destination_length as usize != expected
-        || source_length as usize != compressed.len()
-    {
-        return Err("EINVAL:invalid PNG image".into());
-    }
-    Ok(filtered)
-}
-
-#[cfg(unix)]
-fn validate_png_filters(filtered: &[u8], passes: &[PngPass]) -> Result<(), String> {
-    let mut offset = 0usize;
-    for pass in passes {
-        let scanline_bytes = pass
-            .row_bytes
-            .checked_add(1)
-            .ok_or_else(|| "EFBIG:PNG dimensions overflow".to_string())?;
-        for _ in 0..pass.rows {
-            if filtered.get(offset).is_none_or(|filter| *filter > 4) {
-                return Err("EINVAL:invalid PNG image".into());
-            }
-            offset = offset
-                .checked_add(scanline_bytes)
-                .ok_or_else(|| "EFBIG:PNG dimensions overflow".to_string())?;
-        }
-    }
-    if offset != filtered.len() {
-        return Err("EINVAL:invalid PNG image".into());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn valid_png_format(bit_depth: u8, color_type: u8) -> bool {
-    match color_type {
-        0 => matches!(bit_depth, 1 | 2 | 4 | 8 | 16),
-        2 => matches!(bit_depth, 8 | 16),
-        3 => matches!(bit_depth, 1 | 2 | 4 | 8),
-        4 | 6 => matches!(bit_depth, 8 | 16),
-        _ => false,
-    }
-}
-
-fn encode_png(width: u32, height: u32, channels: u8, pixels: &[u8]) -> Vec<u8> {
-    let row_bytes = width as usize * usize::from(channels);
-    let mut filtered = Vec::with_capacity(pixels.len().saturating_add(height as usize));
-    for row in pixels.chunks_exact(row_bytes) {
-        filtered.push(0);
-        filtered.extend_from_slice(row);
-    }
-    let compressed = zlib_store(&filtered);
-    let mut png = Vec::with_capacity(compressed.len().saturating_add(64));
-    png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let mut header = Vec::with_capacity(13);
-    header.extend_from_slice(&width.to_be_bytes());
-    header.extend_from_slice(&height.to_be_bytes());
-    header.push(8);
-    header.push(if channels == 3 { 2 } else { 6 });
-    header.extend_from_slice(&[0, 0, 0]);
-    push_png_chunk(&mut png, *b"IHDR", &header);
-    push_png_chunk(&mut png, *b"IDAT", &compressed);
-    push_png_chunk(&mut png, *b"IEND", &[]);
-    png
-}
-
-fn zlib_store(data: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(data.len().saturating_add(data.len() / 65_535 * 5 + 8));
-    output.extend_from_slice(&[0x78, 0x01]);
-    if data.is_empty() {
-        output.extend_from_slice(&[1, 0, 0, 0xff, 0xff]);
-    } else {
-        let chunks = data.chunks(65_535);
-        let count = chunks.len();
-        for (index, chunk) in chunks.enumerate() {
-            output.push(u8::from(index + 1 == count));
-            let length = chunk.len() as u16;
-            output.extend_from_slice(&length.to_le_bytes());
-            output.extend_from_slice(&(!length).to_le_bytes());
-            output.extend_from_slice(chunk);
-        }
-    }
-    output.extend_from_slice(&adler32(data).to_be_bytes());
-    output
-}
-
-fn push_png_chunk(output: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
-    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    output.extend_from_slice(&kind);
-    output.extend_from_slice(data);
-    output.extend_from_slice(&crc32_parts(&[&kind, data]).to_be_bytes());
-}
-
-fn crc32_parts(parts: &[&[u8]]) -> u32 {
-    let mut crc = u32::MAX;
-    for data in parts {
-        for byte in *data {
-            crc ^= u32::from(*byte);
-            for _ in 0..8 {
-                crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
-            }
-        }
-    }
-    !crc
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let mut a = 1u32;
-    let mut b = 0u32;
-    for byte in data {
-        a = (a + u32::from(*byte)) % 65_521;
-        b = (b + a) % 65_521;
-    }
-    (b << 16) | a
-}
-
-#[cfg(unix)]
-#[link(name = "z")]
-unsafe extern "C" {
-    fn uncompress(
-        destination: *mut u8,
-        destination_length: *mut c_ulong,
-        source: *const u8,
-        source_length: c_ulong,
-    ) -> c_int;
-
-    fn uncompress2(
-        destination: *mut u8,
-        destination_length: *mut c_ulong,
-        source: *const u8,
-        source_length: *mut c_ulong,
-    ) -> c_int;
-}
-
-fn decompress_zlib(command: &GraphicsCommand, data: &[u8]) -> Result<Vec<u8>, String> {
-    #[cfg(not(unix))]
-    {
-        let _ = command;
-        let _ = data;
-        return Err("ENOTSUP:zlib compression is unavailable on this host".into());
-    }
-    #[cfg(unix)]
-    {
-        const Z_OK: c_int = 0;
-        const Z_BUF_ERROR: c_int = -5;
-        let expected =
-            match command.u32_value('f').unwrap_or(32) {
-                format @ (24 | 32) => command.u32_value('s').zip(command.u32_value('v')).and_then(
-                    |(width, height)| {
-                        validate_dimensions(width, height, if format == 24 { 3 } else { 4 }).ok()
-                    },
-                ),
-                _ => None,
-            };
-        let mut capacity = expected.unwrap_or_else(|| data.len().saturating_mul(4).max(4096));
-        loop {
-            capacity = capacity.min(MAX_IMAGE_BYTES);
-            let mut output = vec![0u8; capacity];
-            let mut length = capacity as c_ulong;
-            // SAFETY: both buffers are valid for the lengths passed and libz only writes to
-            // the destination buffer. The output is truncated to libz's reported length.
-            let status = unsafe {
-                uncompress(
-                    output.as_mut_ptr(),
-                    &mut length,
-                    data.as_ptr(),
-                    data.len() as c_ulong,
-                )
-            };
-            if status == Z_OK {
-                output.truncate(length as usize);
-                return Ok(output);
-            }
-            if status != Z_BUF_ERROR || capacity == MAX_IMAGE_BYTES {
-                return Err("EINVAL:invalid zlib payload".into());
-            }
-            capacity = capacity.saturating_mul(2).min(MAX_IMAGE_BYTES);
-        }
-    }
-}
+include!("graphics/image.rs");
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::CursorStyle;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    struct TestTempPath {
-        path: PathBuf,
-    }
-
-    impl TestTempPath {
-        fn new() -> Self {
-            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-            loop {
-                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                let path = std::env::temp_dir().join(format!(
-                    "termy-temon-graphics-test-{}-{id}",
-                    std::process::id()
-                ));
-                match std::fs::create_dir(&path) {
-                    Ok(()) => return Self { path },
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(error) => panic!("failed to create test temp path: {error}"),
-                }
-            }
-        }
-
-        fn file(&self, name: &str, contents: &[u8]) -> PathBuf {
-            let path = self.path.join(name);
-            std::fs::write(&path, contents).unwrap();
-            path
-        }
-    }
-
-    impl Drop for TestTempPath {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-
-    fn test_size() -> Size {
-        Size {
-            cols: 80,
-            rows: 24,
-            cell_width: 10.0,
-            cell_height: 20.0,
-        }
-    }
-
-    fn encode_base64(input: &[u8]) -> String {
-        const TABLE: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut output = String::new();
-        for chunk in input.chunks(3) {
-            let value = (u32::from(chunk[0]) << 16)
-                | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-                | u32::from(*chunk.get(2).unwrap_or(&0));
-            output.push(TABLE[((value >> 18) & 63) as usize] as char);
-            output.push(TABLE[((value >> 12) & 63) as usize] as char);
-            output.push(if chunk.len() > 1 {
-                TABLE[((value >> 6) & 63) as usize] as char
-            } else {
-                '='
-            });
-            output.push(if chunk.len() > 2 {
-                TABLE[(value & 63) as usize] as char
-            } else {
-                '='
-            });
-        }
-        output
-    }
-
-    fn command(control: &str, payload: &[u8]) -> GraphicsCommand {
-        GraphicsCommand::parse(
-            format!("{control};{}", encode_base64(payload)).into_bytes(),
-            false,
-        )
-    }
-
-    #[cfg(unix)]
-    fn png_document(
-        width: u32,
-        height: u32,
-        bit_depth: u8,
-        color_type: u8,
-        interlace: u8,
-        chunks: Vec<([u8; 4], Vec<u8>)>,
-    ) -> Vec<u8> {
-        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        let mut header = Vec::with_capacity(13);
-        header.extend_from_slice(&width.to_be_bytes());
-        header.extend_from_slice(&height.to_be_bytes());
-        header.extend_from_slice(&[bit_depth, color_type, 0, 0, interlace]);
-        push_png_chunk(&mut png, *b"IHDR", &header);
-        for (kind, payload) in chunks {
-            push_png_chunk(&mut png, kind, &payload);
-        }
-        push_png_chunk(&mut png, *b"IEND", &[]);
-        png
-    }
-
-    #[cfg(unix)]
-    fn png_with_filtered_data(
-        width: u32,
-        height: u32,
-        bit_depth: u8,
-        color_type: u8,
-        interlace: u8,
-        filtered: &[u8],
-    ) -> Vec<u8> {
-        png_document(
-            width,
-            height,
-            bit_depth,
-            color_type,
-            interlace,
-            vec![(*b"IDAT", zlib_store(filtered))],
-        )
-    }
-
-    fn path_bytes(path: &Path) -> Vec<u8> {
-        path.to_str()
-            .expect("test temp path should be UTF-8")
-            .as_bytes()
-            .to_vec()
-    }
-
-    fn upload_one_pixel(state: &mut GraphicsState, grid: &mut Grid, image_id: u32) {
-        let result = state.apply(
-            command(
-                &format!("a=t,f=32,s=1,v=1,i={image_id},q=1"),
-                &[255, 0, 0, 255],
-            ),
-            grid,
-            test_size(),
-        );
-        assert!(result.changed);
-    }
-
-    #[test]
-    fn raw_rgba_upload_encodes_png_and_places_at_cursor() {
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(80, 24, 100, CursorStyle::Block);
-        grid.set_cursor_position(5, 4);
-        let payload = encode_base64(&[255, 0, 0, 255]);
-        let command = GraphicsCommand::parse(
-            format!("a=T,f=32,s=1,v=1,i=42,c=2,r=3;{payload}").into_bytes(),
-            false,
-        );
-        let result = state.apply(command, &mut grid, test_size());
-
-        assert!(result.changed);
-        assert_eq!(result.replies, b"\x1b_Gi=42;OK\x1b\\");
-        let placements = state.render_placements(&grid);
-        assert_eq!(placements.len(), 1);
-        assert!(placements[0].png.starts_with(b"\x89PNG"));
-        assert_eq!((placements[0].viewport_row, placements[0].col), (5, 4));
-    }
-
-    #[test]
-    fn continuation_failures_reply_with_the_original_image_id() {
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(80, 24, 100, CursorStyle::Block);
-        let first = GraphicsCommand::parse(b"a=t,f=32,s=1,v=1,i=7,m=1;AQI=".to_vec(), false);
-        assert!(
-            state
-                .apply(first, &mut grid, test_size())
-                .replies
-                .is_empty()
-        );
-
-        let malformed = GraphicsCommand::parse(b"m=0;!".to_vec(), false);
-        assert_eq!(
-            state.apply(malformed, &mut grid, test_size()).replies,
-            b"\x1b_Gi=7;EINVAL:invalid base64 payload\x1b\\"
-        );
-
-        let first = GraphicsCommand::parse(b"a=t,f=32,s=1,v=1,i=8,m=1;AQI=".to_vec(), false);
-        assert!(
-            state
-                .apply(first, &mut grid, test_size())
-                .replies
-                .is_empty()
-        );
-        let oversized = GraphicsCommand::parse(b"m=0".to_vec(), true);
-        assert_eq!(
-            state.apply(oversized, &mut grid, test_size()).replies,
-            b"\x1b_Gi=8;EFBIG:image command exceeds storage limit\x1b\\"
-        );
-    }
-
-    #[test]
-    fn chunked_placement_does_not_advance_a_different_screen() {
-        let size = Size {
-            cols: 8,
-            rows: 4,
-            ..Size::default()
-        };
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(size.cols, size.rows, 100, CursorStyle::Block);
-        grid.set_cursor_position(1, 2);
-        let first =
-            GraphicsCommand::parse(b"a=T,f=32,s=1,v=1,i=7,c=2,r=1,m=1,q=1;AQI=".to_vec(), false);
-        assert!(!state.apply(first, &mut grid, size).changed);
-
-        grid.set_mode(true, 1049, true);
-        let alternate_cursor = grid.cursor_position();
-        let final_chunk = GraphicsCommand::parse(b"m=0;A/8=".to_vec(), false);
-        assert!(state.apply(final_chunk, &mut grid, size).changed);
-        assert_eq!(grid.cursor_position(), alternate_cursor);
-
-        grid.set_mode(true, 1049, false);
-        let placements = state.render_placements(&grid);
-        assert_eq!(placements.len(), 1);
-        assert_eq!((placements[0].viewport_row, placements[0].col), (1, 2));
-    }
-
-    #[test]
-    fn terminal_reset_clears_placements_but_keeps_image_data() {
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(80, 24, 100, CursorStyle::Block);
-        upload_one_pixel(&mut state, &mut grid, 7);
-        let placed = state.apply(command("a=p,i=7,C=1,q=1", &[]), &mut grid, test_size());
-        assert!(placed.changed);
-        assert_eq!(state.render_placements(&grid).len(), 1);
-
-        assert!(state.apply_grid_effect(GridEffect::Reset));
-        assert!(state.render_placements(&grid).is_empty());
-        assert!(state.images.contains_key(&7));
-
-        let reused = state.apply(command("a=p,i=7,C=1,q=1", &[]), &mut grid, test_size());
-        assert!(reused.changed);
-        assert_eq!(state.render_placements(&grid).len(), 1);
-    }
-
-    #[test]
-    fn partial_top_region_scroll_keeps_footer_placement_fixed() {
-        let size = Size {
-            cols: 8,
-            rows: 4,
-            ..Size::default()
-        };
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(size.cols, size.rows, 100, CursorStyle::Block);
-        grid.set_cursor_position(3, 0);
-        let placed = state.apply(
-            command("a=T,f=32,s=1,v=1,i=9,C=1,q=1", &[1, 2, 3, 255]),
-            &mut grid,
-            size,
-        );
-        assert!(placed.changed);
-        assert_eq!(state.render_placements(&grid)[0].viewport_row, 3);
-
-        grid.set_scroll_region(0, 2);
-        grid.set_cursor_position(2, 0);
-        grid.line_feed();
-        while let Some(effect) = grid.pop_effect() {
-            state.apply_grid_effect(effect);
-        }
-
-        assert_eq!(grid.history_size(), 1);
-        assert_eq!(state.render_placements(&grid)[0].viewport_row, 3);
-    }
-
-    #[test]
-    fn post_placement_cursor_advance_does_not_scroll_partial_region() {
-        let size = Size {
-            cols: 8,
-            rows: 4,
-            ..Size::default()
-        };
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(size.cols, size.rows, 0, CursorStyle::Block);
-        grid.set_cursor_position(1, 0);
-        grid.put_char('A');
-        grid.set_cursor_position(2, 0);
-        grid.put_char('B');
-        grid.set_scroll_region(1, 2);
-        grid.set_cursor_position(2, 0);
-        let cells_before = grid.snapshot().cells;
-
-        let result = state.apply(
-            command("a=T,f=32,s=1,v=1,i=82,c=2,r=3,q=1", &[1, 2, 3, 255]),
-            &mut grid,
-            size,
-        );
-
-        assert!(result.changed);
-        assert_eq!(grid.snapshot().cells, cells_before);
-        assert_eq!(grid.cursor_position(), (2, 3));
-        while let Some(effect) = grid.pop_effect() {
-            state.apply_grid_effect(effect);
-        }
-        let placements = state.render_placements(&grid);
-        assert_eq!(placements.len(), 1);
-        assert_eq!(placements[0].image_id, 82);
-        assert_eq!(placements[0].viewport_row, 2);
-    }
-
-    #[test]
-    fn column_resize_preserves_placements_and_clips_them_at_render_time() {
-        let size = Size {
-            cols: 8,
-            rows: 4,
-            ..Size::default()
-        };
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(size.cols, size.rows, 8, CursorStyle::Block);
-        grid.set_cursor_position(1, 6);
-        let result = state.apply(
-            command("a=T,f=32,s=1,v=1,i=83,c=2,r=1,C=1,q=1", &[1, 2, 3, 255]),
-            &mut grid,
-            size,
-        );
-        assert!(result.changed);
-        let initial = state.render_placements(&grid);
-        assert_eq!(initial.len(), 1);
-        let serial = initial[0].placement_serial;
-        let anchor_line = state.placements[0].anchor_line;
-
-        grid.resize(4, 4);
-        while let Some(effect) = grid.pop_effect() {
-            assert!(!state.apply_grid_effect(effect));
-        }
-
-        assert_eq!(state.placements.len(), 1);
-        assert_eq!(state.placements[0].anchor_line, anchor_line);
-        assert!(state.render_placements(&grid).is_empty());
-
-        grid.resize(8, 4);
-        while let Some(effect) = grid.pop_effect() {
-            assert!(!state.apply_grid_effect(effect));
-        }
-        let restored = state.render_placements(&grid);
-        assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].placement_serial, serial);
-        assert_eq!((restored[0].viewport_row, restored[0].col), (1, 6));
-    }
-
-    #[test]
-    fn column_resize_preserves_an_in_progress_chunked_upload() {
-        let size = Size {
-            cols: 8,
-            rows: 4,
-            ..Size::default()
-        };
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(size.cols, size.rows, 8, CursorStyle::Block);
-        grid.set_cursor_position(2, 3);
-
-        let first = state.apply(
-            command("a=T,f=32,s=1,v=1,i=84,c=1,r=1,C=1,m=1,q=1", &[1, 2]),
-            &mut grid,
-            size,
-        );
-        assert!(!first.changed);
-        assert!(state.pending.is_some());
-
-        grid.resize(4, 4);
-        while let Some(effect) = grid.pop_effect() {
-            assert!(!state.apply_grid_effect(effect));
-        }
-        assert!(state.pending.is_some());
-
-        let second = state.apply(
-            command("m=0,q=1", &[3, 255]),
-            &mut grid,
-            Size { cols: 4, ..size },
-        );
-        assert!(second.changed);
-        let placements = state.render_placements(&grid);
-        assert_eq!(placements.len(), 1);
-        assert_eq!(placements[0].image_id, 84);
-        assert_eq!((placements[0].viewport_row, placements[0].col), (2, 3));
-    }
-
-    #[test]
-    fn explicit_dimensions_keep_full_occupancy_past_the_right_edge() {
-        let size = Size {
-            cols: 8,
-            rows: 4,
-            cell_width: 1.0,
-            cell_height: 1.0,
-        };
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(size.cols, size.rows, 0, CursorStyle::Block);
-        let upload = state.apply(
-            command("a=t,f=32,s=4,v=1,i=85,q=1", &[255; 16]),
-            &mut grid,
-            size,
-        );
-        assert!(upload.changed);
-
-        grid.set_cursor_position(1, 6);
-        let placed = state.apply(
-            command("a=p,i=85,p=1,c=5,r=2,z=7,C=1,q=1", &[]),
-            &mut grid,
-            size,
-        );
-        assert!(placed.changed);
-        let placement = &state.render_placements(&grid)[0];
-        assert_eq!(placement.display_cols, Some(5));
-        assert_eq!(placement.occupied_cols, 5);
-        assert!(placement_contains(&state.placements[0], 1, 10));
-
-        let point_delete = state.apply(command("a=d,d=q,x=11,y=2,z=7,q=1", &[]), &mut grid, size);
-        assert!(point_delete.changed);
-        assert!(state.placements.is_empty());
-
-        state.apply(
-            command("a=p,i=85,p=2,c=5,r=2,C=1,q=1", &[]),
-            &mut grid,
-            size,
-        );
-        let column_delete = state.apply(command("a=d,d=x,x=11,q=1", &[]), &mut grid, size);
-        assert!(column_delete.changed);
-        assert!(state.placements.is_empty());
-
-        state.apply(command("a=p,i=85,p=3,r=3,C=1,q=1", &[]), &mut grid, size);
-        let row_sized = &state.render_placements(&grid)[0];
-        assert_eq!(row_sized.display_cols, Some(12));
-        assert_eq!(row_sized.occupied_cols, 12);
-    }
-
-    #[test]
-    fn natural_size_placement_still_truncates_at_the_right_edge() {
-        let size = Size {
-            cols: 8,
-            rows: 4,
-            cell_width: 1.0,
-            cell_height: 1.0,
-        };
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(size.cols, size.rows, 0, CursorStyle::Block);
-        state.apply(
-            command("a=t,f=32,s=4,v=1,i=86,q=1", &[255; 16]),
-            &mut grid,
-            size,
-        );
-        grid.set_cursor_position(1, 6);
-
-        let placed = state.apply(command("a=p,i=86,p=1,C=1,q=1", &[]), &mut grid, size);
-
-        assert!(placed.changed);
-        let placement = &state.render_placements(&grid)[0];
-        assert_eq!(placement.source_width, 2);
-        assert_eq!(placement.display_cols, Some(2));
-        assert_eq!(placement.occupied_cols, 2);
-        assert!(!placement_contains(&state.placements[0], 1, 8));
-    }
-
-    #[test]
-    fn rejects_truncated_and_crc_corrupted_png_payloads() {
-        let png = encode_png(1, 1, 4, &[255, 0, 0, 255]);
-        for invalid in [png[..png.len() - 5].to_vec(), {
-            let mut corrupted = png.clone();
-            corrupted[29] ^= 1;
-            corrupted
-        }] {
-            let payload = encode_base64(&invalid);
-            let mut state = GraphicsState::default();
-            let mut grid = Grid::new(80, 24, 0, CursorStyle::Block);
-            let result = state.apply(
-                GraphicsCommand::parse(format!("a=T,f=100,i=9;{payload}").into_bytes(), false),
-                &mut grid,
-                Size::default(),
-            );
-            assert!(!result.changed);
-            assert_eq!(result.replies, b"\x1b_Gi=9;EINVAL:invalid PNG image\x1b\\");
-            assert!(state.render_placements(&grid).is_empty());
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_crc_valid_corrupt_idat_and_wrong_inflated_lengths() {
-        let corrupt = png_document(1, 1, 8, 6, 0, vec![(*b"IDAT", vec![0x78, 0x01, 0xff])]);
-        assert!(validate_png(&corrupt).is_err());
-
-        let short = png_with_filtered_data(1, 1, 8, 6, 0, &[0, 0, 0, 0]);
-        let long = png_with_filtered_data(1, 1, 8, 6, 0, &[0, 0, 0, 0, 0, 0]);
-        assert!(validate_png(&short).is_err());
-        assert!(validate_png(&long).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_invalid_png_scanline_filter() {
-        let png = png_with_filtered_data(1, 1, 8, 6, 0, &[5, 0, 0, 0, 0]);
-        assert!(validate_png(&png).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn accepts_consecutive_split_idat_but_rejects_interrupted_idat() {
-        let compressed = zlib_store(&[0, 1, 2, 3, 4]);
-        let split = compressed.len() / 2;
-        let first = compressed[..split].to_vec();
-        let second = compressed[split..].to_vec();
-        let consecutive = png_document(
-            1,
-            1,
-            8,
-            6,
-            0,
-            vec![(*b"IDAT", first.clone()), (*b"IDAT", second.clone())],
-        );
-        assert_eq!(validate_png(&consecutive).unwrap(), (1, 1));
-
-        let interrupted = png_document(
-            1,
-            1,
-            8,
-            6,
-            0,
-            vec![
-                (*b"IDAT", first),
-                (*b"tEXt", b"metadata".to_vec()),
-                (*b"IDAT", second),
-            ],
-        );
-        assert!(validate_png(&interrupted).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn enforces_indexed_palette_rules() {
-        let compressed = zlib_store(&[0, 0]);
-        let missing = png_document(1, 1, 1, 3, 0, vec![(*b"IDAT", compressed.clone())]);
-        assert!(validate_png(&missing).is_err());
-
-        let valid = png_document(
-            1,
-            1,
-            1,
-            3,
-            0,
-            vec![(*b"PLTE", vec![0, 0, 0]), (*b"IDAT", compressed.clone())],
-        );
-        assert_eq!(validate_png(&valid).unwrap(), (1, 1));
-
-        let too_many_entries = png_document(
-            1,
-            1,
-            1,
-            3,
-            0,
-            vec![(*b"PLTE", vec![0; 9]), (*b"IDAT", compressed)],
-        );
-        assert!(validate_png(&too_many_entries).is_err());
-
-        for color_type in [0, 4] {
-            let filtered = if color_type == 0 {
-                vec![0, 0]
-            } else {
-                vec![0, 0, 0]
-            };
-            let forbidden = png_document(
-                1,
-                1,
-                8,
-                color_type,
-                0,
-                vec![(*b"PLTE", vec![0, 0, 0]), (*b"IDAT", zlib_store(&filtered))],
-            );
-            assert!(validate_png(&forbidden).is_err());
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_unknown_critical_chunks_but_allows_ancillary_chunks() {
-        let compressed = zlib_store(&[0, 0, 0, 0, 0]);
-        let critical = png_document(
-            1,
-            1,
-            8,
-            6,
-            0,
-            vec![(*b"ABCD", Vec::new()), (*b"IDAT", compressed.clone())],
-        );
-        assert!(validate_png(&critical).is_err());
-
-        let ancillary = png_document(
-            1,
-            1,
-            8,
-            6,
-            0,
-            vec![(*b"abCd", b"metadata".to_vec()), (*b"IDAT", compressed)],
-        );
-        assert_eq!(validate_png(&ancillary).unwrap(), (1, 1));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_invalid_chunk_names_and_reserved_bits() {
-        let compressed = zlib_store(&[0, 0, 0, 0, 0]);
-        for kind in [*b"abcd", *b"a1Cd"] {
-            let png = png_document(
-                1,
-                1,
-                8,
-                6,
-                0,
-                vec![(kind, Vec::new()), (*b"IDAT", compressed.clone())],
-            );
-            assert!(validate_png(&png).is_err());
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn validates_adam7_edge_dimensions_and_pass_layout() {
-        let one_pixel = png_with_filtered_data(1, 1, 8, 6, 1, &[0, 0, 0, 0, 0]);
-        assert_eq!(validate_png(&one_pixel).unwrap(), (1, 1));
-
-        // A 5x5 RGBA8 Adam7 image has 11 scanlines across all seven passes:
-        // 100 pixel bytes plus 11 filter bytes.
-        let filtered = vec![0; 111];
-        let complete = png_with_filtered_data(5, 5, 8, 6, 1, &filtered);
-        assert_eq!(validate_png(&complete).unwrap(), (5, 5));
-
-        let short = png_with_filtered_data(5, 5, 8, 6, 1, &filtered[..110]);
-        assert!(validate_png(&short).is_err());
-
-        let mut invalid_late_filter = filtered;
-        invalid_late_filter[90] = 5;
-        let invalid = png_with_filtered_data(5, 5, 8, 6, 1, &invalid_late_filter);
-        assert!(validate_png(&invalid).is_err());
-    }
-
-    #[test]
-    fn assembles_chunked_and_zlib_compressed_uploads() {
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(80, 24, 0, CursorStyle::Block);
-        let pixels = [12, 34, 56, 255];
-
-        let first = state.apply(
-            command("a=T,f=32,s=1,v=1,i=20,m=1,q=1", &pixels[..2]),
-            &mut grid,
-            test_size(),
-        );
-        assert!(!first.changed);
-        let second = state.apply(command("m=0,q=1", &pixels[2..]), &mut grid, test_size());
-        assert!(second.changed);
-
-        let compressed = zlib_store(&pixels);
-        let compressed_result = state.apply(
-            command("a=T,f=32,s=1,v=1,o=z,i=21,C=1,q=1", &compressed),
-            &mut grid,
-            test_size(),
-        );
-        assert!(compressed_result.changed);
-        assert_eq!(state.render_placements(&grid).len(), 2);
-    }
-
-    #[test]
-    fn temporary_file_transfer_removes_protocol_file_after_bounded_read() {
-        let temp = TestTempPath::new();
-        let path = temp.file("tty-graphics-protocol-success", b"headerpixelsfooter");
-
-        let data =
-            resolve_transmission_data(&command("t=t,O=6,S=6", &[]), path_bytes(&path)).unwrap();
-
-        assert_eq!(data, b"pixels");
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn temporary_file_transfer_preserves_protocol_file_when_read_fails() {
-        let temp = TestTempPath::new();
-        let path = temp.file("tty-graphics-protocol-read-error", b"x");
-
-        let result = resolve_transmission_data(&command("t=t,O=2", &[]), path_bytes(&path));
-
-        assert!(result.is_err());
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn regular_file_transfer_never_removes_source_file() {
-        let temp = TestTempPath::new();
-        let path = temp.file("tty-graphics-protocol-regular", b"pixels");
-
-        let data = resolve_transmission_data(&command("t=f", &[]), path_bytes(&path)).unwrap();
-
-        assert_eq!(data, b"pixels");
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn temporary_file_transfer_preserves_non_protocol_file() {
-        let temp = TestTempPath::new();
-        let path = temp.file("ordinary-image-data", b"pixels");
-
-        let data = resolve_transmission_data(&command("t=t", &[]), path_bytes(&path)).unwrap();
-
-        assert_eq!(data, b"pixels");
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn temporary_file_transfer_does_not_trust_a_removed_parent_component() {
-        let temp = TestTempPath::new();
-        let path = temp.file("ordinary-image-data", b"pixels");
-        let marker = temp.path.join("tty-graphics-protocol-decoy");
-        std::fs::create_dir(&marker).unwrap();
-        let disguised = marker.join("..").join("ordinary-image-data");
-
-        let data = resolve_transmission_data(&command("t=t", &[]), path_bytes(&disguised)).unwrap();
-
-        assert_eq!(data, b"pixels");
-        assert!(path.exists());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn temporary_file_transfer_removes_protocol_file_from_dev_shm() {
-        let root = PathBuf::from("/dev/shm");
-        if !root.is_dir() {
-            return;
-        }
-        let path = root.join(format!(
-            "tty-graphics-protocol-termy-test-{}-{}",
-            std::process::id(),
-            TestTempPath::new()
-                .path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-        ));
-        std::fs::write(&path, b"pixels").unwrap();
-
-        let data = resolve_transmission_data(&command("t=t", &[]), path_bytes(&path)).unwrap();
-
-        assert_eq!(data, b"pixels");
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn delete_selectors_target_coordinates_rows_columns_z_and_ids() {
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(80, 24, 0, CursorStyle::Block);
-        upload_one_pixel(&mut state, &mut grid, 30);
-
-        for (row, col, placement_id, z_index) in [(0, 0, 1, 7), (0, 4, 2, 8), (4, 0, 3, 7)] {
-            grid.set_cursor_position(row, col);
-            let result = state.apply(
-                command(
-                    &format!("a=p,i=30,p={placement_id},c=2,r=2,z={z_index},C=1,q=1"),
-                    &[],
-                ),
-                &mut grid,
-                test_size(),
-            );
-            assert!(result.changed);
-        }
-
-        state.apply(
-            command("a=d,d=q,x=1,y=1,z=7,q=1", &[]),
-            &mut grid,
-            test_size(),
-        );
-        let placements = state.render_placements(&grid);
-        assert_eq!(placements.len(), 2);
-        assert!(
-            placements
-                .iter()
-                .all(|placement| placement.placement_id != 1)
-        );
-
-        state.apply(command("a=d,d=x,x=1,q=1", &[]), &mut grid, test_size());
-        let placements = state.render_placements(&grid);
-        assert_eq!(placements.len(), 1);
-        assert_eq!(placements[0].placement_id, 2);
-
-        state.apply(command("a=d,d=i,i=30,p=2,q=1", &[]), &mut grid, test_size());
-        assert!(state.render_placements(&grid).is_empty());
-        assert!(
-            state.images.contains_key(&30),
-            "lowercase delete keeps image data"
-        );
-
-        state.apply(command("a=d,d=I,i=30,q=1", &[]), &mut grid, test_size());
-        assert!(!state.images.contains_key(&30));
-    }
-
-    #[test]
-    fn placement_count_is_bounded_and_evicts_the_oldest() {
-        let mut state = GraphicsState::default();
-        let mut grid = Grid::new(80, 24, 0, CursorStyle::Block);
-        upload_one_pixel(&mut state, &mut grid, 40);
-        for index in 0..=MAX_PLACEMENTS {
-            grid.set_cursor_position(index % 24, index % 80);
-            state.apply(
-                command("a=p,i=40,c=1,r=1,C=1,q=1", &[]),
-                &mut grid,
-                test_size(),
-            );
-        }
-        assert_eq!(state.placements.len(), MAX_PLACEMENTS);
-        assert_eq!(state.placements.first().unwrap().serial, 2);
-        assert_eq!(
-            state.placements.last().unwrap().serial,
-            (MAX_PLACEMENTS + 1) as u64
-        );
-    }
-}
+#[path = "graphics_tests.rs"]
+mod tests;

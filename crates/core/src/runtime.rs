@@ -794,10 +794,16 @@ fn login_shell_args(shell_path: &str) -> Vec<String> {
     }
 }
 
+/// The executable and argument vector selected for a terminal PTY.
+///
+/// All terminal engines must use [`resolve_terminal_launch`] instead of
+/// independently interpreting [`TerminalRuntimeConfig`] or [`TerminalLaunch`].
+/// This keeps platform shell selection, login-shell arguments, and startup
+/// command handling identical across engines.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ShellLaunch {
-    program: String,
-    args: Vec<String>,
+pub struct ResolvedTerminalLaunch {
+    pub program: String,
+    pub args: Vec<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -867,21 +873,21 @@ fn resolve_shell_path(configured_shell: Option<&str>) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_shell_launch(windows_shell: WindowsShell) -> ShellLaunch {
+fn windows_shell_launch(windows_shell: WindowsShell) -> ResolvedTerminalLaunch {
     match windows_shell {
-        WindowsShell::Cmd => ShellLaunch {
+        WindowsShell::Cmd => ResolvedTerminalLaunch {
             program: windows_cmd_path(),
             args: Vec::new(),
         },
-        WindowsShell::PowerShell => ShellLaunch {
+        WindowsShell::PowerShell => ResolvedTerminalLaunch {
             program: "powershell.exe".to_string(),
             args: vec!["-NoLogo".to_string()],
         },
-        WindowsShell::PowerShellCore => ShellLaunch {
+        WindowsShell::PowerShellCore => ResolvedTerminalLaunch {
             program: "pwsh.exe".to_string(),
             args: vec!["-NoLogo".to_string()],
         },
-        WindowsShell::GitBash => ShellLaunch {
+        WindowsShell::GitBash => ResolvedTerminalLaunch {
             program: windows_git_bash_path(),
             args: vec!["--login".to_string(), "-i".to_string()],
         },
@@ -889,13 +895,16 @@ fn windows_shell_launch(windows_shell: WindowsShell) -> ShellLaunch {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_startup_command_shell(windows_shell: WindowsShell, command: &str) -> ShellLaunch {
+fn windows_startup_command_shell(
+    windows_shell: WindowsShell,
+    command: &str,
+) -> ResolvedTerminalLaunch {
     match windows_shell {
-        WindowsShell::Cmd => ShellLaunch {
+        WindowsShell::Cmd => ResolvedTerminalLaunch {
             program: windows_cmd_path(),
             args: vec!["/C".to_string(), command.to_string()],
         },
-        WindowsShell::PowerShell => ShellLaunch {
+        WindowsShell::PowerShell => ResolvedTerminalLaunch {
             program: "powershell.exe".to_string(),
             args: vec![
                 "-NoLogo".to_string(),
@@ -906,7 +915,7 @@ fn windows_startup_command_shell(windows_shell: WindowsShell, command: &str) -> 
                 command.to_string(),
             ],
         },
-        WindowsShell::PowerShellCore => ShellLaunch {
+        WindowsShell::PowerShellCore => ResolvedTerminalLaunch {
             program: "pwsh.exe".to_string(),
             args: vec![
                 "-NoLogo".to_string(),
@@ -917,24 +926,24 @@ fn windows_startup_command_shell(windows_shell: WindowsShell, command: &str) -> 
                 command.to_string(),
             ],
         },
-        WindowsShell::GitBash => ShellLaunch {
+        WindowsShell::GitBash => ResolvedTerminalLaunch {
             program: windows_git_bash_path(),
             args: vec!["-lc".to_string(), command.to_string()],
         },
     }
 }
 
-fn configured_shell_launch(configured_shell: Option<&str>) -> Option<ShellLaunch> {
+fn configured_shell_launch(configured_shell: Option<&str>) -> Option<ResolvedTerminalLaunch> {
     let shell_path = configured_shell
         .map(str::trim)
         .filter(|shell| !shell.is_empty())?;
-    Some(ShellLaunch {
+    Some(ResolvedTerminalLaunch {
         program: shell_path.to_string(),
         args: login_shell_args(shell_path),
     })
 }
 
-fn default_shell_launch(runtime_config: &TerminalRuntimeConfig) -> ShellLaunch {
+fn default_shell_launch(runtime_config: &TerminalRuntimeConfig) -> ResolvedTerminalLaunch {
     if let Some(launch) = configured_shell_launch(runtime_config.shell.as_deref()) {
         return launch;
     }
@@ -947,14 +956,14 @@ fn default_shell_launch(runtime_config: &TerminalRuntimeConfig) -> ShellLaunch {
     #[cfg(not(target_os = "windows"))]
     {
         let shell_path = resolve_shell_path(None);
-        ShellLaunch {
+        ResolvedTerminalLaunch {
             program: shell_path.clone(),
             args: login_shell_args(&shell_path),
         }
     }
 }
 
-fn launch_to_shell(launch: ShellLaunch) -> Shell {
+fn launch_to_shell(launch: ResolvedTerminalLaunch) -> Shell {
     #[cfg(target_os = "windows")]
     let program = quote_shell_program_if_needed(&launch.program);
     #[cfg(not(target_os = "windows"))]
@@ -963,10 +972,10 @@ fn launch_to_shell(launch: ShellLaunch) -> Shell {
     Shell::new(program, launch.args)
 }
 
-fn resolved_terminal_launch(
+pub fn resolve_terminal_launch(
     runtime_config: &TerminalRuntimeConfig,
     launch: Option<&TerminalLaunch>,
-) -> anyhow::Result<ShellLaunch> {
+) -> anyhow::Result<ResolvedTerminalLaunch> {
     if let Some(TerminalLaunch::Program { program, args }) = launch {
         anyhow::ensure!(
             !program.trim().is_empty(),
@@ -976,7 +985,7 @@ fn resolved_terminal_launch(
             !program.contains('\0') && !args.iter().any(|arg| arg.contains('\0')),
             "terminal program and arguments cannot contain NUL bytes"
         );
-        return Ok(ShellLaunch {
+        return Ok(ResolvedTerminalLaunch {
             program: program.clone(),
             args: args.clone(),
         });
@@ -990,7 +999,7 @@ fn resolved_terminal_launch(
     }) {
         #[cfg(unix)]
         {
-            return Ok(ShellLaunch {
+            return Ok(ResolvedTerminalLaunch {
                 program: "/bin/sh".to_string(),
                 args: vec!["-c".to_string(), command.to_string()],
             });
@@ -1004,7 +1013,7 @@ fn resolved_terminal_launch(
                 .map(str::trim)
                 .is_some_and(|shell| !shell.is_empty())
             {
-                return Ok(ShellLaunch {
+                return Ok(ResolvedTerminalLaunch {
                     program: "cmd.exe".to_string(),
                     args: vec!["/C".to_string(), command.to_string()],
                 });
@@ -2169,7 +2178,7 @@ impl Terminal {
         let size = size.clamped();
         let (events_tx, events_rx) = unbounded();
         let runtime_config = runtime_config.cloned().unwrap_or_default();
-        let shell = launch_to_shell(resolved_terminal_launch(&runtime_config, launch)?);
+        let shell = launch_to_shell(resolve_terminal_launch(&runtime_config, launch)?);
 
         let working_directory = resolve_launch_working_directory(
             configured_working_dir,
@@ -2459,9 +2468,11 @@ impl Terminal {
         // or otherwise spurious host drain stays allocation-free without an
         // `is_empty`/`try_recv` race.
         let Ok(first_event) = self.events_rx.try_recv() else {
-            let events = wakeup_was_queued
-                .then(|| vec![TerminalEvent::Wakeup])
-                .unwrap_or_default();
+            let events = if wakeup_was_queued {
+                vec![TerminalEvent::Wakeup]
+            } else {
+                Vec::new()
+            };
             return (events, false);
         };
 
@@ -2783,8 +2794,6 @@ impl Drop for Terminal {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "windows")]
-    use super::quote_shell_program_if_needed;
     use super::{
         DEFAULT_TERM, EVENT_QUEUE_HARD_CAP, EVENT_QUEUE_SOFT_CAP, GHOSTTY_COMPAT_TERM_PROGRAM,
         GHOSTTY_COMPAT_TERM_PROGRAM_VERSION, JsonEventListener, KittyGraphicsCursorTracker,
@@ -2793,12 +2802,16 @@ mod tests {
         TerminalDamageSnapshot, TerminalEvent, TerminalLaunch, TerminalOptions,
         TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
         WorkingDirFallback, advance_kitty_graphics_cursor, advance_kitty_graphics_text,
-        apply_term_config, cursor_position_from_term, cursor_state_from_term, default_shell_launch,
-        drain_runtime_events, normalize_working_directory_candidate,
-        resolve_launch_working_directory, resolve_shell_path, resolved_terminal_launch,
-        search_term_buffer, should_drop_event, take_term_damage_snapshot,
-        terminal_environment_overrides, terminal_event_from_osc, termmode_to_terminal_mouse_mode,
-        user_home_dir,
+        apply_term_config, cursor_position_from_term, cursor_state_from_term, drain_runtime_events,
+        normalize_working_directory_candidate, resolve_launch_working_directory,
+        resolve_shell_path, resolve_terminal_launch, search_term_buffer, should_drop_event,
+        take_term_damage_snapshot, terminal_environment_overrides, terminal_event_from_osc,
+        termmode_to_terminal_mouse_mode, user_home_dir,
+    };
+    #[cfg(target_os = "windows")]
+    use super::{
+        default_shell_launch, quote_shell_program_if_needed, windows_cmd_path,
+        windows_git_bash_path,
     };
     use crate::keyboard::{
         Keystroke, Modifiers, TerminalKeyEventKind, TerminalKeyboardMode, keystroke_to_input,
@@ -4378,9 +4391,41 @@ mod tests {
             windows_shell: WindowsShell::PowerShell,
             ..TerminalRuntimeConfig::default()
         };
-        let launch = default_shell_launch(&config);
+        let launch = resolve_terminal_launch(&config, None).expect("configured shell launch");
         assert_eq!(launch.program, "/bin/custom");
         assert_eq!(config.resolved_shell_program(), "/bin/custom");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn configured_unix_shell_keeps_macos_interactive_login_arguments() {
+        let resolved = resolve_terminal_launch(
+            &TerminalRuntimeConfig {
+                shell: Some("/opt/custom/bin/zsh".to_string()),
+                ..TerminalRuntimeConfig::default()
+            },
+            None,
+        )
+        .expect("configured shell launch");
+
+        assert_eq!(resolved.program, "/opt/custom/bin/zsh");
+        assert_eq!(resolved.args, ["-i", "-l"]);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn configured_unix_shell_keeps_non_macos_interactive_arguments() {
+        let resolved = resolve_terminal_launch(
+            &TerminalRuntimeConfig {
+                shell: Some("/opt/custom/bin/zsh".to_string()),
+                ..TerminalRuntimeConfig::default()
+            },
+            None,
+        )
+        .expect("configured shell launch");
+
+        assert_eq!(resolved.program, "/opt/custom/bin/zsh");
+        assert_eq!(resolved.args, ["-i"]);
     }
 
     #[test]
@@ -4394,7 +4439,7 @@ mod tests {
                 "example.com".to_string(),
             ],
         };
-        let resolved = resolved_terminal_launch(&TerminalRuntimeConfig::default(), Some(&launch))
+        let resolved = resolve_terminal_launch(&TerminalRuntimeConfig::default(), Some(&launch))
             .expect("typed launch");
         assert_eq!(resolved.program, "ssh");
         assert_eq!(
@@ -4412,7 +4457,7 @@ mod tests {
     #[test]
     fn existing_startup_commands_still_use_the_unix_shell() {
         let launch = TerminalLaunch::ShellCommand("printf existing-behavior".to_string());
-        let resolved = resolved_terminal_launch(&TerminalRuntimeConfig::default(), Some(&launch))
+        let resolved = resolve_terminal_launch(&TerminalRuntimeConfig::default(), Some(&launch))
             .expect("shell command launch");
         assert_eq!(resolved.program, "/bin/sh");
         assert_eq!(
@@ -4443,6 +4488,119 @@ mod tests {
 
         assert_eq!(launch.program, "pwsh.exe");
         assert_eq!(launch.args, vec!["-NoLogo".to_string()]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn public_resolver_preserves_every_windows_shell_launch() {
+        let cases = [
+            (WindowsShell::Cmd, windows_cmd_path(), Vec::new()),
+            (
+                WindowsShell::PowerShell,
+                "powershell.exe".to_string(),
+                vec!["-NoLogo".to_string()],
+            ),
+            (
+                WindowsShell::PowerShellCore,
+                "pwsh.exe".to_string(),
+                vec!["-NoLogo".to_string()],
+            ),
+            (
+                WindowsShell::GitBash,
+                windows_git_bash_path(),
+                vec!["--login".to_string(), "-i".to_string()],
+            ),
+        ];
+
+        for (windows_shell, program, args) in cases {
+            let resolved = resolve_terminal_launch(
+                &TerminalRuntimeConfig {
+                    windows_shell,
+                    ..TerminalRuntimeConfig::default()
+                },
+                None,
+            )
+            .expect("Windows shell launch");
+            assert_eq!(resolved.program, program);
+            assert_eq!(resolved.args, args);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn public_resolver_preserves_every_windows_startup_command_launch() {
+        let command = "echo startup";
+        let cases = [
+            (
+                WindowsShell::Cmd,
+                windows_cmd_path(),
+                vec!["/C".to_string(), command.to_string()],
+            ),
+            (
+                WindowsShell::PowerShell,
+                "powershell.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-Command".to_string(),
+                    command.to_string(),
+                ],
+            ),
+            (
+                WindowsShell::PowerShellCore,
+                "pwsh.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-Command".to_string(),
+                    command.to_string(),
+                ],
+            ),
+            (
+                WindowsShell::GitBash,
+                windows_git_bash_path(),
+                vec!["-lc".to_string(), command.to_string()],
+            ),
+        ];
+        let launch = TerminalLaunch::ShellCommand(command.to_string());
+
+        for (windows_shell, program, args) in cases {
+            let resolved = resolve_terminal_launch(
+                &TerminalRuntimeConfig {
+                    windows_shell,
+                    ..TerminalRuntimeConfig::default()
+                },
+                Some(&launch),
+            )
+            .expect("Windows startup command launch");
+            assert_eq!(resolved.program, program);
+            assert_eq!(resolved.args, args);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn public_resolver_preserves_custom_windows_shell_startup_behavior() {
+        let runtime_config = TerminalRuntimeConfig {
+            shell: Some(r"C:\Tools\custom-shell.exe".to_string()),
+            windows_shell: WindowsShell::PowerShellCore,
+            ..TerminalRuntimeConfig::default()
+        };
+
+        let interactive =
+            resolve_terminal_launch(&runtime_config, None).expect("custom Windows shell launch");
+        assert_eq!(interactive.program, r"C:\Tools\custom-shell.exe");
+        assert!(interactive.args.is_empty());
+
+        let startup = TerminalLaunch::ShellCommand("echo startup".to_string());
+        let command = resolve_terminal_launch(&runtime_config, Some(&startup))
+            .expect("custom Windows startup command launch");
+        assert_eq!(command.program, "cmd.exe");
+        assert_eq!(command.args, ["/C", "echo startup"]);
     }
 
     #[cfg(target_os = "windows")]

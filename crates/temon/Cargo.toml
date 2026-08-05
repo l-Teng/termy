@@ -16,3 +16,4 @@ benchmark-allocations = []
 [dev-dependencies]
 alacritty_terminal = { workspace = true }
 termy_core = { path = "../core" }
+unicode-width = { workspace = true }

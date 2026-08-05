@@ -8136,6 +8136,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "termy_core",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

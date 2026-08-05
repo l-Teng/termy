@@ -6,9 +6,38 @@ the desktop application.
 
 The current prototype is an independent engine with no production Cargo
 dependencies. It owns its incremental VT parser, bounded primary/alternate
-grids and scrollback, damage tracking, renderer-neutral cell types, and Unix
-PTY lifecycle. It does not depend on `termy_core` or GPUI; Unix PTY operations
-and PNG validation use direct platform/libz FFI.
+grids and scrollback, damage tracking, renderer-neutral cell types, and native
+process lifecycle. It does not depend on `termy_core` or GPUI. Native process
+I/O uses direct platform APIs: a PTY backend on Linux, Android, and macOS, plus
+a dependency-free Windows ConPTY backend whose entry points are loaded
+dynamically. PNG and Kitty graphics use Tmon's safe, portable, std-only
+zlib/DEFLATE decoder.
+
+## Owner
+
+This crate owns the experimental Tmon parser, grids and scrollback, terminal
+state, damage model, graphics protocol, and native PTY/ConPTY lifecycle. It
+must remain renderer-neutral and independently usable without Termy's desktop
+application or the existing Alacritty-backed core.
+
+## Validation
+
+```sh
+cargo test -p tmon
+cargo clippy -p tmon --all-targets -- -D warnings
+```
+
+The benchmark example and immutable revision gate have unit-test modes, but
+their timed mains are intentionally reserved for the GitHub Actions benchmark
+workflow.
+
+## Forbidden Dependencies
+
+- `gpui`
+- `termy_core`
+- `termy_terminal_ui`
+- `alacritty_terminal`
+- `termy` / `crates/desktop_app`
 
 Run the desktop app with Tmon selected:
 
@@ -21,9 +50,12 @@ Open Termy's inspector and select the **Terminal** tab; the **Engine** row reads
 startup log also prints `using experimental Tmon terminal engine` when selected.
 
 The environment variable affects native terminals only. Tmux display panes
-continue to use their existing parser. The independent PTY is currently
-Unix-only; on Windows an exact `1` request logs a warning and falls back to the
-unchanged Alacritty-backed native engine.
+continue to use their existing parser. On Windows, an exact `1` selects Tmon
+when the required ConPTY API is available at runtime; otherwise Termy logs a
+warning and falls back to the unchanged Alacritty-backed native engine. Without
+an exact `1`, Alacritty remains the default on every platform. Other Unix
+targets also keep that fallback because Tmon does not advertise an unsupported
+native PTY ABI there.
 
 ## Direction
 
@@ -37,6 +69,14 @@ unchanged Alacritty-backed native engine.
 Tmon is still experimental. The existing Alacritty-backed native engine remains
 the default and tmux panes keep their existing behavior unless the environment
 variable is exactly `1`.
+
+Renderers that can move cached rows use `take_render_damage_snapshot()`. Its
+scroll operations are chronological and its partial spans describe final
+viewport coordinates, so consumers replay every scroll before patching cells.
+The accompanying generation must still match when cells are visited; otherwise
+the consumer rebuilds a fresh frame. The older `take_damage_snapshot()` remains
+source-compatible and deliberately reports scrolls as full damage for callers
+that do not understand row movement.
 
 ## Compatibility boundary
 
@@ -53,6 +93,66 @@ Tmon also keeps combining marks available to selection and search. Termy's
 existing Alacritty cell adapter omits that out-of-line text; its default behavior
 is deliberately unchanged by the experiment. OSC/DCS payloads are bounded to
 64 KiB so an unterminated control string cannot grow without limit.
+Width reflow is differential-tested while scrolled and while changing rows and
+columns together. Tmon additionally keeps its public one-column grid finite for
+wide characters, even though the pinned Alacritty engine supports a minimum of
+two columns.
+Standalone Tmon keeps the conservative `Osc52::OnlyCopy` default; the Termy
+desktop adapter explicitly enables `CopyPaste` so OSC 52 clipboard queries match
+the existing native engine and still pass through the application's reply host.
+Lifecycle events for shell prompt, command start, execution, and completion have
+queue priority over discardable noise, so a bounded event queue preserves a
+coherent command cycle under load.
+
+Kitty graphics uploads and inflated image data are capped at 64 MiB per image,
+while stored PNG data is kept under a separate 128 MiB cache quota and a 4,096
+image-record limit. Raw RGB and RGBA uploads are encoded directly into the final
+PNG allocation, avoiding a second full-size filtered or zlib staging buffer.
+The limits still admit a 4096x4096 RGBA image. Command controls stop at 4 KiB and
+64 fields before string conversion. Valid supplied PNGs are compacted in place
+to remove compressed text/color-profile metadata and APNG frames that could
+make a downstream image decoder expand data outside the validated static-image
+bound. DEFLATE decoding also caps the number of blocks, and chunked transfers
+check their remaining decoded capacity before allocating the next chunk. A PNG
+with one IDAT chunk is validated directly from its upload buffer; only split
+IDAT streams need a joined compressed buffer. File
+transfers reject non-regular files before opening them and use nonblocking opens
+on supported Unix targets, so a child-provided FIFO cannot stall parsing.
+Kitty image numbers (`I`) allocate distinct terminal-selected IDs, resolve only
+the newest matching image, and are rejected when combined with an explicit
+image ID. Uppercase deletion frees data only for images affected by that
+selector and only after their final placement is gone. Image-ID range deletion
+is global, while coordinate selectors remain scoped to the active screen.
+
+The Unix PTY captures bytes readable when the direct child exits, then uses a
+short bounded nonblocking drain to retain final output without allowing a live
+descendant to delay exit forever. Dropping a live Unix PTY sends hangup, allows
+a 250 ms grace period, then escalates to `SIGKILL` so a child that ignores
+hangup cannot leak indefinitely. Windows uses separate synchronous ConPTY
+reader and writer paths and keeps draining output through shutdown. On both
+platforms, queued plus active normal input is capped at 8 MiB and 4,096 writes,
+including retained `Vec` capacity. A separate priority lane reserves 2 MiB and
+256 entries for terminal protocol replies, including OSC 52 query responses.
+Replies can preempt normal input at bounded 16 KiB write boundaries; interrupted
+normal input resumes at the same offset and keeps its FIFO order. If even the
+priority lane cannot accept a required reply, Tmon closes the session instead
+of silently leaving a child waiting forever. Resize and close notifications
+coalesce to a single wake while the newest resize and sticky close state remain
+out of band, so control traffic cannot grow an unbounded queue or wait behind
+the input backlog. Synchronized-update expiry uses one shared scheduler with at
+most one queued watchdog task per engine instead of spawning or retaining an
+unbounded task stream.
+
+Extended underline state is preserved rather than collapsed to a boolean. Tmon
+tracks single, double, curly, dotted, and dashed SGR 4 styles plus indexed and
+RGB SGR 58 colors; SGR 24, 59, and 0 reset the same independent pieces as the
+pinned VTE parser. Underline color remains directly readable from a copied cell.
+Combining text and OSC 8 identity share one tagged rare-metadata word, keeping
+`Cell` at 24 bytes even when both features are supported together.
+The desktop Tmon adapter carries that state into Termy's renderer: single and
+curly underlines use GPUI's native straight/wavy decoration, while double,
+dotted, and dashed styles use bounded batched paths. Native Alacritty and tmux
+cells retain their previous single-underline rendering behavior.
 
 ## Benchmarking
 
@@ -71,11 +171,12 @@ cannot start. CI defaults to eight samples and rejects odd counts so each
 workload has four Tmon-first and four Alacritty-first pairs. It fails when the
 median of a workload's paired ratios misses its committed target; local runs
 print the same verdict without failing unless `TMON_BENCH_ENFORCE_TARGETS=1` is
-set. After the timed comparison, both `just benchmark-tmon` and CI append a
-report-only allocation pass to the same text report. Manual inputs are bounded
-so an oversized request fails before it can consume the job timeout and prevent
-report upload. The first measured optimization pass is documented in
-[PERFORMANCE.md](PERFORMANCE.md).
+set. Both `just benchmark-tmon` and CI then run an isolated snapshot regression
+gate against immutable Tmon commit
+`03d7ca5c5420ca141afe56f725341faadb71af18` and append a report-only allocation
+pass to the same text report. Manual inputs are bounded so an oversized request
+fails before it can consume the job timeout and prevent report upload. The first
+measured optimization pass is documented in [PERFORMANCE.md](PERFORMANCE.md).
 
 The suite compares identical byte streams, grid dimensions, and scrollback
 limits in release mode. Before timing, an untimed preflight compares up to 32
@@ -88,8 +189,35 @@ conversion work, so that ratio is not a raw engine-to-engine snapshot
 comparison. Its ratio and retention against the supplied 19.880x baseline are
 report-only: enforcing `19.880x * 0.95` on hosted CI would not be sound because
 the APIs do different work and can react differently to runner noise. The suite
-does not measure PTY I/O, GPUI rendering, input latency, or complete terminal
-compatibility, and speed ratios are not a feature-parity score.
+also measures both engines through one benchmark-local normalized frame contract
+covering the same visible cells, metadata, raw colors, styles, combining text,
+exact underline styles and colors, hyperlinks, wide-cell roles, and wrapping.
+Every normalized sample runs for at
+least 250 ms, and an untimed mixed-frame preflight requires exact equality. This
+new equivalent-work ratio is report-only until its first Linux CI baseline is
+available. The suite does not measure graphics decoding, PTY I/O, GPUI painting,
+input latency, or complete terminal compatibility, and speed ratios are not a
+feature-parity score. Windows ConPTY live-runtime validation and the first
+GitHub Actions measurement of the current follow-up work are still pending.
+
+It also prints a report-only Tmon scroll-cache measurement. Parsing and damage
+capture happen once outside both timed paths; an untimed preflight requires an
+incrementally replayed cache to equal a fresh normalized visible cache exactly.
+The metric compares cache-update work, not GPUI painting, PTY I/O, or an
+Alacritty renderer path. It has no pass/fail threshold until Linux Actions has
+established a stable baseline.
+
+The revision gate is a different comparison: current Tmon and the pinned
+reference call the same native `Terminal::snapshot()` API on identical terminal
+state in one process. Before timing, an exact preflight verifies each actual
+snapshot against independently visited terminal state and the other revision.
+Twenty balanced interleaved blocks run each side for at least 250 ms per
+measurement; the gate uses conservative order statistics over paired throughput
+ratios. Current Tmon passes only when the lower bound is at least 95% of the
+immutable reference. A clear regression or an inconclusive noisy result fails
+CI instead of silently accepting uncertainty. The reference SHA is ratcheted
+only by an explicit source change after a reviewed measurement, never to the
+previous push automatically.
 
 The allocation pass rebuilds only the example with the
 `benchmark-allocations` feature and requires

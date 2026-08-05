@@ -17,7 +17,7 @@ mod tmux;
 // cross-crate contract for row-level paint-cache invalidation between `termy` and this crate.
 pub use grid::{
     CellRenderInfo, TerminalGrid, TerminalGridPaintCacheHandle, TerminalGridPaintDamage,
-    TerminalGridRow, TerminalGridRows,
+    TerminalGridRow, TerminalGridRows, TerminalUnderline, TerminalUnderlineStyle,
 };
 pub use keyboard::{TerminalKeyEventKind, TerminalKeyboardMode, keystroke_to_input};
 pub use links::{
@@ -37,11 +37,12 @@ pub use render_metrics::{
     terminal_ui_render_metrics_snapshot,
 };
 pub use runtime::{
-    MAX_TERMINAL_SCROLLBACK_HISTORY, TabTitleShellIntegration, Terminal, TerminalCursorState,
-    TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalLaunch,
-    TerminalOptions, TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
-    WorkingDirFallback, normalize_working_directory_candidate, resolve_launch_working_directory,
-    resolve_working_directory_path, terminal_environment_overrides,
+    MAX_TERMINAL_SCROLLBACK_HISTORY, ResolvedTerminalLaunch, TabTitleShellIntegration, Terminal,
+    TerminalCursorState, TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan,
+    TerminalEvent, TerminalLaunch, TerminalOptions, TerminalRuntimeConfig, TerminalSize,
+    TerminalWakeupNotifier, WindowsShell, WorkingDirFallback,
+    normalize_working_directory_candidate, resolve_launch_working_directory,
+    resolve_terminal_launch, resolve_working_directory_path, terminal_environment_overrides,
 };
 pub use shell_integration::{CommandLifecycle, CommandPhase, ProgressState};
 pub use termy_core::KittyGraphicsRenderPlacement;

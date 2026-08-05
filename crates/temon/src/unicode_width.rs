@@ -3,7 +3,8 @@
 // Licensed under Apache-2.0 OR MIT. See UNICODE_WIDTH_LICENSE-MIT.
 //
 // This keeps tmon dependency-free while matching the width source used by
-// alacritty_terminal 0.26.0. Regenerate with scripts/generate_unicode_width.rs.
+// alacritty_terminal 0.26.0. Tests exhaustively validate the embedded table
+// against the workspace's exact unicode-width development dependency.
 
 #[repr(align(32))]
 struct Align32<T>(T);
@@ -982,6 +983,21 @@ static WIDTH_LEAVES: Align32<[[u8; 32]; 157]> = Align32([
 #[cfg(test)]
 mod tests {
     use super::character_width;
+    use unicode_width::UnicodeWidthChar;
+
+    #[test]
+    fn every_unicode_scalar_matches_alacrittys_width_source() {
+        for codepoint in 0..=char::MAX as u32 {
+            let Some(character) = char::from_u32(codepoint) else {
+                continue;
+            };
+            assert_eq!(
+                character_width(character),
+                character.width().unwrap_or(0),
+                "U+{codepoint:04X}",
+            );
+        }
+    }
 
     #[test]
     fn representative_scalar_widths_match_unicode_15_1() {

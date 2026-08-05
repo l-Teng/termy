@@ -57,13 +57,13 @@ pub use render_metrics::{
 };
 pub use runtime::{
     KittyGraphicsCursorTracker, KittyGraphicsTextEffects, MAX_TERMINAL_SCROLLBACK_HISTORY,
-    TabTitleShellIntegration, Terminal, TerminalCursorState, TerminalCursorStyle,
-    TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalLaunch, TerminalOptions,
-    TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell, WorkingDirFallback,
-    advance_kitty_graphics_cursor, advance_kitty_graphics_text, cursor_position_from_term,
-    cursor_state_from_term, normalize_working_directory_candidate,
-    resolve_launch_working_directory, resolve_working_directory_path, take_term_damage_snapshot,
-    terminal_environment_overrides, termmode_to_terminal_mouse_mode,
+    ResolvedTerminalLaunch, TabTitleShellIntegration, Terminal, TerminalCursorState,
+    TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalLaunch,
+    TerminalOptions, TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
+    WorkingDirFallback, advance_kitty_graphics_cursor, advance_kitty_graphics_text,
+    cursor_position_from_term, cursor_state_from_term, normalize_working_directory_candidate,
+    resolve_launch_working_directory, resolve_terminal_launch, resolve_working_directory_path,
+    take_term_damage_snapshot, terminal_environment_overrides, termmode_to_terminal_mouse_mode,
 };
 pub use search::{
     TermySearchMatch, TermySearchOptions, TermySharedSearchMatch, search_frame,

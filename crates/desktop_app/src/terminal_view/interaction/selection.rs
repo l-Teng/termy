@@ -221,45 +221,49 @@ fn grid_line_text(
     Some(line)
 }
 
-fn terminal_line_text(
-    terminal: &Terminal,
-    line_idx: i32,
-    cols: usize,
-) -> Option<Vec<Option<String>>> {
-    let (min_line, max_line) = terminal.line_bounds()?;
-    if line_idx < min_line || line_idx > max_line {
-        return None;
-    }
+type TerminalLineText = Vec<Option<String>>;
+type TerminalLineTextRows = Vec<(i32, TerminalLineText)>;
 
-    let mut line = vec![Some(" ".to_string()); cols];
-    if !terminal.for_each_line_cell(line_idx, |col, cell| {
-        if col >= cols {
-            return;
-        }
-        if cell.is_trailing_wide_spacer() {
-            line[col] = None;
-            return;
-        }
-        if cell.is_hidden() || cell.is_wide_spacer() {
-            return;
-        }
-        let character = cell.character();
-        if character != '\0' {
-            let mut text = String::new();
-            text.push(if character.is_control() {
-                ' '
-            } else {
-                character
-            });
-            if !character.is_control() {
-                cell.append_combining_to(&mut text);
+fn terminal_line_texts(
+    terminal: &Terminal,
+    first_line: i32,
+    last_line: i32,
+) -> Option<(TerminalLineRange, TerminalLineTextRows)> {
+    let mut lines = TerminalLineTextRows::new();
+    let range = terminal.for_each_line_cell_range(
+        first_line,
+        last_line,
+        |range, line_idx, col, cell| {
+            if lines.last().is_none_or(|(line, _)| *line != line_idx) {
+                lines.push((line_idx, vec![Some(" ".to_string()); range.columns]));
             }
-            line[col] = Some(text);
-        }
-    }) {
-        return None;
-    }
-    Some(line)
+            let line = &mut lines.last_mut().unwrap().1;
+            if col >= line.len() {
+                return;
+            }
+            if cell.is_trailing_wide_spacer() {
+                line[col] = None;
+                return;
+            }
+            if cell.is_hidden() || cell.is_wide_spacer() {
+                return;
+            }
+            let character = cell.character();
+            if character != '\0' {
+                let mut text = String::new();
+                text.push(if character.is_control() {
+                    ' '
+                } else {
+                    character
+                });
+                if !character.is_control() {
+                    cell.append_combining_to(&mut text);
+                }
+                line[col] = Some(text);
+            }
+        },
+    )?;
+    Some((range, lines))
 }
 
 fn selected_text_from_terminal(
@@ -267,39 +271,35 @@ fn selected_text_from_terminal(
     start: SelectionPos,
     end: SelectionPos,
 ) -> Option<String> {
-    let size = terminal.size();
-    let cols = usize::from(size.cols);
+    let (raw_start, raw_end) = if (end.line, end.col) < (start.line, start.col) {
+        (end, start)
+    } else {
+        (start, end)
+    };
+    let (range, captured_lines) = terminal_line_texts(terminal, raw_start.line, raw_end.line)?;
+    let cols = range.columns;
     if cols == 0 {
         return None;
     }
-
-    let clamped_start = SelectionPos {
-        col: start.col.min(cols.saturating_sub(1)),
-        line: start.line,
+    let selection_start = SelectionPos {
+        col: raw_start.col.min(cols.saturating_sub(1)),
+        line: raw_start.line,
     };
-    let clamped_end = SelectionPos {
-        col: end.col.min(cols.saturating_sub(1)),
-        line: end.line,
+    let selection_end = SelectionPos {
+        col: raw_end.col.min(cols.saturating_sub(1)),
+        line: raw_end.line,
     };
-    let (selection_start, selection_end) =
-        if (clamped_end.line, clamped_end.col) < (clamped_start.line, clamped_start.col) {
-            (clamped_end, clamped_start)
-        } else {
-            (clamped_start, clamped_end)
-        };
-
-    let (min_line, max_line) = terminal.line_bounds()?;
-    let start_line = selection_start.line.max(min_line);
-    let end_line = selection_end.line.min(max_line);
+    let start_line = selection_start.line.max(range.first_line);
+    let end_line = selection_end.line.min(range.last_line);
     if start_line > end_line {
         return None;
     }
 
     let mut lines = Vec::new();
-    for line_idx in start_line..=end_line {
-        let Some(line) = terminal_line_text(terminal, line_idx, cols) else {
+    for (line_idx, line) in captured_lines {
+        if line_idx < start_line || line_idx > end_line {
             continue;
-        };
+        }
 
         let mut col_start = if line_idx == selection_start.line {
             selection_start.col

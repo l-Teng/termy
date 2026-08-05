@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     ffi::{CString, c_char, c_int, c_short, c_ulong, c_void},
     ffi::{OsStr, OsString},
     fs::File,
@@ -11,10 +11,11 @@ use std::{
     ptr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use crate::Size;
@@ -50,8 +51,22 @@ const POLLERR: c_short = 0x0008;
 const POLLHUP: c_short = 0x0010;
 const POLLNVAL: c_short = 0x0020;
 const CHILD_SPAWN_ERROR_LENGTH: usize = 5;
-const MAX_EXIT_DRAIN_READS: usize = 256;
+const EXIT_DRAIN_TIME_BUDGET: Duration = Duration::from_millis(25);
+// Give conventional terminal shutdown handlers a brief chance to flush and exit
+// before escalating. The watcher remains responsible for reaping the child and
+// waking the reader so final output keeps its normal ordering.
+const DROP_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
+const MAX_WRITER_BACKLOG_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WRITER_BACKLOG_ENTRIES: usize = 4096;
+const MAX_PROTOCOL_REPLY_BACKLOG_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PROTOCOL_REPLY_BACKLOG_ENTRIES: usize = 256;
+const MAX_WRITER_WRITE_CHUNK: usize = 16 * 1024;
 const WRITER_POLL_TIMEOUT_MS: c_int = 10;
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const FIONREAD: c_ulong = 0x541b;
+#[cfg(target_os = "macos")]
+const FIONREAD: c_ulong = 0x4004_667f;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 type PollCount = c_ulong;
@@ -208,54 +223,197 @@ pub(crate) struct Pty {
 struct WriterHandle {
     sender: mpsc::Sender<WriterCommand>,
     control: Arc<WriterControl>,
+    protocol_replies: Arc<ProtocolReplyQueue>,
 }
 
-#[derive(Default)]
 struct WriterControl {
     close_requested: AtomicBool,
+    wake_pending: AtomicBool,
+    write_bytes: AtomicUsize,
+    write_entries: AtomicUsize,
+    limits: WriterLimits,
+    protocol_reply_bytes: AtomicUsize,
+    protocol_reply_entries: AtomicUsize,
+    protocol_reply_limits: WriterLimits,
     pending_resize: Mutex<Option<WinSize>>,
 }
 
+#[derive(Clone, Copy)]
+struct WriterLimits {
+    max_bytes: usize,
+    max_entries: usize,
+}
+
 enum WriterCommand {
-    Write(Vec<u8>),
-    Wake,
+    Write(ReservedWrite),
+    Wake(WakeReservation),
+}
+
+struct ReservedWrite {
+    bytes: Vec<u8>,
+    offset: usize,
+    _reservation: WriteReservation,
+}
+
+struct ProtocolReplyQueue {
+    pending: Mutex<VecDeque<ReservedWrite>>,
+}
+
+#[derive(Clone, Copy)]
+enum WriteClass {
+    Normal,
+    ProtocolReply,
+}
+
+struct WriteReservation {
+    control: Arc<WriterControl>,
+    bytes: usize,
+    class: WriteClass,
+}
+
+struct WakeReservation {
+    control: Arc<WriterControl>,
 }
 
 impl WriterHandle {
     fn channel() -> (Self, mpsc::Receiver<WriterCommand>) {
+        Self::channel_with_limits(WriterLimits {
+            max_bytes: MAX_WRITER_BACKLOG_BYTES,
+            max_entries: MAX_WRITER_BACKLOG_ENTRIES,
+        })
+    }
+
+    fn channel_with_limits(limits: WriterLimits) -> (Self, mpsc::Receiver<WriterCommand>) {
+        Self::channel_with_all_limits(
+            limits,
+            WriterLimits {
+                max_bytes: MAX_PROTOCOL_REPLY_BACKLOG_BYTES,
+                max_entries: MAX_PROTOCOL_REPLY_BACKLOG_ENTRIES,
+            },
+        )
+    }
+
+    fn channel_with_all_limits(
+        limits: WriterLimits,
+        protocol_reply_limits: WriterLimits,
+    ) -> (Self, mpsc::Receiver<WriterCommand>) {
         let (sender, receiver) = mpsc::channel();
         (
             Self {
                 sender,
-                control: Arc::new(WriterControl::default()),
+                control: Arc::new(WriterControl {
+                    close_requested: AtomicBool::new(false),
+                    wake_pending: AtomicBool::new(false),
+                    write_bytes: AtomicUsize::new(0),
+                    write_entries: AtomicUsize::new(0),
+                    limits,
+                    protocol_reply_bytes: AtomicUsize::new(0),
+                    protocol_reply_entries: AtomicUsize::new(0),
+                    protocol_reply_limits,
+                    pending_resize: Mutex::new(None),
+                }),
+                protocol_replies: Arc::new(ProtocolReplyQueue {
+                    pending: Mutex::new(VecDeque::new()),
+                }),
             },
             receiver,
         )
     }
 
     fn write_owned(&self, bytes: Vec<u8>) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
         if self.control.is_closed() {
             return Err(writer_closed_error());
         }
-        self.sender
-            .send(WriterCommand::Write(bytes))
-            .map_err(|_| writer_closed_error())
+        let reservation = self
+            .control
+            .reserve_write(bytes.capacity(), WriteClass::Normal)?;
+        self.send_reserved(bytes, reservation)
+    }
+
+    fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if self.control.is_closed() {
+            return Err(writer_closed_error());
+        }
+        // Reserve before copying borrowed input so an oversized or currently
+        // full backlog fails without allocating a payload that cannot queue.
+        let mut reservation = self
+            .control
+            .reserve_write(bytes.len(), WriteClass::Normal)?;
+        let owned = bytes.to_vec();
+        reservation.grow_to(owned.capacity())?;
+        self.send_reserved(owned, reservation)
+    }
+
+    fn write_protocol_reply_owned(&self, bytes: Vec<u8>) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if self.control.is_closed() {
+            return Err(writer_closed_error());
+        }
+        let reservation = self
+            .control
+            .reserve_write(bytes.capacity(), WriteClass::ProtocolReply)?;
+        self.protocol_replies
+            .push_if_open(
+                &self.control,
+                ReservedWrite {
+                    bytes,
+                    offset: 0,
+                    _reservation: reservation,
+                },
+            )
+            .map_err(|write| {
+                drop(write);
+                writer_closed_error()
+            })?;
+        self.wake()
+    }
+
+    fn send_reserved(&self, bytes: Vec<u8>, reservation: WriteReservation) -> io::Result<()> {
+        let command = WriterCommand::Write(ReservedWrite {
+            bytes,
+            offset: 0,
+            _reservation: reservation,
+        });
+        if let Err(error) = self.sender.send(command) {
+            drop(error);
+            self.protocol_replies.close(&self.control);
+            return Err(writer_closed_error());
+        }
+        Ok(())
     }
 
     fn resize(&self, window_size: WinSize) -> io::Result<()> {
         if !self.control.request_resize(window_size) {
             return Err(writer_closed_error());
         }
-        self.sender
-            .send(WriterCommand::Wake)
-            .map_err(|_| writer_closed_error())
+        self.wake()
     }
 
     fn close(&self) {
-        self.control.request_close();
+        self.protocol_replies.close(&self.control);
         // The receiver may be sleeping with no writes queued. A wake command
         // makes the sticky close visible without waiting for channel teardown.
-        let _ = self.sender.send(WriterCommand::Wake);
+        let _ = self.wake();
+    }
+
+    fn wake(&self) -> io::Result<()> {
+        let Some(reservation) = self.control.reserve_wake() else {
+            return Ok(());
+        };
+        if let Err(error) = self.sender.send(WriterCommand::Wake(reservation)) {
+            drop(error);
+            self.protocol_replies.close(&self.control);
+            return Err(writer_closed_error());
+        }
+        Ok(())
     }
 }
 
@@ -296,6 +454,171 @@ impl WriterControl {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
     }
+
+    fn reserve_write(
+        self: &Arc<Self>,
+        bytes: usize,
+        class: WriteClass,
+    ) -> io::Result<WriteReservation> {
+        let (byte_counter, entry_counter, limits) = self.write_budget(class);
+        if self.is_closed() || !try_reserve_counter(byte_counter, bytes, limits.max_bytes) {
+            return if self.is_closed() {
+                Err(writer_closed_error())
+            } else {
+                Err(self.backlog_full_error(class))
+            };
+        }
+        if !try_reserve_counter(entry_counter, 1, limits.max_entries) {
+            byte_counter.fetch_sub(bytes, Ordering::AcqRel);
+            return Err(self.backlog_full_error(class));
+        }
+        if self.is_closed() {
+            self.release_write(bytes, class);
+            return Err(writer_closed_error());
+        }
+        Ok(WriteReservation {
+            control: self.clone(),
+            bytes,
+            class,
+        })
+    }
+
+    fn write_budget(&self, class: WriteClass) -> (&AtomicUsize, &AtomicUsize, WriterLimits) {
+        match class {
+            WriteClass::Normal => (&self.write_bytes, &self.write_entries, self.limits),
+            WriteClass::ProtocolReply => (
+                &self.protocol_reply_bytes,
+                &self.protocol_reply_entries,
+                self.protocol_reply_limits,
+            ),
+        }
+    }
+
+    fn grow_write_reservation(&self, class: WriteClass, additional: usize) -> io::Result<()> {
+        if additional == 0 {
+            return Ok(());
+        }
+        let (byte_counter, _, limits) = self.write_budget(class);
+        if try_reserve_counter(byte_counter, additional, limits.max_bytes) {
+            Ok(())
+        } else {
+            Err(self.backlog_full_error(class))
+        }
+    }
+
+    fn reserve_wake(self: &Arc<Self>) -> Option<WakeReservation> {
+        self.wake_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| WakeReservation {
+                control: self.clone(),
+            })
+    }
+
+    fn release_write(&self, bytes: usize, class: WriteClass) {
+        let (byte_counter, entry_counter, _) = self.write_budget(class);
+        byte_counter.fetch_sub(bytes, Ordering::AcqRel);
+        entry_counter.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    fn backlog_full_error(&self, class: WriteClass) -> io::Error {
+        let (byte_counter, entry_counter, limits) = self.write_budget(class);
+        let bytes = byte_counter.load(Ordering::Acquire);
+        let entries = entry_counter.load(Ordering::Acquire);
+        let label = match class {
+            WriteClass::Normal => "writer",
+            WriteClass::ProtocolReply => "protocol-reply",
+        };
+        io::Error::new(
+            ErrorKind::WouldBlock,
+            format!(
+                "tmon PTY {label} backlog is full ({bytes} bytes in {entries} writes; limits are {} bytes and {} writes)",
+                limits.max_bytes, limits.max_entries,
+            ),
+        )
+    }
+
+    #[cfg(test)]
+    fn backlog(&self) -> (usize, usize) {
+        (
+            self.write_bytes.load(Ordering::Acquire),
+            self.write_entries.load(Ordering::Acquire),
+        )
+    }
+
+    #[cfg(test)]
+    fn protocol_reply_backlog(&self) -> (usize, usize) {
+        (
+            self.protocol_reply_bytes.load(Ordering::Acquire),
+            self.protocol_reply_entries.load(Ordering::Acquire),
+        )
+    }
+}
+
+impl ProtocolReplyQueue {
+    fn push_if_open(
+        &self,
+        control: &WriterControl,
+        write: ReservedWrite,
+    ) -> Result<(), ReservedWrite> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if control.is_closed() {
+            return Err(write);
+        }
+        pending.push_back(write);
+        Ok(())
+    }
+
+    fn pop(&self) -> Option<ReservedWrite> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+    }
+
+    fn close(&self, control: &WriterControl) {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        control.request_close();
+        pending.clear();
+    }
+}
+
+impl WriteReservation {
+    fn grow_to(&mut self, bytes: usize) -> io::Result<()> {
+        let additional = bytes.saturating_sub(self.bytes);
+        self.control
+            .grow_write_reservation(self.class, additional)?;
+        self.bytes += additional;
+        Ok(())
+    }
+}
+
+impl Drop for WriteReservation {
+    fn drop(&mut self) {
+        self.control.release_write(self.bytes, self.class);
+    }
+}
+
+impl Drop for WakeReservation {
+    fn drop(&mut self) {
+        self.control.wake_pending.store(false, Ordering::Release);
+    }
+}
+
+fn try_reserve_counter(counter: &AtomicUsize, amount: usize, limit: usize) -> bool {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current
+                .checked_add(amount)
+                .filter(|reserved| *reserved <= limit)
+        })
+        .is_ok()
 }
 
 fn writer_closed_error() -> io::Error {
@@ -424,9 +747,17 @@ impl Pty {
         };
         let (writer, writer_rx) = WriterHandle::channel();
         let writer_control = writer.control.clone();
+        let writer_protocol_replies = writer.protocol_replies.clone();
         let writer_thread = thread::Builder::new()
             .name("tmon-pty-writer".to_string())
-            .spawn(move || run_pty_writer(master_file, writer_rx, writer_control));
+            .spawn(move || {
+                run_pty_writer(
+                    master_file,
+                    writer_rx,
+                    writer_control,
+                    writer_protocol_replies,
+                );
+            });
         if let Err(error) = writer_thread {
             drop(reader);
             terminate_and_reap(pid);
@@ -480,24 +811,14 @@ impl Pty {
                     let shutdown_events = descriptors[1].revents;
                     if shutdown_events & (POLLIN | POLLERR | POLLHUP | POLLNVAL) != 0 {
                         child_wakeup = true;
-                        drain_ready_pty_output(
-                            &mut reader,
-                            &mut buffer,
-                            &mut on_output,
-                            &reader_writer,
-                        );
+                        drain_ready_pty_output(&mut reader, &mut buffer, &mut on_output);
                         break;
                     }
 
                     let reader_events = descriptors[0].revents;
                     if reader_events & POLLIN == 0 {
                         if reader_events & (POLLERR | POLLHUP | POLLNVAL) != 0 {
-                            drain_ready_pty_output(
-                                &mut reader,
-                                &mut buffer,
-                                &mut on_output,
-                                &reader_writer,
-                            );
+                            drain_ready_pty_output(&mut reader, &mut buffer, &mut on_output);
                             break;
                         }
                         continue;
@@ -506,8 +827,9 @@ impl Pty {
                         Ok(0) => break,
                         Ok(read) => {
                             let reply = on_output(&buffer[..read]);
-                            if !reply.is_empty() {
-                                let _ = reader_writer.write_owned(reply);
+                            if !queue_reader_protocol_reply(&reader_writer, reply) {
+                                force_child_shutdown(pid);
+                                break;
                             }
                         }
                         Err(error) if error.kind() == ErrorKind::Interrupted => {}
@@ -559,11 +881,24 @@ impl Pty {
     }
 
     pub(crate) fn write(&self, input: &[u8]) -> io::Result<()> {
-        self.write_owned(input.to_vec())
+        self.writer.write(input)
     }
 
     pub(crate) fn write_owned(&self, input: Vec<u8>) -> io::Result<()> {
         self.writer.write_owned(input)
+    }
+
+    pub(crate) fn write_protocol_reply_owned(&self, input: Vec<u8>) -> io::Result<()> {
+        match self.writer.write_protocol_reply_owned(input) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.writer.close();
+                if self.alive.load(Ordering::Acquire) {
+                    force_child_shutdown(self.child_pid);
+                }
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
@@ -596,11 +931,13 @@ fn run_pty_writer(
     master: File,
     receiver: mpsc::Receiver<WriterCommand>,
     control: Arc<WriterControl>,
+    protocol_replies: Arc<ProtocolReplyQueue>,
 ) {
     let _ = run_pty_writer_loop(
         master,
         receiver,
         control,
+        protocol_replies,
         wait_for_pty_writable,
         resize_pty_master,
     );
@@ -610,6 +947,7 @@ fn run_pty_writer_loop<W, WaitWritable, Resize>(
     mut writer: W,
     receiver: mpsc::Receiver<WriterCommand>,
     control: Arc<WriterControl>,
+    protocol_replies: Arc<ProtocolReplyQueue>,
     mut wait_writable: WaitWritable,
     mut resize: Resize,
 ) -> W
@@ -618,9 +956,11 @@ where
     WaitWritable: FnMut(&W) -> io::Result<()>,
     Resize: FnMut(&W, WinSize) -> io::Result<()>,
 {
-    // Keep exactly one write outside the channel. All later writes remain in
-    // std's unbounded FIFO, so control work never has to scan or copy backlog.
-    let mut current_write: Option<(Vec<u8>, usize)> = None;
+    // Keep exactly one reserved write outside the channel. All later accepted
+    // writes remain in std's FIFO, while their admission reservations bound
+    // both memory and entry count without making control work scan the backlog.
+    let mut current_write: Option<ReservedWrite> = None;
+    let mut current_protocol_reply: Option<ReservedWrite> = None;
 
     loop {
         if !matches!(
@@ -630,15 +970,20 @@ where
             break;
         }
 
-        if current_write.is_none() {
+        if current_protocol_reply.is_none() {
+            current_protocol_reply = protocol_replies.pop();
+        }
+
+        if current_protocol_reply.is_none() && current_write.is_none() {
             let Ok(command) = receiver.recv() else {
                 break;
             };
             match command {
-                WriterCommand::Write(bytes) if !bytes.is_empty() => {
-                    current_write = Some((bytes, 0));
-                }
-                WriterCommand::Write(_) | WriterCommand::Wake => {}
+                WriterCommand::Write(write) => current_write = Some(write),
+                // Dropping the token before servicing control permits a resize
+                // published concurrently with this service pass to queue the
+                // next (and only next) wake instead of being stranded.
+                WriterCommand::Wake(reservation) => drop(reservation),
             }
 
             // Resize and Close are published before their Wake command. Check
@@ -652,15 +997,29 @@ where
             }
         }
 
-        let Some((bytes, offset)) = current_write.as_mut() else {
+        // A reply is taken again after recv because the Wake that made the
+        // receiver runnable can race with the first priority-queue check.
+        if current_protocol_reply.is_none() {
+            current_protocol_reply = protocol_replies.pop();
+        }
+        let writing_protocol_reply = current_protocol_reply.is_some();
+        let Some(write) = current_protocol_reply.as_mut().or(current_write.as_mut()) else {
             continue;
         };
-        match writer.write(&bytes[*offset..]) {
+        let end = write
+            .offset
+            .saturating_add(MAX_WRITER_WRITE_CHUNK)
+            .min(write.bytes.len());
+        match writer.write(&write.bytes[write.offset..end]) {
             Ok(0) => break,
             Ok(written) => {
-                *offset += written;
-                if *offset == bytes.len() {
-                    current_write = None;
+                write.offset += written;
+                if write.offset == write.bytes.len() {
+                    if writing_protocol_reply {
+                        current_protocol_reply = None;
+                    } else {
+                        current_write = None;
+                    }
                 }
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
@@ -681,6 +1040,7 @@ where
         }
     }
 
+    protocol_replies.close(&control);
     writer
 }
 
@@ -830,12 +1190,19 @@ fn drain_ready_pty_output(
     reader: &mut File,
     buffer: &mut [u8],
     on_output: &mut impl FnMut(&[u8]) -> Vec<u8>,
-    writer: &WriterHandle,
 ) {
-    // A descendant can keep the slave open or continue producing output. Poll
-    // with a zero timeout and cap reads so direct-child exit stays prompt while
-    // preserving all data that was already queued in the PTY's bounded buffer.
-    for _ in 0..MAX_EXIT_DRAIN_READS {
+    // Snapshot the queue at direct-child exit. Consuming at least this many
+    // bytes preserves everything that was already buffered even when the
+    // callback itself is slow. After that snapshot is consumed, a wall-clock
+    // budget prevents a descendant that keeps writing from delaying exit
+    // forever. Every readiness check remains nonblocking.
+    let mut buffered_at_exit = readable_byte_count(reader).unwrap_or(0);
+    let drain_started = Instant::now();
+    loop {
+        if buffered_at_exit == 0 && drain_started.elapsed() >= EXIT_DRAIN_TIME_BUDGET {
+            return;
+        }
+
         let mut descriptor = PollFd {
             fd: reader.as_raw_fd(),
             events: POLLIN,
@@ -854,10 +1221,10 @@ fn drain_ready_pty_output(
         match reader.read(buffer) {
             Ok(0) => return,
             Ok(read) => {
-                let reply = on_output(&buffer[..read]);
-                if !reply.is_empty() {
-                    let _ = writer.write_owned(reply);
-                }
+                buffered_at_exit = buffered_at_exit.saturating_sub(read);
+                // The direct child has already exited, so there is no peer to
+                // consume a generated response. Keep draining its final output.
+                drop(on_output(&buffer[..read]));
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(error) if error.kind() == ErrorKind::WouldBlock => return,
@@ -865,6 +1232,31 @@ fn drain_ready_pty_output(
             Err(error) if error.raw_os_error() == Some(5) => return,
             Err(_) => return,
         }
+    }
+}
+
+fn queue_reader_protocol_reply(writer: &WriterHandle, reply: Vec<u8>) -> bool {
+    if reply.is_empty() {
+        return true;
+    }
+    if writer.write_protocol_reply_owned(reply).is_ok() {
+        true
+    } else {
+        // A missing protocol response can leave a child waiting forever. The
+        // caller tears down the child after this sticky writer shutdown.
+        writer.close();
+        false
+    }
+}
+
+fn readable_byte_count(reader: &File) -> Option<usize> {
+    let mut readable: c_int = 0;
+    // SAFETY: `reader` owns a live descriptor and `readable` is writable for
+    // the platform's FIONREAD integer result for the duration of this call.
+    if unsafe { ioctl(reader.as_raw_fd(), FIONREAD, &mut readable) } < 0 || readable < 0 {
+        None
+    } else {
+        Some(readable as usize)
     }
 }
 
@@ -915,18 +1307,53 @@ fn wait_for_child(pid: c_int) {
     }
 }
 
+fn signal_child_shutdown(pid: c_int) {
+    // SAFETY: `pid` is the exact process and process group created by forkpty.
+    unsafe {
+        if kill(-pid, SIGHUP) < 0 {
+            let _ = kill(pid, SIGHUP);
+        }
+    }
+}
+
+fn force_child_shutdown(pid: c_int) {
+    // The watcher remains the sole waiter. SIGKILL guarantees its wait returns
+    // even when a child ignores the conventional terminal SIGHUP.
+    unsafe {
+        let _ = kill(-pid, SIGKILL);
+        let _ = kill(pid, SIGKILL);
+    }
+}
+
+fn schedule_child_shutdown_escalation(pid: c_int, alive: Arc<AtomicBool>) {
+    let fallback_alive = alive.clone();
+    let escalation = thread::Builder::new()
+        .name("tmon-pty-shutdown".to_string())
+        .spawn(move || {
+            thread::sleep(DROP_SHUTDOWN_GRACE);
+            if alive.load(Ordering::Acquire) {
+                force_child_shutdown(pid);
+            }
+        });
+
+    // A failed thread spawn must not restore the original unbounded shutdown.
+    // Killing is non-blocking here; the dedicated watcher still performs waitpid.
+    if escalation.is_err() && fallback_alive.load(Ordering::Acquire) {
+        force_child_shutdown(pid);
+    }
+}
+
 impl Drop for Pty {
     fn drop(&mut self) {
-        if self.alive.load(Ordering::Acquire) {
-            // SAFETY: signaling the exact child process created by this PTY is the intended
-            // shutdown path. SIGHUP mirrors closing a conventional terminal session.
-            unsafe {
-                if kill(-self.child_pid, SIGHUP) < 0 {
-                    let _ = kill(self.child_pid, SIGHUP);
-                }
-            }
+        let child_was_alive = self.alive.load(Ordering::Acquire);
+        if child_was_alive {
+            // SIGHUP mirrors closing a conventional terminal session.
+            signal_child_shutdown(self.child_pid);
         }
         self.writer.close();
+        if child_was_alive {
+            schedule_child_shutdown_escalation(self.child_pid, self.alive.clone());
+        }
     }
 }
 
@@ -1033,842 +1460,5 @@ fn resolve_program(config: &SpawnConfig) -> io::Result<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::fd::IntoRawFd;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    use std::process::Command;
-    use std::{sync::atomic::AtomicUsize, time::Duration};
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const SIGNAL_IGNORE: usize = 1;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const SIGNAL_ERROR: usize = usize::MAX;
-
-    static TEST_DIRECTORY_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-
-    struct KillProcessOnDrop(c_int);
-
-    impl Drop for KillProcessOnDrop {
-        fn drop(&mut self) {
-            // SAFETY: tests construct this guard from the exact descendant PID
-            // reported by the shell that they just spawned.
-            unsafe {
-                let _ = kill(self.0, SIGKILL);
-            }
-        }
-    }
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new(label: &str) -> Self {
-            let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "tmon-pty-{label}-{}-{sequence}",
-                std::process::id()
-            ));
-            std::fs::create_dir(&path).expect("test directory should be created");
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn write_test_file(path: &Path, contents: &[u8], mode: u32) {
-        std::fs::write(path, contents).expect("test file should be written");
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .expect("test file permissions should be set");
-    }
-
-    fn assert_spawn_error(config: SpawnConfig, expected_kind: ErrorKind) -> io::Error {
-        let output_count = Arc::new(AtomicUsize::new(0));
-        let callback_output_count = output_count.clone();
-        let exit_count = Arc::new(AtomicUsize::new(0));
-        let callback_exit_count = exit_count.clone();
-        let result = Pty::spawn(
-            config,
-            test_size(),
-            move |_| {
-                callback_output_count.fetch_add(1, Ordering::AcqRel);
-                Vec::new()
-            },
-            move || {
-                callback_exit_count.fetch_add(1, Ordering::AcqRel);
-            },
-        );
-        let error = match result {
-            Ok(terminal) => {
-                drop(terminal);
-                panic!("invalid PTY configuration unexpectedly started a session");
-            }
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), expected_kind);
-        assert_eq!(output_count.load(Ordering::Acquire), 0);
-        assert_eq!(exit_count.load(Ordering::Acquire), 0);
-        error
-    }
-
-    fn test_size() -> Size {
-        Size {
-            cols: 80,
-            rows: 24,
-            cell_width: 8.0,
-            cell_height: 16.0,
-        }
-    }
-
-    #[derive(Default)]
-    struct PartialWriter {
-        bytes: Vec<u8>,
-        max_write: usize,
-        write_calls: usize,
-    }
-
-    impl Write for PartialWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.write_calls += 1;
-            let written = bytes.len().min(self.max_write);
-            self.bytes.extend_from_slice(&bytes[..written]);
-            Ok(written)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn winsize_uses_cell_metrics() {
-        let size = WinSize::from(Size {
-            cols: 80,
-            rows: 24,
-            cell_width: 9.0,
-            cell_height: 18.0,
-        });
-        assert_eq!(size.cols, 80);
-        assert_eq!(size.rows, 24);
-        assert_eq!(size.pixel_width, 720);
-        assert_eq!(size.pixel_height, 432);
-    }
-
-    #[test]
-    fn writer_control_coalesces_to_the_latest_resize() {
-        let (writer, receiver) = WriterHandle::channel();
-        let first = WinSize::from(test_size());
-        let latest = WinSize::from(Size {
-            cols: 132,
-            rows: 43,
-            ..test_size()
-        });
-
-        writer.resize(first).expect("first resize should queue");
-        writer.resize(latest).expect("latest resize should queue");
-        let mut applied = Vec::new();
-        assert!(
-            service_writer_control(&(), &writer.control, &mut |_, window_size| {
-                applied.push(window_size);
-                Ok(())
-            })
-            .expect("resize control should apply")
-        );
-
-        assert_eq!(applied, vec![latest]);
-        assert_eq!(receiver.try_iter().count(), 2, "every resize should wake");
-    }
-
-    #[test]
-    fn writer_control_reapplies_a_same_size_nudge() {
-        let (writer, _receiver) = WriterHandle::channel();
-        let window_size = WinSize::from(test_size());
-        let mut applied = Vec::new();
-
-        for _ in 0..2 {
-            writer
-                .resize(window_size)
-                .expect("same-size resize should queue");
-            assert!(
-                service_writer_control(&(), &writer.control, &mut |_, applied_size| {
-                    applied.push(applied_size);
-                    Ok(())
-                })
-                .expect("same-size resize should apply")
-            );
-        }
-
-        assert_eq!(applied, vec![window_size, window_size]);
-    }
-
-    #[test]
-    fn writer_control_close_is_sticky_and_cancels_pending_work() {
-        let (writer, receiver) = WriterHandle::channel();
-        writer
-            .resize(WinSize::from(test_size()))
-            .expect("resize should queue before close");
-        writer.close();
-
-        let mut resize_called = false;
-        assert!(
-            !service_writer_control(&(), &writer.control, &mut |_, _| {
-                resize_called = true;
-                Ok(())
-            })
-            .expect("close control should be readable")
-        );
-        assert!(!resize_called, "close should cancel the pending resize");
-        assert!(writer.control.is_closed());
-        assert_eq!(
-            writer
-                .write_owned(b"discarded".to_vec())
-                .unwrap_err()
-                .kind(),
-            ErrorKind::BrokenPipe
-        );
-        assert_eq!(
-            writer
-                .resize(WinSize::from(test_size()))
-                .unwrap_err()
-                .kind(),
-            ErrorKind::BrokenPipe
-        );
-        assert!(
-            matches!(
-                receiver.recv_timeout(Duration::from_millis(100)),
-                Ok(WriterCommand::Wake)
-            ),
-            "resize and close should leave a wake available to an idle receiver"
-        );
-    }
-
-    #[test]
-    fn writer_loop_keeps_partial_writes_fifo() {
-        let (writer, receiver) = WriterHandle::channel();
-        let control = writer.control.clone();
-        let first = b"AAAAA".to_vec();
-        let second = b"BBBBB".to_vec();
-        writer
-            .write_owned(first.clone())
-            .expect("first write should queue");
-        writer
-            .write_owned(second.clone())
-            .expect("second write should queue");
-        drop(writer);
-
-        let sink = run_pty_writer_loop(
-            PartialWriter {
-                max_write: 2,
-                ..PartialWriter::default()
-            },
-            receiver,
-            control,
-            |_| Ok(()),
-            |_, _| Ok(()),
-        );
-
-        let mut expected = first;
-        expected.extend_from_slice(&second);
-        assert_eq!(sink.bytes, expected);
-        assert_eq!(sink.write_calls, 6, "both writes should be partial");
-    }
-
-    #[test]
-    fn child_environment_rejects_invalid_override_names() {
-        for name in ["", "BAD=NAME"] {
-            let error = child_environment(&[(name.to_string(), "value".to_string())], None)
-                .expect_err("invalid environment name should fail");
-            assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        }
-    }
-
-    #[test]
-    fn child_environment_reports_the_actual_working_directory() {
-        let directory = Path::new("/tmp/tmon working directory");
-        let environment = child_environment(
-            &[("PWD".to_string(), "/stale/value".to_string())],
-            Some(directory),
-        )
-        .expect("working directory should be representable in the child environment");
-        assert!(
-            environment
-                .iter()
-                .any(|entry| { entry.as_bytes() == b"PWD=/tmp/tmon working directory" })
-        );
-    }
-
-    #[test]
-    fn missing_absolute_executable_fails_synchronously() {
-        let directory = TestDirectory::new("missing-executable");
-        let error = assert_spawn_error(
-            SpawnConfig {
-                program: directory
-                    .path()
-                    .join("does-not-exist")
-                    .to_string_lossy()
-                    .into_owned(),
-                args: Vec::new(),
-                working_directory: None,
-                environment: Vec::new(),
-            },
-            ErrorKind::NotFound,
-        );
-        assert!(error.to_string().contains("execute terminal program"));
-    }
-
-    #[test]
-    fn non_executable_file_fails_synchronously() {
-        let directory = TestDirectory::new("non-executable");
-        let program = directory.path().join("program");
-        write_test_file(&program, b"#!/bin/sh\nexit 0\n", 0o644);
-
-        let error = assert_spawn_error(
-            SpawnConfig {
-                program: program.to_string_lossy().into_owned(),
-                args: Vec::new(),
-                working_directory: None,
-                environment: Vec::new(),
-            },
-            ErrorKind::PermissionDenied,
-        );
-        assert!(error.to_string().contains("execute terminal program"));
-    }
-
-    #[test]
-    fn missing_working_directory_fails_synchronously() {
-        let directory = TestDirectory::new("missing-working-directory");
-        let error = assert_spawn_error(
-            SpawnConfig {
-                program: "/bin/sh".to_string(),
-                args: Vec::new(),
-                working_directory: Some(directory.path().join("does-not-exist")),
-                environment: Vec::new(),
-            },
-            ErrorKind::NotFound,
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("change terminal working directory")
-        );
-    }
-
-    #[test]
-    fn relative_path_entry_uses_child_working_directory() {
-        const SENTINEL: &[u8] = b"TMON_CHILD_CWD_PATH";
-
-        let directory = TestDirectory::new("relative-path");
-        let child_directory = directory.path().join("child");
-        let bin_directory = child_directory.join("bin");
-        std::fs::create_dir_all(&bin_directory).expect("child bin directory should be created");
-        let program = bin_directory.join("tmon-relative-path-probe");
-        write_test_file(&program, b"#!/bin/sh\nprintf TMON_CHILD_CWD_PATH\n", 0o755);
-        let config = SpawnConfig {
-            program: "tmon-relative-path-probe".to_string(),
-            args: Vec::new(),
-            working_directory: Some(child_directory),
-            environment: vec![("PATH".to_string(), "bin".to_string())],
-        };
-
-        let resolved = resolve_program(&config).expect("relative PATH entry should resolve");
-        assert!(resolved.is_absolute());
-        assert_eq!(
-            resolved,
-            program
-                .canonicalize()
-                .expect("test executable should canonicalize")
-        );
-
-        let (sentinel_tx, sentinel_rx) = mpsc::sync_channel(1);
-        let (exit_tx, exit_rx) = mpsc::sync_channel(1);
-        let mut output = Vec::new();
-        let mut sentinel_reported = false;
-        let terminal = Pty::spawn(
-            config,
-            test_size(),
-            move |bytes| {
-                output.extend_from_slice(bytes);
-                if !sentinel_reported && output.windows(SENTINEL.len()).any(|part| part == SENTINEL)
-                {
-                    sentinel_reported = true;
-                    let _ = sentinel_tx.send(());
-                }
-                Vec::new()
-            },
-            move || {
-                let _ = exit_tx.send(());
-            },
-        )
-        .expect("child-cwd relative PATH executable should start");
-
-        sentinel_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("resolved child executable should produce its sentinel");
-        exit_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("resolved child executable should exit");
-        drop(terminal);
-    }
-
-    #[test]
-    fn zero_timeout_exit_drain_reads_buffered_data_without_waiting_for_eof() {
-        const SENTINEL: &[u8] = b"TMON_TAIL_SENTINEL";
-
-        let (reader_stream, mut writer_stream) =
-            UnixStream::pair().expect("socket pair should open");
-        writer_stream
-            .write_all(SENTINEL)
-            .expect("sentinel should be buffered");
-        // SAFETY: ownership of the socket fd is transferred into `reader`.
-        let mut reader = unsafe { File::from_raw_fd(reader_stream.into_raw_fd()) };
-        let (writer, _writer_rx) = WriterHandle::channel();
-        let mut buffer = [0u8; 32 * 1024];
-        let mut output = Vec::new();
-        drain_ready_pty_output(
-            &mut reader,
-            &mut buffer,
-            &mut |bytes| {
-                output.extend_from_slice(bytes);
-                Vec::new()
-            },
-            &writer,
-        );
-
-        assert_eq!(output, SENTINEL);
-        // The peer deliberately remains open through the drain, proving the
-        // zero-timeout loop did not wait for EOF or descendant-style closure.
-        writer_stream
-            .write_all(b"still-open")
-            .expect("drain should not close the peer");
-    }
-
-    #[test]
-    fn direct_child_exit_delivers_final_sentinel_before_exit_callback() {
-        const SENTINEL: &[u8] = b"TMON_FINAL_SENTINEL";
-
-        let sentinel_seen = Arc::new(AtomicBool::new(false));
-        let output_sentinel_seen = sentinel_seen.clone();
-        let (exit_tx, exit_rx) = mpsc::sync_channel(1);
-        let mut output = Vec::new();
-        let terminal = Pty::spawn(
-            SpawnConfig {
-                program: "/bin/sh".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "printf 'TMON_FINAL_SENTINEL\\n'; exit 0".to_string(),
-                ],
-                working_directory: None,
-                environment: Vec::new(),
-            },
-            test_size(),
-            move |bytes| {
-                output.extend_from_slice(bytes);
-                if output.windows(SENTINEL.len()).any(|part| part == SENTINEL) {
-                    output_sentinel_seen.store(true, Ordering::Release);
-                }
-                Vec::new()
-            },
-            move || {
-                let _ = exit_tx.send(sentinel_seen.load(Ordering::Acquire));
-            },
-        )
-        .expect("PTY should start");
-
-        assert!(
-            exit_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("exit callback should run after delivering the final sentinel"),
-            "exit callback ran before the final PTY sentinel was delivered"
-        );
-        drop(terminal);
-    }
-
-    #[test]
-    fn direct_child_exit_is_reported_while_descendant_holds_slave_open() {
-        const MARKER: &[u8] = b"TMON_DESCENDANT_READY:";
-
-        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-        let mut output = Vec::new();
-        let mut acknowledged = false;
-        let exit_count = Arc::new(AtomicUsize::new(0));
-        let callback_count = exit_count.clone();
-        let (exit_tx, exit_rx) = mpsc::channel();
-        let exit_sender_guard = exit_tx.clone();
-
-        let terminal = Pty::spawn(
-            SpawnConfig {
-                program: "/bin/sh".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    concat!(
-                        "trap '' HUP\n",
-                        "sleep 30 &\n",
-                        "printf 'TMON_DESCENDANT_READY:%s\\n' \"$!\"\n",
-                        "read confirmation\n",
-                        "exit 0\n",
-                    )
-                    .to_string(),
-                ],
-                working_directory: None,
-                environment: Vec::new(),
-            },
-            test_size(),
-            move |bytes| {
-                output.extend_from_slice(bytes);
-                if acknowledged {
-                    return Vec::new();
-                }
-
-                let Some(marker) = output.windows(MARKER.len()).position(|part| part == MARKER)
-                else {
-                    return Vec::new();
-                };
-                let pid_start = marker + MARKER.len();
-                let Some(line_length) = output[pid_start..].iter().position(|byte| *byte == b'\n')
-                else {
-                    return Vec::new();
-                };
-                let pid = std::str::from_utf8(&output[pid_start..pid_start + line_length])
-                    .map_err(|error| error.to_string())
-                    .and_then(|text| {
-                        text.trim()
-                            .parse::<c_int>()
-                            .map_err(|error| error.to_string())
-                    });
-                let _ = ready_tx.send(pid);
-                acknowledged = true;
-                b"\n".to_vec()
-            },
-            move || {
-                callback_count.fetch_add(1, Ordering::AcqRel);
-                let _ = exit_tx.send(());
-            },
-        )
-        .expect("PTY should start");
-
-        let descendant_pid = ready_rx
-            .recv_timeout(Duration::from_secs(3))
-            .expect("background descendant should report its PID")
-            .expect("background descendant PID should be valid");
-        let descendant = KillProcessOnDrop(descendant_pid);
-        // Signal 0 only checks that the background descendant is still alive.
-        // SAFETY: `descendant_pid` was just reported by the direct child.
-        assert_eq!(unsafe { kill(descendant_pid, 0) }, 0);
-
-        exit_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("direct-child exit should not wait for the descendant's PTY descriptor");
-        assert!(matches!(
-            exit_rx.recv_timeout(Duration::from_millis(100)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        assert_eq!(exit_count.load(Ordering::Acquire), 1);
-
-        drop(exit_sender_guard);
-        drop(terminal);
-        drop(descendant);
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn resize_preempts_saturated_write_and_preserves_input_order() {
-        const HELPER_ENV: &str = "TMON_PTY_BACKPRESSURE_TEST_HELPER";
-        const READY: &[u8] = b"TMON_BACKPRESSURE_READY";
-        const WINCH: &[u8] = b"TMON_BACKPRESSURE_WINCH";
-        const ORDERED: &[u8] = b"TMON_BACKPRESSURE_ORDERED";
-        const WRITE_COUNT: usize = 300;
-        const CHUNK_BYTES: usize = 16 * 1024;
-
-        fn identifiable_write(index: usize) -> Vec<u8> {
-            let mut bytes = vec![(index % 251) as u8; CHUNK_BYTES];
-            bytes[..size_of::<u32>()].copy_from_slice(&(index as u32).to_le_bytes());
-            bytes
-        }
-
-        if std::env::var_os(HELPER_ENV).as_deref() == Some(OsStr::new("1")) {
-            let mut input = io::stdin().lock();
-            let mut chunk = vec![0; CHUNK_BYTES];
-            for index in 0..WRITE_COUNT {
-                input.read_exact(&mut chunk).unwrap_or_else(|error| {
-                    panic!("helper did not receive write {index}: {error}")
-                });
-                assert!(
-                    chunk == identifiable_write(index),
-                    "write {index} was reordered or corrupted"
-                );
-            }
-            io::stdout()
-                .write_all(ORDERED)
-                .expect("helper should report ordered input");
-            io::stdout()
-                .flush()
-                .expect("helper should flush its ordered-input marker");
-            return;
-        }
-
-        let executable = std::env::current_exe().expect("test executable should exist");
-        let script = concat!(
-            "stty raw -echo\n",
-            "resized=\n",
-            "trap 'resized=1; printf TMON_BACKPRESSURE_WINCH' WINCH\n",
-            "printf TMON_BACKPRESSURE_READY\n",
-            "while [ -z \"$resized\" ]; do :; done\n",
-            "exec \"$1\" \"$2\" --exact --nocapture\n",
-        );
-        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-        let (winch_tx, winch_rx) = mpsc::sync_channel(1);
-        let (ordered_tx, ordered_rx) = mpsc::sync_channel(1);
-        let (exit_tx, exit_rx) = mpsc::sync_channel(1);
-        let mut output = Vec::new();
-        let mut ready_reported = false;
-        let mut winch_reported = false;
-        let mut ordered_reported = false;
-        let terminal = Pty::spawn(
-            SpawnConfig {
-                program: "/bin/sh".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    script.to_string(),
-                    "tmon-backpressure-probe".to_string(),
-                    executable.to_string_lossy().into_owned(),
-                    "pty::tests::resize_preempts_saturated_write_and_preserves_input_order"
-                        .to_string(),
-                ],
-                working_directory: None,
-                environment: vec![(HELPER_ENV.to_string(), "1".to_string())],
-            },
-            test_size(),
-            move |bytes| {
-                output.extend_from_slice(bytes);
-                if !ready_reported && output.windows(READY.len()).any(|part| part == READY) {
-                    ready_reported = true;
-                    let _ = ready_tx.send(());
-                }
-                if !winch_reported && output.windows(WINCH.len()).any(|part| part == WINCH) {
-                    winch_reported = true;
-                    let _ = winch_tx.send(());
-                }
-                if !ordered_reported && output.windows(ORDERED.len()).any(|part| part == ORDERED) {
-                    ordered_reported = true;
-                    let _ = ordered_tx.send(());
-                }
-                Vec::new()
-            },
-            move || {
-                let _ = exit_tx.send(());
-            },
-        )
-        .expect("backpressure PTY should start");
-
-        ready_rx
-            .recv_timeout(Duration::from_secs(3))
-            .expect("child should stop reading after configuring its PTY");
-        for index in 0..WRITE_COUNT {
-            terminal
-                .write_owned(identifiable_write(index))
-                .unwrap_or_else(|error| panic!("write {index} should queue: {error}"));
-        }
-        terminal
-            .resize(Size {
-                cols: 100,
-                ..test_size()
-            })
-            .expect("resize should be published outside the write backlog");
-
-        winch_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("resize should preempt the saturated write");
-        ordered_rx
-            .recv_timeout(Duration::from_secs(8))
-            .expect("queued input should retain byte order after backpressure clears");
-        exit_rx
-            .recv_timeout(Duration::from_secs(3))
-            .expect("ordering helper should exit after reading all input");
-        drop(terminal);
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn canonical_unicode_erase_uses_iutf8() {
-        const READY: &[u8] = b"TMON_IUTF8_READY";
-        const RESULT: &[u8] = b"TMON_IUTF8_RESULT:";
-
-        let (result_tx, result_rx) = mpsc::sync_channel(1);
-        let (exit_tx, exit_rx) = mpsc::channel();
-        let mut output = Vec::new();
-        let mut input_sent = false;
-        let mut result_sent = false;
-        let terminal = Pty::spawn(
-            SpawnConfig {
-                program: "/bin/sh".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    concat!(
-                        "stty -echo erase '^?'\n",
-                        "printf TMON_IUTF8_READY\n",
-                        "IFS= read -r line\n",
-                        "printf 'TMON_IUTF8_RESULT:%s\\n' \"$line\"\n",
-                        "read confirmation\n",
-                    )
-                    .to_string(),
-                ],
-                working_directory: None,
-                environment: Vec::new(),
-            },
-            test_size(),
-            move |bytes| {
-                output.extend_from_slice(bytes);
-                let mut reply = Vec::new();
-                if !input_sent && output.windows(READY.len()).any(|part| part == READY) {
-                    input_sent = true;
-                    // Canonical erase should remove the complete two-byte `é`,
-                    // leaving only `X` for the shell's read.
-                    reply.extend_from_slice(&[0xc3, 0xa9, 0x7f, b'X', b'\n']);
-                }
-
-                if !result_sent
-                    && let Some(marker) =
-                        output.windows(RESULT.len()).position(|part| part == RESULT)
-                {
-                    let value_start = marker + RESULT.len();
-                    if let Some(line_length) =
-                        output[value_start..].iter().position(|byte| *byte == b'\n')
-                    {
-                        let mut value = output[value_start..value_start + line_length].to_vec();
-                        if value.last() == Some(&b'\r') {
-                            value.pop();
-                        }
-                        let _ = result_tx.send(value);
-                        result_sent = true;
-                        reply.push(b'\n');
-                    }
-                }
-                reply
-            },
-            move || {
-                let _ = exit_tx.send(());
-            },
-        )
-        .expect("PTY should start");
-
-        assert_eq!(
-            result_rx
-                .recv_timeout(Duration::from_secs(3))
-                .expect("child should report the canonical input"),
-            b"X"
-        );
-        exit_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("child should exit after the result acknowledgment");
-        drop(terminal);
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum SignalObservation {
-        Ready,
-        Survived,
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn child_resets_inherited_ignored_signals() {
-        const HELPER_ENV: &str = "TMON_SIGNAL_RESET_TEST_HELPER";
-        if std::env::var_os(HELPER_ENV).as_deref() != Some(OsStr::new("1")) {
-            let status =
-                Command::new(std::env::current_exe().expect("test executable should exist"))
-                    .arg("pty::tests::child_resets_inherited_ignored_signals")
-                    .arg("--exact")
-                    .arg("--nocapture")
-                    .env(HELPER_ENV, "1")
-                    .status()
-                    .expect("isolated signal test should start");
-            assert!(status.success(), "isolated signal test failed: {status}");
-            return;
-        }
-
-        const READY: &[u8] = b"TMON_SIGNAL_READY";
-        const SURVIVED: &[u8] = b"TMON_SIGNAL_SURVIVED";
-        let (observation_tx, observation_rx) = mpsc::channel();
-        let (exit_tx, exit_rx) = mpsc::channel();
-        let mut output = Vec::new();
-        let mut ready_acknowledged = false;
-        let mut survived_acknowledged = false;
-        let config = SpawnConfig {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                concat!(
-                    "printf TMON_SIGNAL_READY\n",
-                    "read ready\n",
-                    "kill -TERM $$\n",
-                    "printf TMON_SIGNAL_SURVIVED\n",
-                    "read survived\n",
-                )
-                .to_string(),
-            ],
-            working_directory: None,
-            environment: Vec::new(),
-        };
-
-        // This process is an isolated test helper, so temporarily changing its
-        // process-wide disposition cannot interfere with the main test runner.
-        // SAFETY: SIG_IGN is the POSIX sentinel value, and the exact prior
-        // disposition is restored immediately after forkpty returns.
-        let previous = unsafe { signal(SIGTERM, SIGNAL_IGNORE) };
-        assert_ne!(previous, SIGNAL_ERROR, "ignoring SIGTERM should succeed");
-        let terminal = Pty::spawn(
-            config,
-            test_size(),
-            move |bytes| {
-                output.extend_from_slice(bytes);
-                if !ready_acknowledged && output.windows(READY.len()).any(|part| part == READY) {
-                    ready_acknowledged = true;
-                    let _ = observation_tx.send(SignalObservation::Ready);
-                    return b"\n".to_vec();
-                }
-                if !survived_acknowledged
-                    && output.windows(SURVIVED.len()).any(|part| part == SURVIVED)
-                {
-                    survived_acknowledged = true;
-                    let _ = observation_tx.send(SignalObservation::Survived);
-                    return b"\n".to_vec();
-                }
-                Vec::new()
-            },
-            move || {
-                let _ = exit_tx.send(());
-            },
-        );
-        // SAFETY: `previous` is the handler returned by the successful signal call above.
-        let restore_result = unsafe { signal(SIGTERM, previous) };
-        assert_ne!(
-            restore_result, SIGNAL_ERROR,
-            "restoring SIGTERM should succeed"
-        );
-        let terminal = terminal.expect("PTY should start");
-
-        assert_eq!(
-            observation_rx
-                .recv_timeout(Duration::from_secs(3))
-                .expect("child should reach the pre-signal handshake"),
-            SignalObservation::Ready
-        );
-        exit_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("SIGTERM should terminate the child promptly");
-        assert_ne!(
-            observation_rx.try_recv(),
-            Ok(SignalObservation::Survived),
-            "the child inherited SIG_IGN instead of resetting SIGTERM"
-        );
-        drop(terminal);
-    }
-}
+#[path = "pty_tests/mod.rs"]
+mod tests;

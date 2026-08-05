@@ -112,12 +112,11 @@ impl TmuxRuntime {
         // the display parser cannot observe mode changes itself. Keep the pane
         // state current between full snapshots on tmux 3.4+; tmux 3.3 remains
         // supported through the snapshot fallback.
-        let mouse_subscription = client.subscribe(
+        let _ = client.subscribe(
             TMUX_MOUSE_MODE_SUBSCRIPTION_NAME,
             "%*",
             TMUX_MOUSE_MODE_SUBSCRIPTION_FORMAT,
         );
-        eprintln!("TERMY_MOUSE_DEBUG subscribe={mouse_subscription:?}");
         Self {
             config,
             client,

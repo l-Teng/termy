@@ -9,6 +9,10 @@ use std::path::PathBuf;
 /// Legacy JSON state file; read once to seed a fresh SQLite store.
 const NATIVE_WORKSPACE_STATE_FILE: &str = "native-tabs.json";
 
+fn inclusive_terminal_line_count(range: TerminalLineRange) -> usize {
+    usize::try_from(i64::from(range.last_line) - i64::from(range.first_line) + 1).unwrap_or(0)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PersistedNativePane {
     left: u16,
@@ -212,22 +216,23 @@ impl TerminalView {
         }
     }
 
+    #[cfg(test)]
     fn extract_persisted_buffer_line(terminal: &Terminal, line_idx: i32) -> Option<String> {
-        let (min_line, max_line) = terminal.line_bounds()?;
-        if line_idx < min_line || line_idx > max_line {
-            return None;
-        }
-
-        let mut text = String::with_capacity(usize::from(terminal.size().cols));
-        if !terminal.for_each_line_cell(line_idx, |_, cell| {
-            let character = cell.character();
-            if character == '\0' || cell.is_trailing_wide_spacer() || character.is_control() {
-                text.push(' ');
-            } else {
-                text.push(character);
-                cell.append_combining_to(&mut text);
-            }
-        }) {
+        let mut text = String::new();
+        let range =
+            terminal.for_each_line_cell_range(line_idx, line_idx, |range, _, _, cell| {
+                if text.capacity() == 0 {
+                    text.reserve(range.columns);
+                }
+                let character = cell.character();
+                if character == '\0' || cell.is_trailing_wide_spacer() || character.is_control() {
+                    text.push(' ');
+                } else {
+                    text.push(character);
+                    cell.append_combining_to(&mut text);
+                }
+            })?;
+        if line_idx < range.first_line || line_idx > range.last_line {
             return None;
         }
 
@@ -239,15 +244,37 @@ impl TerminalView {
             return None;
         }
 
-        let (_, history_size) = terminal.scroll_state();
-        let rows = i32::from(terminal.size().rows);
-        let mut lines = Vec::with_capacity(history_size.saturating_add(rows as usize));
-        for line_idx in -(history_size as i32)..rows {
-            if let Some(text) = Self::extract_persisted_buffer_line(terminal, line_idx) {
-                lines.push(text);
+        let mut joined = String::new();
+        let mut current_line = None;
+        let mut current_line_start = 0usize;
+        terminal.for_each_line_cell_range(i32::MIN, i32::MAX, |range, line, _, cell| {
+            if current_line != Some(line) {
+                if current_line.is_some() {
+                    let trimmed = joined[current_line_start..].trim_end().len();
+                    joined.truncate(current_line_start + trimmed);
+                    joined.push_str("\r\n");
+                } else {
+                    joined.reserve(
+                        inclusive_terminal_line_count(range)
+                            .saturating_mul(range.columns.saturating_add(2)),
+                    );
+                }
+                current_line = Some(line);
+                current_line_start = joined.len();
             }
+
+            let character = cell.character();
+            if character == '\0' || cell.is_trailing_wide_spacer() || character.is_control() {
+                joined.push(' ');
+            } else {
+                joined.push(character);
+                cell.append_combining_to(&mut joined);
+            }
+        })?;
+        if current_line.is_some() {
+            let trimmed = joined[current_line_start..].trim_end().len();
+            joined.truncate(current_line_start + trimmed);
         }
-        let joined = lines.join("\r\n");
         (!joined.trim().is_empty()).then_some(joined)
     }
 

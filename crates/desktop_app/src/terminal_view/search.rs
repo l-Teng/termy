@@ -214,11 +214,9 @@ impl TerminalView {
             self.clear_terminal_scrollbar_marker_cache();
             return;
         };
-        let (_, history_size) = terminal.scroll_state();
-        let rows = terminal.size().rows as i32;
-        let start_line = -(history_size as i32);
-        let end_line = rows - 1;
-        let line_texts = collect_search_line_texts(terminal, start_line, end_line);
+        let line_texts = collect_search_line_texts(terminal, i32::MIN, i32::MAX);
+        let start_line = line_texts.first_line;
+        let end_line = line_texts.last_line();
 
         let search_state = &mut self.search_state;
         search_state.search(start_line, end_line, |line_idx| line_texts.line(line_idx));
@@ -613,6 +611,13 @@ impl SearchLineSnapshot {
         self.text.get(range.clone())
     }
 
+    fn last_line(&self) -> i32 {
+        i32::try_from(self.ranges.len().saturating_sub(1))
+            .ok()
+            .and_then(|offset| self.first_line.checked_add(offset))
+            .unwrap_or(self.first_line)
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.ranges.len()
@@ -632,33 +637,66 @@ fn collect_search_line_texts(
     start_line: i32,
     end_line: i32,
 ) -> SearchLineSnapshot {
-    let line_count = (end_line - start_line + 1).max(0) as usize;
-    let mut line_texts = SearchLineSnapshot::new(start_line, line_count);
-    line_texts
-        .text
-        .reserve(line_count.saturating_mul(usize::from(terminal.size().cols)));
-    for line_idx in start_line..=end_line {
-        let start = line_texts.text.len();
-        let range = if append_terminal_line_text(terminal, line_idx, &mut line_texts.text) {
-            start..line_texts.text.len()
-        } else {
-            SearchLineSnapshot::MISSING_LINE..SearchLineSnapshot::MISSING_LINE
+    let mut line_texts = None;
+    let captured_range =
+        terminal.for_each_line_cell_range(start_line, end_line, |range, line_idx, _, cell| {
+            let snapshot = line_texts.get_or_insert_with(|| {
+                let first = start_line.max(range.first_line);
+                let last = end_line.min(range.last_line);
+                let line_count = inclusive_line_count(first, last);
+                let mut snapshot = SearchLineSnapshot::new(first, line_count);
+                snapshot.ranges.resize(
+                    line_count,
+                    SearchLineSnapshot::MISSING_LINE..SearchLineSnapshot::MISSING_LINE,
+                );
+                snapshot
+                    .text
+                    .reserve(line_count.saturating_mul(range.columns));
+                snapshot
+            });
+            let Some(index) = line_idx
+                .checked_sub(snapshot.first_line)
+                .and_then(|offset| usize::try_from(offset).ok())
+            else {
+                return;
+            };
+            let Some(cell_range) = snapshot.ranges.get_mut(index) else {
+                return;
+            };
+            if cell_range.start == SearchLineSnapshot::MISSING_LINE {
+                *cell_range = snapshot.text.len()..snapshot.text.len();
+            }
+            let character = cell.character();
+            if character == '\0' || cell.is_trailing_wide_spacer() || character.is_control() {
+                snapshot.text.push(' ');
+            } else {
+                snapshot.text.push(character);
+                cell.append_combining_to(&mut snapshot.text);
+            }
+            cell_range.end = snapshot.text.len();
+        });
+
+    line_texts.unwrap_or_else(|| {
+        let Some(range) = captured_range else {
+            return SearchLineSnapshot::new(start_line, 0);
         };
-        line_texts.ranges.push(range);
-    }
-    line_texts
+        let first = start_line.max(range.first_line);
+        let last = end_line.min(range.last_line);
+        let line_count = inclusive_line_count(first, last);
+        let mut snapshot = SearchLineSnapshot::new(first, line_count);
+        snapshot.ranges.resize(
+            line_count,
+            SearchLineSnapshot::MISSING_LINE..SearchLineSnapshot::MISSING_LINE,
+        );
+        snapshot
+    })
 }
 
-fn append_terminal_line_text(terminal: &Terminal, line_idx: i32, text: &mut String) -> bool {
-    terminal.for_each_line_cell(line_idx, |_, cell| {
-        let character = cell.character();
-        if character == '\0' || cell.is_trailing_wide_spacer() || character.is_control() {
-            text.push(' ');
-        } else {
-            text.push(character);
-            cell.append_combining_to(text);
-        }
-    })
+fn inclusive_line_count(first: i32, last: i32) -> usize {
+    if first > last {
+        return 0;
+    }
+    usize::try_from(i64::from(last) - i64::from(first) + 1).unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]

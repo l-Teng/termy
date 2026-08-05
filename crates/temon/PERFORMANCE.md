@@ -53,6 +53,29 @@ The repository's `Tmon vs Alacritty Benchmark` workflow remains the authority
 for a Linux after-table. It runs on every push, is manually dispatchable, and
 uploads `tmon-alacritty-benchmark.txt`.
 
+## Last hosted baseline before the current working tree
+
+GitHub Actions run
+[`30932203428`](https://github.com/lassejlv/termy/actions/runs/30932203428)
+measured commit `8c6acfb5c465e9950e6e27ac7f2f544c7ea61698` on an AMD EPYC 7763 runner with
+Rust 1.97.1. This is the last immutable hosted result before the currently
+uncommitted follow-up work and is therefore the comparison point for the next
+push, not evidence for the current working tree.
+
+| Workload | Tmon | Alacritty | Median paired ratio | Target |
+| --- | ---: | ---: | ---: | ---: |
+| Plain scrollback | 121.2 MiB/s | 47.3 MiB/s | 2.515x | 1.050x |
+| Styled TUI redraw | 105.1 MiB/s | 66.1 MiB/s | 1.589x | 1.050x |
+| Unicode + wide cells | 66.2 MiB/s | 59.5 MiB/s | 1.114x | 1.000x |
+| Cursor + line edits | 4.1 MiB/s | 3.0 MiB/s | 1.385x | 1.000x |
+
+The parser/grid gate passed. Tmon's full-frame API measured 159,400.2 calls/s,
+the report-only paired ratio was 19.076x, and retention against the supplied
+19.880x ratio was 96.0%. Both engines used 24-byte cells. The artifact also
+recorded zero allocation calls for Tmon's styled redraw feed loop and roughly
+10,000 retained row allocations for each scrolling workload; these are
+requested-byte allocator counters, not RSS measurements.
+
 ## Benchmark and profile audit
 
 Both engines receive identical bytes, a 120x40 grid, a 10,000-line history
@@ -79,14 +102,37 @@ and denominator are different operations whose relative cost can move with the
 runner. Retention is a trend to investigate, not an equivalent-work pass/fail
 claim.
 
+The harness now adds a separate renderer-neutral normalized frame for an honest
+cross-engine comparison. Both paths allocate the same owned frame shape and
+preserve visible cells, coherent metadata, raw colors, style flags, combining
+text, exact underline styles and colors, hyperlink presence, distinct
+wide-spacer roles, and wrapping. A mixed
+common-subset fixture must compare exactly before timing, and every sample runs
+for at least 250 ms. The first Linux Actions run establishes this new metric's
+baseline; the invalid historical 19.880x ratio is not reused as its target.
+
+A separate standalone gate now measures current Tmon against immutable commit
+`03d7ca5c5420ca141afe56f725341faadb71af18`. Both revisions execute their native
+`Terminal::snapshot()` on identical state in the same process. Before timing,
+an exact preflight checks each snapshot against independently visited terminal
+state and the other revision. It uses 20 balanced interleaved blocks, adaptive
+measurements of at least 250 ms per side, and paired throughput ratios. The
+sixth-smallest ratio is its conservative lower bound and the fifteenth-smallest
+is its upper bound: lower at or above 0.95 passes, upper below 0.95 is a clear
+regression, and overlap is inconclusive. Both regression and inconclusive
+results fail CI. This makes the no-more-than-5% requirement independent of
+hosted-runner absolute speed without pretending the older cross-engine ratio
+was comparable work.
+
 The Actions report is initialized under `runner.temp` before checkout. The
-timed comparison and subsequent allocation-only pass append through Bash
-`pipefail` pipelines, and an `always()` finalizer records the outcome of
-checkout, toolchain setup, cache setup, the comparison, and allocation
-accounting. If the runner remains available, the report is still added to the
-job summary and uploaded even when an earlier step fails. Allocation accounting
-also caps total parser work at 1,024 MiB, so an invalid oversized manual input
-fails quickly enough for the finalizer to preserve the report.
+timed comparison, immutable snapshot gate, and subsequent allocation-only pass
+append through Bash `pipefail` pipelines. An `always()` finalizer records the
+outcome of checkout, toolchain and cache setup, baseline checkout, the engine
+comparison, the snapshot gate, and allocation accounting. If the runner remains
+available, the report is still added to the job summary and uploaded even when
+an earlier step fails. Allocation accounting also caps total parser work at
+1,024 MiB, so an invalid oversized manual input fails quickly enough for the
+finalizer to preserve the report.
 
 It is an integrated runtime comparison, not a raw-parser comparison. Tmon feeds
 its engine directly. Alacritty is exercised through `termy_core`, including its
@@ -134,11 +180,25 @@ and UTF-8 validation pass, wide-cell replacement reuses one scalar-width
 calculation, and OSC 8 explicit identities use a reverse hash index. Hyperlink
 garbage collection is also amortized after 4,096 live links instead of scanning
 the full primary, alternate, and scrollback grids for every later link.
+Long combining sequences now append in place to their uniquely owned pooled
+metadata entry instead of cloning the complete prefix for every new mark. A
+1,024-mark regression verifies linear growth and a single pooled record.
+
+Width reflow now matches the pinned Alacritty engine across exhaustive scrolled
+soft-wrap matrices that vary both rows and columns, including its retained
+clear cursor-continuation rule. The display-offset shadow is skipped entirely
+for the common unscrolled path. Tmon also guarantees progress for a wide
+character resized to one column, which is below Alacritty's supported minimum
+width. These are correctness and complexity results only; no resize timing is
+inferred from them. Raw C1 string terminators were aligned with the pinned VTE
+parser at the same time and are covered by exact differential fixtures.
 
 These changes are intentionally not folded into the measured table above. The
-next GitHub Actions benchmark run is the acceptance measurement; no newer local
-benchmark was run. If the parser ratios or Tmon full-frame regression trend
-move backward there, the focused changes should be reconsidered independently.
+next GitHub Actions benchmark run is the acceptance measurement; no newer
+completed local result is accepted as evidence here. If the parser ratios or
+Tmon full-frame regression trend move backward there, the focused changes
+should be reconsidered independently.
+That run will also produce the first equivalent-work normalized-frame ratio.
 
 PTY control traffic was hardened separately from the parser benchmark. Resize
 requests now coalesce out of band and close is a sticky cancellation signal, so
@@ -147,6 +207,98 @@ the old queue-sized backlog, verifies that the newest resize reaches the child,
 and confirms that every accepted input block remains in FIFO order. This is a
 correctness and tail-latency safeguard; the saved parser/grid table does not
 measure it.
+
+Normal viewport scrolling now has a renderer-aware incremental path, also not
+included in the saved table. Tmon retains chronological row permutations,
+transforms pending dirty spans into final viewport coordinates, and exposes the
+batch with a generation token. The desktop replays those permutations by moving
+cached row handles and patches only final dirty cells; a generation mismatch
+falls back to a fresh full cache. Resize/reflow, alternate-screen transitions,
+palette or graphics changes, reset, selection/search overlays, scrollback view,
+invalid geometry, and bounded-log overflow remain conservative full rebuilds.
+The paint cache rebuilds every row in a moved region for now, while retaining
+its existing cross-row shape reuse.
+
+The cached render cell no longer stores a redundant destination row; cursor,
+hover, underline, text-batch, and geometry decisions derive it from the outer
+row. Tests replay full, partial, opposing, and multi-row scrolls into an
+incremental cache and compare the result exactly with a fresh Tmon snapshot
+after every update. No local timing was run for this change. Its report-only
+cache-update measurement in the next Actions artifact determines whether the
+optimization is retained and whether paint-cache row movement is worth a
+second step.
+
+Extended underline compatibility was added after the saved measurements and
+has not been benchmarked locally. `Attributes` widened to retain all five SGR 4
+underline styles, and each cell now carries an optional indexed/RGB SGR 58
+color. Combining text and OSC 8 identity were consolidated into one tagged
+metadata word, so `Color`, `Option<Color>`, and the full `Cell` remain 4, 4,
+and 24 bytes respectively. Exact Alacritty differential fixtures cover color
+and style resets, long combining text plus hyperlinks, edits, erasure, wide
+cell cleanup, reflow, scrollback, saved cursors, and alternate screens. The
+next Actions artifact is the first performance acceptance measurement for this
+layout; no speed claim is inferred from the unchanged static size.
+Termy's Tmon-only render path now retains the five styles and explicit color.
+Straight and curly styles use GPUI decorations; double, dotted, and dashed
+styles paint one bounded path per text batch. Style and color participate in
+batch/cache identity, while the native Alacritty and tmux mapping deliberately
+keeps its prior straight-foreground behavior. This painting work is likewise
+outside the saved parser/grid measurements.
+
+Graphics decoding is now portable and dependency-free. A safe, std-only
+zlib/DEFLATE implementation validates PNG payloads and Kitty `o=z` data on every
+supported platform, replacing the Unix libz boundary and former non-Unix
+unsupported path. This work has no new performance number: the parser/grid
+benchmark does not exercise graphics decoding. Decoded uploads and inflated
+scanline data are capped at 64 MiB per image, with a separate 128 MiB stored-PNG
+quota and a 4,096 image-record limit. Raw RGB/RGBA encoding now streams scanline
+filter bytes and stored
+DEFLATE blocks directly into the final PNG allocation; the full filtered and
+zlib staging vectors are gone. CRC32 uses a compile-time lookup table and
+Adler32 is incremental. Byte-for-byte regression fixtures cover a DEFLATE block
+boundary. Kitty control data is independently capped at 4 KiB and 64 fields
+before conversion, including unterminated commands split across reads. Supplied
+PNGs are compacted in place after validation to remove compressed iCCP/zTXt/iTXt
+metadata and APNG chunks, keeping downstream decoding within the validated
+static-image boundary. The common single-IDAT path validates directly from the
+upload buffer without allocating a duplicate compressed stream; multi-IDAT
+files are joined only when their chunk boundaries require it. The decoder rejects
+streams above 65,536 DEFLATE blocks, chunk continuations are capacity-checked
+before base64 allocation, and Unix file transfers reject FIFOs without a
+blocking open. This is a bounded-memory improvement rather than a speed or
+peak-RSS claim because the parser/grid benchmark does not exercise graphics.
+
+Image-number lookup uses the existing bounded image table and generation field,
+so supporting Kitty's `I` key adds no unbounded index. Uppercase deletion now
+tracks only image IDs affected by the selector instead of scanning and freeing
+every unrelated soft-deleted image.
+
+Native process handling also expanded outside the measured parser path. Tmon
+now provides both its Unix PTY and a dependency-free Windows ConPTY backend that
+loads the required entry points dynamically. The exact
+`TERMY_EXPERIMENTAL_TMON_ENGINE=1` gate selects it only when available; the
+Alacritty default and fallback remain unchanged. Shell command lifecycle events
+have priority in the bounded event queue, and Unix child exit now captures its
+readable output tail before a short bounded drain. Both PTY writers admit at
+most 8 MiB across 4,096 queued-or-active nonempty writes, reserve borrowed input
+before copying it, charge owned allocation capacity, release accounting through
+RAII, and coalesce resize/close wakes while preserving FIFO for every accepted
+write. A separate 2 MiB/256-entry FIFO gives required protocol replies priority
+at bounded 16 KiB write boundaries. An interrupted normal write resumes at the
+same offset and normal input order remains FIFO; saturation closes the session
+rather than silently losing a response. Unsupported Unix ABIs now compile
+through Tmon's non-native fallback instead of entering a partially defined PTY
+module. The parser/grid benchmark does not measure this PTY or event-queue work.
+Windows live-runtime validation and the next GitHub Actions benchmark artifact
+are still pending.
+
+Dropping a live Unix PTY now sends hangup, waits for a bounded 250 ms grace
+period, and escalates to `SIGKILL`, preventing a hangup-ignoring child from
+leaking indefinitely. Synchronized-update expiry also moved from a global
+unbounded queue to one shared coalescing scheduler with at most one queued task
+per engine. OSC 52 query replies use the reserved protocol-reply lane rather
+than competing with normal input. These are boundedness and lifecycle fixes;
+they have no parser/grid benchmark number.
 
 ## Allocation accounting
 
@@ -209,6 +361,19 @@ accepted compatibility tradeoff is the source-level `Cell` construction change
 above; the engine remains experimental and its broader VT/graphics parity is
 tracked separately from these benchmark results.
 
+A follow-up parity audit removed Tmon's artificial 4,096-character REP cap, so
+the full parsed `u16` repeat count now matches the pinned VTE behavior. The
+desktop adapter also enables OSC 52 clipboard queries through Termy's existing
+reply host, matching the native engine while leaving standalone Tmon's
+copy-only default unchanged.
+
+Search, selection, and persisted-buffer extraction now visit complete line
+ranges under one backing-terminal lock. Bounds, dimensions, and cells therefore
+come from one state while avoiding a lock/unlock cycle for every scrollback row.
+The developer inspector likewise captures Tmon's dimensions, scroll state,
+modes, and cursor under one engine lock instead of taking seven independent
+snapshots per pane and potentially mixing adjacent frames.
+
 ## Remaining hotspots
 
 - `put_char`, cell writes, and row movement remain the largest plain/Unicode
@@ -218,13 +383,15 @@ tracked separately from these benchmark results.
   blank-row shortcut shows that extra state checks can cost more than a bulk
   fill, so another attempt needs an adversarial differential test and repeatable
   measurements.
-- The two full-frame APIs perform different work. A truly comparable snapshot
-  benchmark needs a shared renderer-neutral output contract; the current ratio
-  must not be presented as a raw engine advantage.
-- Normal full-viewport scrolls currently become full damage at the desktop
-  adapter, so the renderer rebuilds the visible rows. Optimizing this needs a
-  renderer-inclusive benchmark and an ordered scroll-cache design; the current
-  parser/grid suite cannot validate the tradeoff.
+- The legacy public full-frame APIs perform different work, so their ratio must
+  not be presented as a raw engine advantage. The new shared normalized-frame
+  metric is equivalent work but still needs its first CI baseline. The separate
+  immutable-reference gate enforces Tmon's historical no-more-than-5% snapshot
+  regression requirement; its latest code still needs the next Actions run.
+- The first ordered scroll-cache path still rebuilds paint operations across
+  each moved region. Moving paint-row operations in lockstep could reduce that
+  work, but needs a renderer-inclusive measurement and cursor/hover/selection
+  correctness proof before changing the conservative invalidation.
 - Whole-process allocator requests are counted only during the allocation
   pass's `feed_output` scopes. RSS, retained heap, allocator fragmentation and
   metadata, terminal construction/destruction, snapshots, PTY I/O, and renderer

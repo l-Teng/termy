@@ -143,6 +143,10 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      - name: Test Tmon on Windows
+        if: matrix.os == 'windows'
+        run: cargo test --locked -p tmon --lib
+
       - name: Check desktop platform
         shell: bash
         run: ./scripts/check-platform-builds.sh --native

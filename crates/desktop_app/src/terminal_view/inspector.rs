@@ -182,6 +182,51 @@ struct InspectorPaneSnapshot {
     progress: ProgressState,
 }
 
+struct InspectorTerminalState {
+    size: TerminalSize,
+    display_offset: usize,
+    history_size: usize,
+    alternate_screen: bool,
+    bracketed_paste: bool,
+    mouse_mode: TerminalMouseMode,
+    keyboard_mode: TerminalKeyboardMode,
+    cursor_state: Option<TerminalCursorState>,
+    child_pid: Option<u32>,
+}
+
+impl Terminal {
+    fn inspector_state_snapshot(&self) -> InspectorTerminalState {
+        if let Self::Tmon(terminal) = self {
+            let state = terminal.state_snapshot();
+            return InspectorTerminalState {
+                size: tmon_adapter::terminal_size(state.size),
+                display_offset: state.display_offset,
+                history_size: state.history_size,
+                alternate_screen: state.alternate_screen_mode,
+                bracketed_paste: state.bracketed_paste_mode,
+                mouse_mode: tmon_adapter::mouse_mode(state.mouse_mode),
+                keyboard_mode: tmon_adapter::keyboard_mode(state.keyboard_mode),
+                cursor_state: state.cursor_state.map(tmon_adapter::cursor_state),
+                child_pid: state.child_pid,
+            };
+        }
+
+        let size = self.size();
+        let (display_offset, history_size) = self.scroll_state();
+        InspectorTerminalState {
+            size,
+            display_offset,
+            history_size,
+            alternate_screen: self.alternate_screen_mode(),
+            bracketed_paste: self.bracketed_paste_mode(),
+            mouse_mode: self.mouse_mode(),
+            keyboard_mode: self.keyboard_mode(),
+            cursor_state: self.cursor_state(),
+            child_pid: self.child_pid(),
+        }
+    }
+}
+
 struct InspectorActiveTabSnapshot {
     title: String,
     window_id: String,
@@ -365,28 +410,27 @@ impl TerminalView {
         let active_pane_id = tab.active_pane_id.as_str();
         tab.panes
             .iter()
-            .filter_map(|pane| {
+            .map(|pane| {
                 let terminal = pane.terminal();
-                let size = terminal.size();
-                let (display_offset, history_size) = terminal.scroll_state();
-                Some(InspectorPaneSnapshot {
+                let state = terminal.inspector_state_snapshot();
+                InspectorPaneSnapshot {
                     id: pane.id.clone(),
                     is_active: pane.id == active_pane_id,
-                    cols: size.cols,
-                    rows: size.rows,
+                    cols: state.size.cols,
+                    rows: state.size.rows,
                     cell_geometry: (pane.left, pane.top, pane.width, pane.height),
-                    display_offset,
-                    history_size,
-                    alternate_screen: terminal.alternate_screen_mode(),
-                    bracketed_paste: terminal.bracketed_paste_mode(),
-                    mouse_mode: terminal.mouse_mode(),
-                    keyboard_mode: terminal.keyboard_mode(),
-                    cursor_state: terminal.cursor_state(),
-                    child_pid: terminal.child_pid(),
+                    display_offset: state.display_offset,
+                    history_size: state.history_size,
+                    alternate_screen: state.alternate_screen,
+                    bracketed_paste: state.bracketed_paste,
+                    mouse_mode: state.mouse_mode,
+                    keyboard_mode: state.keyboard_mode,
+                    cursor_state: state.cursor_state,
+                    child_pid: state.child_pid,
                     zoom_steps: pane.pane_zoom_steps,
                     degraded: pane.degraded,
                     progress: pane.progress_state,
-                })
+                }
             })
             .collect()
     }
@@ -455,11 +499,7 @@ impl TerminalView {
             RuntimeKind::Native => "native",
             RuntimeKind::Tmux => "tmux",
         };
-        let engine_label = match self.active_terminal() {
-            Some(Terminal::Tmon(_)) => "tmon",
-            Some(Terminal::Native(_) | Terminal::Tmux(_)) => "alacritty",
-            None => "-",
-        };
+        let engine_label = terminal_engine_label(self.active_terminal());
         let tab_summary = self.inspector_active_tab_snapshot();
         let panes = self.inspector_pane_snapshots();
         let font_size: f32 = self.font_size.into();

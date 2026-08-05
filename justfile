@@ -7,7 +7,7 @@ set shell := ["bash", "-cu"]
 run:
     cargo run -p termy --release
 
-# Compare the Tmon and Alacritty parser/grid engines and write a text report.
+# Compare the terminal engines, enforce Tmon's snapshot baseline, and write a text report.
 benchmark-tmon:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -17,10 +17,19 @@ benchmark-tmon:
       echo
       cargo run --locked --quiet -p tmon --release --example engine_compare
     } 2>&1 | tee "$report"
+    gate_status=0
+    set +e
+    {
+      echo
+      cargo run --locked --quiet --release --manifest-path tools/tmon-revision-gate/Cargo.toml
+    } 2>&1 | tee -a "$report"
+    gate_status=$?
+    set -e
     {
       echo
       TMON_BENCH_ALLOCATIONS_ONLY=1 cargo run --locked --quiet -p tmon --release --example engine_compare --features benchmark-allocations
     } 2>&1 | tee -a "$report"
+    exit "$gate_status"
 
 run-cli *args:
     cargo run --bin termy-cli --release {{ args }}

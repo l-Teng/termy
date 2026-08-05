@@ -1,4 +1,10 @@
-use std::{env, hint::black_box, mem::size_of, time::Instant};
+use std::{
+    env,
+    hint::black_box,
+    mem::size_of,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
 
 #[cfg(feature = "benchmark-allocations")]
 mod allocation_counter {
@@ -254,7 +260,7 @@ use alacritty_terminal::{
     grid::Dimensions,
     index::Line,
     term::cell::{Cell as AlacrittyCell, Flags},
-    vte::ansi::{Color as AlacrittyColor, NamedColor},
+    vte::ansi::{Color as AlacrittyColor, CursorShape, NamedColor},
 };
 use termy_core::{
     Terminal as AlacrittyTerminal, TerminalCursorStyle, TerminalRuntimeConfig,
@@ -262,7 +268,8 @@ use termy_core::{
 };
 use tmon::{
     Combining as TmonCombining, Config as TmonConfig, CursorStyle as TmonCursorStyle,
-    Size as TmonSize, Terminal as TmonTerminal,
+    DamageSnapshot, RenderDamageSnapshot, ScrollDamage, ScrollDirection, Size as TmonSize,
+    Terminal as TmonTerminal, UnderlineStyle as TmonUnderlineStyle,
 };
 
 const MIB: usize = 1024 * 1024;
@@ -270,6 +277,16 @@ const COLS: u16 = 120;
 const ROWS: u16 = 40;
 const SCROLLBACK: usize = 10_000;
 const SNAPSHOT_PREFILL_BYTES: usize = 2 * MIB;
+const NORMALIZED_SNAPSHOT_MIN_DURATION: Duration = Duration::from_millis(250);
+const RENDERER_CACHE_MIN_DURATION: Duration = NORMALIZED_SNAPSHOT_MIN_DURATION;
+const RENDERER_CACHE_UPDATE: &str = concat!(
+    "\x1b[40;1Htail-A\r\n",
+    "tail-B",
+    "\x1b[5;30r\x1b[5;1H\x1bM",
+    "\x1b[30;1H\n",
+    "\x1b[r",
+    "\x1b[12;10Hpatched cafe\u{301} \x1b[38;2;9;8;7mcolor\x1b[0m",
+);
 const VALIDATION_BYTES_MAX: usize = 32 * MIB;
 const MAX_BENCHMARK_MIB_PER_ENGINE: usize = 2_048;
 #[cfg(feature = "benchmark-allocations")]
@@ -349,321 +366,17 @@ enum RawColor {
     Rgb(u8, u8, u8),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SemanticCell {
-    character: char,
-    combining: String,
-    foreground: RawColor,
-    background: RawColor,
-    bold: bool,
-    dim: bool,
-    italic: bool,
-    underline: bool,
-    inverse: bool,
-    hidden: bool,
-    strikethrough: bool,
-    hyperlink: bool,
-    wide_spacer: bool,
-    wrapped: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawUnderlineStyle {
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
 }
 
-fn setting(name: &str, default: usize, min: usize, max: usize) -> usize {
-    let Ok(raw) = env::var(name) else {
-        return default;
-    };
-    let value = raw
-        .parse::<usize>()
-        .unwrap_or_else(|_| panic!("{name} must be an integer, got {raw:?}"));
-    assert!(
-        (min..=max).contains(&value),
-        "{name} must be between {min} and {max}, got {value}"
-    );
-    value
-}
-
-fn require_even_sample_count(sample_count: usize) -> usize {
-    assert!(
-        sample_count.is_multiple_of(2),
-        "TMON_BENCH_SAMPLES must be even so every workload has balanced Tmon-first and \
-         Alacritty-first pairs, got {sample_count}"
-    );
-    sample_count
-}
-
-fn sample_order(index: usize, tmon_first: bool) -> [Engine; 2] {
-    if index.is_multiple_of(2) == tmon_first {
-        [Engine::Tmon, Engine::Alacritty]
-    } else {
-        [Engine::Alacritty, Engine::Tmon]
-    }
-}
-
-fn validate_target_ratio(target: f64) -> Result<(), &'static str> {
-    if !target.is_finite() {
-        return Err("target ratio must be finite");
-    }
-    if target <= 0.0 {
-        return Err("target ratio must be greater than zero");
-    }
-    Ok(())
-}
-
-fn meets_target(actual: f64, target: f64) -> bool {
-    validate_target_ratio(target).unwrap_or_else(|reason| panic!("{reason}, got {target:?}"));
-    actual.is_finite() && actual >= target
-}
-
-fn tmon_terminal() -> TmonTerminal {
-    TmonTerminal::new_display(
-        TmonSize {
-            cols: COLS,
-            rows: ROWS,
-            ..TmonSize::default()
-        },
-        TmonConfig {
-            scrollback_history: SCROLLBACK,
-            ..TmonConfig::default()
-        },
-    )
-}
-
-fn alacritty_terminal() -> AlacrittyTerminal {
-    let config = TerminalRuntimeConfig {
-        scrollback_history: SCROLLBACK,
-        ..TerminalRuntimeConfig::default()
-    };
-    AlacrittyTerminal::new_display(
-        AlacrittySize {
-            cols: COLS,
-            rows: ROWS,
-            ..AlacrittySize::default()
-        },
-        Some(&config),
-    )
-}
-
-#[cfg(feature = "benchmark-allocations")]
-fn feed_tmon_target(terminal: &TmonTerminal, payload: &[u8], target_bytes: usize) {
-    for _ in 0..iterations_for(target_bytes, payload) {
-        terminal.feed_output(black_box(payload));
-    }
-}
-
-#[cfg(feature = "benchmark-allocations")]
-fn feed_alacritty_target(terminal: &AlacrittyTerminal, payload: &[u8], target_bytes: usize) {
-    for _ in 0..iterations_for(target_bytes, payload) {
-        terminal.feed_output(black_box(payload));
-    }
-}
-
-#[cfg(feature = "benchmark-allocations")]
-fn warm_up_allocation_path(engine: Engine, workload: &Workload) {
-    let payload = workload.payload.as_bytes();
-    match engine {
-        Engine::Tmon => {
-            let terminal = tmon_terminal();
-            feed_tmon_target(&terminal, payload, ALLOCATION_WARMUP_BYTES);
-            black_box(&terminal);
-        }
-        Engine::Alacritty => {
-            let terminal = alacritty_terminal();
-            feed_alacritty_target(&terminal, payload, ALLOCATION_WARMUP_BYTES);
-            black_box(&terminal);
-        }
-    }
-}
-
-#[cfg(feature = "benchmark-allocations")]
-fn allocation_sample(
-    engine: Engine,
-    workload: &Workload,
-    target_bytes: usize,
-) -> allocation_counter::AllocationSnapshot {
-    warm_up_allocation_path(engine, workload);
-    let payload = workload.payload.as_bytes();
-
-    match engine {
-        Engine::Tmon => {
-            let terminal = tmon_terminal();
-            let measurement =
-                allocation_counter::AllocationMeasurement::begin().unwrap_or_else(|reason| {
-                    panic!("could not start allocation measurement: {reason}")
-                });
-            feed_tmon_target(&terminal, payload, target_bytes);
-            let allocations = measurement.finish();
-            black_box(terminal.snapshot());
-            allocations
-        }
-        Engine::Alacritty => {
-            let terminal = alacritty_terminal();
-            let measurement =
-                allocation_counter::AllocationMeasurement::begin().unwrap_or_else(|reason| {
-                    panic!("could not start allocation measurement: {reason}")
-                });
-            feed_alacritty_target(&terminal, payload, target_bytes);
-            let allocations = measurement.finish();
-            black_box(terminal.snapshot());
-            allocations
-        }
-    }
-}
-
-fn alacritty_color(color: AlacrittyColor) -> RawColor {
-    match color {
-        AlacrittyColor::Spec(rgb) => RawColor::Rgb(rgb.r, rgb.g, rgb.b),
-        AlacrittyColor::Indexed(index) => RawColor::Indexed(index),
-        AlacrittyColor::Named(name) if (name as usize) < 16 => RawColor::Indexed(name as u8),
-        AlacrittyColor::Named(
-            NamedColor::Foreground
-            | NamedColor::Background
-            | NamedColor::BrightForeground
-            | NamedColor::DimForeground,
-        ) => RawColor::Default,
-        AlacrittyColor::Named(name) => panic!("unexpected named cell color {name:?}"),
-    }
-}
-
-fn tmon_color(color: tmon::Color) -> RawColor {
-    match color {
-        tmon::Color::Default => RawColor::Default,
-        tmon::Color::Indexed(index) => RawColor::Indexed(index),
-        tmon::Color::Rgb { r, g, b } => RawColor::Rgb(r, g, b),
-    }
-}
-
-fn alacritty_cell(cell: &AlacrittyCell) -> SemanticCell {
-    SemanticCell {
-        character: cell.c,
-        combining: cell.zerowidth().into_iter().flatten().collect(),
-        foreground: alacritty_color(cell.fg),
-        background: alacritty_color(cell.bg),
-        bold: cell.flags.contains(Flags::BOLD),
-        dim: cell.flags.contains(Flags::DIM),
-        italic: cell.flags.contains(Flags::ITALIC),
-        underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-        inverse: cell.flags.contains(Flags::INVERSE),
-        hidden: cell.flags.contains(Flags::HIDDEN),
-        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
-        hyperlink: cell.hyperlink().is_some(),
-        wide_spacer: cell
-            .flags
-            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-        wrapped: cell.flags.contains(Flags::WRAPLINE),
-    }
-}
-
-fn tmon_cell(cell: &tmon::Cell, combining: Option<TmonCombining<'_>>) -> SemanticCell {
-    SemanticCell {
-        character: cell.character,
-        combining: combining.map_or_else(String::new, TmonCombining::to_owned_string),
-        foreground: tmon_color(cell.foreground),
-        background: tmon_color(cell.background),
-        bold: cell.attributes.bold(),
-        dim: cell.attributes.dim(),
-        italic: cell.attributes.italic(),
-        underline: cell.attributes.underline(),
-        inverse: cell.attributes.inverse(),
-        hidden: cell.attributes.hidden(),
-        strikethrough: cell.attributes.strikethrough(),
-        hyperlink: cell.hyperlink_id.is_some(),
-        wide_spacer: cell.wide_spacer() || cell.leading_wide_spacer(),
-        wrapped: cell.wrapped(),
-    }
-}
-
-fn assert_workload_equivalence(workload: &Workload, validation_bytes: usize) {
-    let tmon = tmon_terminal();
-    let alacritty = alacritty_terminal();
-    let payload = workload.payload.as_bytes();
-    for _ in 0..iterations_for(validation_bytes, payload) {
-        tmon.feed_output(payload);
-        alacritty.feed_output(payload);
-    }
-
-    let (tmon_first, tmon_last) = tmon.line_bounds();
-    alacritty.with_term(|term| {
-        let grid = term.grid();
-        let alacritty_first = -(grid.history_size() as i32);
-        let alacritty_last = grid.screen_lines() as i32 - 1;
-        assert_eq!(
-            (tmon_first, tmon_last),
-            (alacritty_first, alacritty_last),
-            "{}: full-grid bounds differ",
-            workload.name
-        );
-
-        for line in alacritty_first..=alacritty_last {
-            let alacritty_line = (&grid[Line(line)])
-                .into_iter()
-                .map(alacritty_cell)
-                .collect::<Vec<_>>();
-            let mut tmon_line = Vec::with_capacity(alacritty_line.len());
-            assert!(
-                tmon.for_each_line_cell(line, |_, cell, combining| {
-                    tmon_line.push(tmon_cell(cell, combining));
-                }),
-                "{}: Tmon is missing grid line {line}",
-                workload.name
-            );
-            assert_eq!(
-                tmon_line.len(),
-                alacritty_line.len(),
-                "{}: grid line {line} has a different width",
-                workload.name
-            );
-            if let Some((col, (tmon_cell, alacritty_cell))) = tmon_line
-                .iter()
-                .zip(&alacritty_line)
-                .enumerate()
-                .find(|(_, (tmon_cell, alacritty_cell))| tmon_cell != alacritty_cell)
-            {
-                panic!(
-                    "{}: terminal state differs at line {line}, column {col}:\n\
-                     Tmon: {tmon_cell:?}\nAlacritty: {alacritty_cell:?}",
-                    workload.name
-                );
-            }
-        }
-    });
-
-    let tmon_cursor = tmon.cursor_state().map(|cursor| {
-        (
-            cursor.col,
-            cursor.row,
-            matches!(cursor.style, TmonCursorStyle::Line),
-        )
-    });
-    let alacritty_cursor = alacritty.cursor_state().map(|cursor| {
-        (
-            cursor.col,
-            cursor.row,
-            matches!(cursor.style, TerminalCursorStyle::Line),
-        )
-    });
-    assert_eq!(
-        tmon_cursor, alacritty_cursor,
-        "{}: cursor state differs",
-        workload.name
-    );
-    assert_eq!(
-        tmon.scroll_state(),
-        alacritty.scroll_state(),
-        "{}: scroll state differs",
-        workload.name
-    );
-    assert_eq!(
-        tmon.alternate_screen_mode(),
-        alacritty.alternate_screen_mode(),
-        "{}: screen mode differs",
-        workload.name
-    );
-    assert_eq!(
-        tmon.bracketed_paste_mode(),
-        alacritty.bracketed_paste_mode(),
-        "{}: bracketed-paste mode differs",
-        workload.name
-    );
-}
+include!("engine_compare/normalization.rs");
 
 fn iterations_for(target_bytes: usize, payload: &[u8]) -> usize {
     target_bytes.div_ceil(payload.len())
@@ -736,6 +449,58 @@ fn snapshot_sample(engine: Engine, snapshots: usize) -> f64 {
         }
     };
     snapshots as f64 / elapsed.as_secs_f64()
+}
+
+fn warm_normalized_snapshot(engine: Engine) {
+    match engine {
+        Engine::Tmon => {
+            let terminal = tmon_terminal();
+            prepare_normalized_tmon(&terminal, SNAPSHOT_PREFILL_BYTES);
+            black_box(normalized_tmon_frame(&terminal));
+        }
+        Engine::Alacritty => {
+            let terminal = alacritty_terminal();
+            prepare_normalized_alacritty(&terminal, SNAPSHOT_PREFILL_BYTES);
+            black_box(normalized_alacritty_frame(&terminal));
+        }
+    }
+}
+
+fn measure_normalized_snapshots(
+    minimum_snapshots: usize,
+    mut snapshot: impl FnMut() -> NormalizedFrame,
+) -> f64 {
+    const BATCH_SIZE: usize = 64;
+
+    let started = Instant::now();
+    let mut completed = 0usize;
+    loop {
+        for _ in 0..BATCH_SIZE {
+            black_box(snapshot());
+        }
+        completed = completed.saturating_add(BATCH_SIZE);
+        let elapsed = started.elapsed();
+        if completed >= minimum_snapshots && elapsed >= NORMALIZED_SNAPSHOT_MIN_DURATION {
+            return completed as f64 / elapsed.as_secs_f64();
+        }
+    }
+}
+
+fn normalized_snapshot_sample(engine: Engine, minimum_snapshots: usize) -> f64 {
+    match engine {
+        Engine::Tmon => {
+            let terminal = tmon_terminal();
+            prepare_normalized_tmon(&terminal, SNAPSHOT_PREFILL_BYTES);
+            measure_normalized_snapshots(minimum_snapshots, || normalized_tmon_frame(&terminal))
+        }
+        Engine::Alacritty => {
+            let terminal = alacritty_terminal();
+            prepare_normalized_alacritty(&terminal, SNAPSHOT_PREFILL_BYTES);
+            measure_normalized_snapshots(minimum_snapshots, || {
+                normalized_alacritty_frame(&terminal)
+            })
+        }
+    }
 }
 
 fn stats(samples: &[f64]) -> Stats {
@@ -870,6 +635,208 @@ fn collect_snapshot_samples(
     samples
 }
 
+fn collect_normalized_snapshot_samples(
+    minimum_snapshot_count: usize,
+    sample_count: usize,
+    tmon_first: bool,
+) -> Vec<PairedSample> {
+    for engine in sample_order(0, tmon_first) {
+        warm_normalized_snapshot(engine);
+    }
+
+    let mut samples = Vec::with_capacity(sample_count);
+    for index in 0..sample_count {
+        samples.push(measure_pair(sample_order(index, tmon_first), |engine| {
+            normalized_snapshot_sample(engine, minimum_snapshot_count)
+        }));
+    }
+    samples
+}
+
+fn renderer_cache_report_enabled() -> bool {
+    env::var_os("CI").is_some()
+}
+
+fn renderer_cache_order(index: usize) -> [RendererCachePath; 2] {
+    if index.is_multiple_of(2) {
+        [
+            RendererCachePath::FullRebuild,
+            RendererCachePath::ScrollReplay,
+        ]
+    } else {
+        [
+            RendererCachePath::ScrollReplay,
+            RendererCachePath::FullRebuild,
+        ]
+    }
+}
+
+impl RendererCacheSample {
+    fn ratio(self) -> f64 {
+        assert!(
+            self.full_rebuild.is_finite() && self.full_rebuild > 0.0,
+            "full renderer-cache rebuild sample must be finite and positive"
+        );
+        assert!(
+            self.scroll_replay.is_finite() && self.scroll_replay >= 0.0,
+            "renderer-cache replay sample must be finite and non-negative"
+        );
+        let ratio = self.scroll_replay / self.full_rebuild;
+        assert!(ratio.is_finite(), "renderer-cache ratio must be finite");
+        ratio
+    }
+
+    fn order_label(self) -> &'static str {
+        match self.first {
+            RendererCachePath::FullRebuild => "F/R",
+            RendererCachePath::ScrollReplay => "R/F",
+        }
+    }
+}
+
+fn measure_renderer_cache_path(
+    fixture: &RendererCacheFixture,
+    path: RendererCachePath,
+    minimum_updates: usize,
+) -> f64 {
+    let mut elapsed = Duration::ZERO;
+    let mut completed = 0usize;
+    loop {
+        match path {
+            RendererCachePath::FullRebuild => {
+                let started = Instant::now();
+                let frame = fresh_renderer_cache_frame(
+                    &fixture.terminal,
+                    fixture.expected.cols,
+                    fixture.expected.rows,
+                );
+                elapsed = elapsed.saturating_add(started.elapsed());
+                black_box(frame);
+            }
+            RendererCachePath::ScrollReplay => {
+                // A live renderer already owns the prior frame. Cloning this
+                // benchmark cache copies only its root Arc here. The timed
+                // update copy-on-writes the outer row table, and then each
+                // actually patched row.
+                let mut frame = black_box(&fixture.before).clone();
+                let started = Instant::now();
+                let applied =
+                    apply_renderer_cache_update(&mut frame, &fixture.terminal, &fixture.update);
+                elapsed = elapsed.saturating_add(started.elapsed());
+                assert!(applied, "captured renderer-cache generation became stale");
+                black_box(frame);
+            }
+        }
+        completed = completed.saturating_add(1);
+        if completed >= minimum_updates && elapsed >= RENDERER_CACHE_MIN_DURATION {
+            return completed as f64 / elapsed.as_secs_f64();
+        }
+    }
+}
+
+fn measure_renderer_cache_pair(
+    fixture: &RendererCacheFixture,
+    order: [RendererCachePath; 2],
+    minimum_updates: usize,
+) -> RendererCacheSample {
+    let first = order[0];
+    let (full_rebuild, scroll_replay) = match order {
+        [
+            RendererCachePath::FullRebuild,
+            RendererCachePath::ScrollReplay,
+        ] => (
+            measure_renderer_cache_path(fixture, RendererCachePath::FullRebuild, minimum_updates),
+            measure_renderer_cache_path(fixture, RendererCachePath::ScrollReplay, minimum_updates),
+        ),
+        [
+            RendererCachePath::ScrollReplay,
+            RendererCachePath::FullRebuild,
+        ] => {
+            let scroll_replay = measure_renderer_cache_path(
+                fixture,
+                RendererCachePath::ScrollReplay,
+                minimum_updates,
+            );
+            let full_rebuild = measure_renderer_cache_path(
+                fixture,
+                RendererCachePath::FullRebuild,
+                minimum_updates,
+            );
+            (full_rebuild, scroll_replay)
+        }
+        _ => panic!("a renderer-cache pair must measure each path exactly once"),
+    };
+    RendererCacheSample {
+        first,
+        full_rebuild,
+        scroll_replay,
+    }
+}
+
+fn renderer_cache_stats(samples: &[RendererCacheSample]) -> RendererCacheStats {
+    let full_rebuild = samples
+        .iter()
+        .map(|sample| sample.full_rebuild)
+        .collect::<Vec<_>>();
+    let scroll_replay = samples
+        .iter()
+        .map(|sample| sample.scroll_replay)
+        .collect::<Vec<_>>();
+    let ratios = samples
+        .iter()
+        .copied()
+        .map(RendererCacheSample::ratio)
+        .collect::<Vec<_>>();
+    RendererCacheStats {
+        full_rebuild: stats(&full_rebuild),
+        scroll_replay: stats(&scroll_replay),
+        ratio: stats(&ratios),
+    }
+}
+
+fn format_renderer_cache_ratios(samples: &[RendererCacheSample]) -> String {
+    samples
+        .iter()
+        .copied()
+        .map(|sample| format!("{} {:.3}x", sample.order_label(), sample.ratio()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn collect_renderer_cache_samples(
+    fixture: &RendererCacheFixture,
+    minimum_updates: usize,
+    sample_count: usize,
+) -> Vec<RendererCacheSample> {
+    assert_renderer_cache_preflight(fixture);
+    for path in renderer_cache_order(0) {
+        match path {
+            RendererCachePath::FullRebuild => {
+                black_box(fresh_renderer_cache_frame(
+                    &fixture.terminal,
+                    fixture.expected.cols,
+                    fixture.expected.rows,
+                ));
+            }
+            RendererCachePath::ScrollReplay => {
+                let mut frame = fixture.before.clone();
+                assert!(apply_renderer_cache_update(
+                    &mut frame,
+                    &fixture.terminal,
+                    &fixture.update,
+                ));
+                black_box(frame);
+            }
+        }
+    }
+
+    (0..sample_count)
+        .map(|index| {
+            measure_renderer_cache_pair(fixture, renderer_cache_order(index), minimum_updates)
+        })
+        .collect()
+}
+
 fn run_profile_mode(target_bytes: usize) -> bool {
     let Ok(workload_id) = env::var("TMON_PROFILE_WORKLOAD") else {
         return false;
@@ -985,6 +952,8 @@ fn run_timed_mode() {
     }
     let sample_count = require_even_sample_count(setting("TMON_BENCH_SAMPLES", 8, 3, 25));
     let snapshot_count = setting("TMON_BENCH_SNAPSHOTS", 250, 10, 10_000);
+    let renderer_cache_fixture =
+        renderer_cache_report_enabled().then(prepare_renderer_cache_fixture);
     for workload in &WORKLOADS {
         validate_target_ratio(workload.minimum_ratio).unwrap_or_else(|reason| {
             panic!(
@@ -1009,7 +978,17 @@ fn run_timed_mode() {
     println!("Platform: {}/{}", env::consts::OS, env::consts::ARCH);
     println!("Grid: {COLS}x{ROWS}, scrollback: {SCROLLBACK} lines");
     println!("Samples: {sample_count}, parse target: {target_mib} MiB/sample");
-    println!("Full snapshots: {snapshot_count}/sample");
+    println!("Legacy raw snapshots: {snapshot_count}/sample");
+    println!(
+        "Normalized snapshots: at least {snapshot_count}/sample and {:.0} ms/sample",
+        NORMALIZED_SNAPSHOT_MIN_DURATION.as_secs_f64() * 1000.0
+    );
+    if renderer_cache_fixture.is_some() {
+        println!(
+            "Renderer-cache updates: at least {snapshot_count}/sample and {:.0} ms/sample (CI only)",
+            RENDERER_CACHE_MIN_DURATION.as_secs_f64() * 1000.0
+        );
+    }
     println!();
     println!(
         "Correctness preflight (untimed full-grid comparison, up to {} MiB/workload)",
@@ -1018,6 +997,12 @@ fn run_timed_mode() {
     for workload in &WORKLOADS {
         assert_workload_equivalence(workload, target_bytes.min(VALIDATION_BYTES_MAX));
         println!("  {:<24} matched", workload.name);
+    }
+    assert_normalized_fixture_equivalence(SNAPSHOT_PREFILL_BYTES);
+    println!("  {:<24} matched", "normalized mixed frame");
+    if let Some(fixture) = &renderer_cache_fixture {
+        assert_renderer_cache_preflight(fixture);
+        println!("  {:<24} matched", "scroll replay cache");
     }
     println!();
     println!("Static grid cell size (excludes optional heap allocations):");
@@ -1076,13 +1061,69 @@ fn run_timed_mode() {
 
     let parse_geomean =
         (ratios.iter().map(|ratio| ratio.ln()).sum::<f64>() / ratios.len() as f64).exp();
+    let normalized_snapshot_samples =
+        collect_normalized_snapshot_samples(snapshot_count, sample_count, true);
+    let normalized_snapshot = paired_stats(&normalized_snapshot_samples);
+    let normalized_snapshot_ratio = normalized_snapshot.ratio.median;
     let snapshot_samples = collect_snapshot_samples(snapshot_count, sample_count, false);
     let snapshot = paired_stats(&snapshot_samples);
     let snapshot_ratio = snapshot.ratio.median;
     let snapshot_baseline_retention = snapshot_ratio / SUPPLIED_SNAPSHOT_RATIO_BASELINE * 100.0;
+    let renderer_cache = renderer_cache_fixture.as_ref().map(|fixture| {
+        let samples = collect_renderer_cache_samples(fixture, snapshot_count, sample_count);
+        let measurements = renderer_cache_stats(&samples);
+        (samples, measurements)
+    });
 
     println!();
-    println!("Current full-frame API throughput (different result work; median calls/s)");
+    println!("Renderer-neutral normalized full-frame throughput (equivalent work; calls/s)");
+    println!(
+        "  Tmon:                       {:>12.1}",
+        normalized_snapshot.tmon.median
+    );
+    println!(
+        "  Alacritty:                  {:>12.1}",
+        normalized_snapshot.alacritty.median
+    );
+    println!("  Median paired Tmon/Alac:    {normalized_snapshot_ratio:>11.3}x");
+    println!(
+        "  Range:                      {:>7.3}-{:<7.3}x",
+        normalized_snapshot.ratio.min, normalized_snapshot.ratio.max
+    );
+    println!(
+        "  Paired ratios:              {}",
+        format_paired_ratios(&normalized_snapshot_samples)
+    );
+    println!("  Gate:                        report-only until the first CI baseline");
+
+    if let Some((samples, measurements)) = &renderer_cache {
+        println!();
+        println!("Tmon normalized renderer-cache throughput (equivalent final cache; calls/s)");
+        println!(
+            "  Fresh visible-frame rebuild:{:>12.1}",
+            measurements.full_rebuild.median
+        );
+        println!(
+            "  Scroll replay + span patch: {:>12.1}",
+            measurements.scroll_replay.median
+        );
+        println!(
+            "  Median replay/rebuild:       {:>11.3}x",
+            measurements.ratio.median
+        );
+        println!(
+            "  Range:                       {:>7.3}-{:<7.3}x",
+            measurements.ratio.min, measurements.ratio.max
+        );
+        println!(
+            "  Paired ratios:               {}",
+            format_renderer_cache_ratios(samples)
+        );
+        println!("  Gate:                         report-only");
+    }
+
+    println!();
+    println!("Legacy public snapshot API throughput (different result work; calls/s)");
     println!(
         "  Tmon:                       {:>12.1}",
         snapshot.tmon.median
@@ -1101,7 +1142,14 @@ fn run_timed_mode() {
     println!();
     println!("Summary");
     println!("  Paired parse-ratio geometric mean: {parse_geomean:.3}x");
-    println!("  Current full-frame API ratio:      {snapshot_ratio:.3}x");
+    println!("  Normalized full-frame ratio:       {normalized_snapshot_ratio:.3}x");
+    if let Some((_, measurements)) = &renderer_cache {
+        println!(
+            "  Renderer-cache replay speedup:     {:.3}x",
+            measurements.ratio.median
+        );
+    }
+    println!("  Legacy public snapshot API ratio:  {snapshot_ratio:.3}x");
     if failed_targets.is_empty() {
         println!("  Parser/grid targets:             PASS");
     } else {
@@ -1127,6 +1175,27 @@ fn run_timed_mode() {
     );
     println!("  - Snapshot ratio is report-only: a 19.880x * 0.95 hosted-CI gate is not sound");
     println!("    because the APIs differ; retention is only a supplied-baseline trend.");
+    println!(
+        "  - The normalized frame uses one shared owned cell/metadata contract for both engines."
+    );
+    println!(
+        "    It includes raw colors, styles, combining text, hyperlinks, wide roles, and wraps."
+    );
+    println!(
+        "  - Every normalized snapshot sample runs for at least 250 ms to reduce timer noise."
+    );
+    if renderer_cache.is_some() {
+        println!(
+            "  - Renderer-cache paths consume one shared parsed terminal generation; parsing and damage capture are untimed for both."
+        );
+        println!(
+            "  - Timed replay copy-on-writes the outer Arc row table, rotates row handles, then clones and patches only final dirty rows."
+        );
+        println!("  - Resetting replay samples clones only the root Arc outside the timed update.");
+        println!(
+            "  - The exact-result preflight compares the complete owned cache, cursor, and scroll metadata."
+        );
+    }
     println!("  - This excludes PTY I/O, GPUI rendering, input latency, RSS, and feature parity.");
     println!("  - Compare trends across runs; shared GitHub runners have timing noise.");
 
@@ -1157,276 +1226,5 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sample_order_is_balanced_for_even_counts() {
-        let tmon_first = (0..8)
-            .map(|index| sample_order(index, true))
-            .collect::<Vec<_>>();
-        assert_eq!(tmon_first[0], [Engine::Tmon, Engine::Alacritty]);
-        assert_eq!(tmon_first[1], [Engine::Alacritty, Engine::Tmon]);
-        assert_eq!(
-            tmon_first
-                .iter()
-                .filter(|order| order[0] == Engine::Tmon)
-                .count(),
-            4
-        );
-
-        let alacritty_first = (0..8)
-            .map(|index| sample_order(index, false))
-            .collect::<Vec<_>>();
-        assert_eq!(alacritty_first[0], [Engine::Alacritty, Engine::Tmon]);
-        assert_eq!(
-            alacritty_first
-                .iter()
-                .filter(|order| order[0] == Engine::Alacritty)
-                .count(),
-            4
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "TMON_BENCH_SAMPLES must be even")]
-    fn odd_sample_counts_are_rejected() {
-        require_even_sample_count(7);
-    }
-
-    #[test]
-    fn stats_calculate_even_median_and_range() {
-        assert_eq!(
-            stats(&[4.0, 1.0, 3.0, 2.0]),
-            Stats {
-                median: 2.5,
-                min: 1.0,
-                max: 4.0,
-            }
-        );
-    }
-
-    #[test]
-    fn paired_stats_use_sample_ratios_instead_of_independent_medians() {
-        let samples = [
-            PairedSample {
-                first: Engine::Tmon,
-                tmon: 10.0,
-                alacritty: 1.0,
-            },
-            PairedSample {
-                first: Engine::Alacritty,
-                tmon: 20.0,
-                alacritty: 100.0,
-            },
-            PairedSample {
-                first: Engine::Tmon,
-                tmon: 30.0,
-                alacritty: 10.0,
-            },
-            PairedSample {
-                first: Engine::Alacritty,
-                tmon: 40.0,
-                alacritty: 20.0,
-            },
-        ];
-        let result = paired_stats(&samples);
-        assert_eq!(result.ratio.median, 2.5);
-        assert_ne!(
-            result.ratio.median,
-            result.tmon.median / result.alacritty.median
-        );
-    }
-
-    #[test]
-    fn threshold_helpers_reject_non_finite_values_and_apply_the_boundary() {
-        assert_eq!(
-            validate_target_ratio(f64::NAN),
-            Err("target ratio must be finite")
-        );
-        assert_eq!(
-            validate_target_ratio(f64::INFINITY),
-            Err("target ratio must be finite")
-        );
-        assert_eq!(
-            validate_target_ratio(f64::NEG_INFINITY),
-            Err("target ratio must be finite")
-        );
-        assert!(meets_target(1.05, 1.05));
-        assert!(!meets_target(1.049, 1.05));
-        assert!(!meets_target(f64::NAN, 1.05));
-    }
-
-    #[cfg(feature = "benchmark-allocations")]
-    fn allocation_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    #[cfg(feature = "benchmark-allocations")]
-    #[test]
-    fn allocation_counter_calculates_signed_requested_byte_change() {
-        let positive = allocation_counter::AllocationSnapshot {
-            alloc_calls: 2,
-            alloc_bytes: 100,
-            dealloc_calls: 1,
-            dealloc_bytes: 40,
-            realloc_calls: 1,
-            realloc_old_bytes: 20,
-            realloc_new_bytes: 70,
-        };
-        assert_eq!(positive.net_requested_bytes(), 110);
-
-        let negative = allocation_counter::AllocationSnapshot {
-            alloc_calls: 1,
-            alloc_bytes: 10,
-            dealloc_calls: 2,
-            dealloc_bytes: 80,
-            realloc_calls: 1,
-            realloc_old_bytes: 30,
-            realloc_new_bytes: 20,
-        };
-        assert_eq!(negative.net_requested_bytes(), -80);
-    }
-
-    #[cfg(feature = "benchmark-allocations")]
-    #[test]
-    fn allocation_measurement_rejects_nested_guards() {
-        let _test_lock = allocation_test_lock();
-        let outer = allocation_counter::AllocationMeasurement::begin()
-            .expect("the first allocation measurement should start");
-        assert!(
-            allocation_counter::AllocationMeasurement::begin().is_err(),
-            "a nested allocation measurement must be rejected"
-        );
-        drop(outer);
-
-        let after_drop = allocation_counter::AllocationMeasurement::begin()
-            .expect("dropping the outer guard should release the measurement state");
-        drop(after_drop);
-    }
-
-    #[cfg(feature = "benchmark-allocations")]
-    #[test]
-    fn allocation_measurement_disables_during_panic_unwind() {
-        let _test_lock = allocation_test_lock();
-        let unwind = std::panic::catch_unwind(|| {
-            let _measurement = allocation_counter::AllocationMeasurement::begin()
-                .expect("allocation measurement should start before the test panic");
-            panic!("intentional allocation-guard unwind");
-        });
-        assert!(unwind.is_err());
-
-        let after_unwind = allocation_counter::AllocationMeasurement::begin()
-            .expect("the allocation guard should disable itself while unwinding");
-        drop(after_unwind);
-    }
-
-    #[cfg(feature = "benchmark-allocations")]
-    #[test]
-    fn allocation_measurement_waits_for_registered_hooks() {
-        let _test_lock = allocation_test_lock();
-        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let finished_by_finisher = std::sync::Arc::clone(&finished);
-
-        let measurement = allocation_counter::AllocationMeasurement::begin()
-            .expect("allocation measurement should start");
-        assert!(allocation_counter::register_hook_for_test());
-        let finisher = std::thread::spawn(move || {
-            black_box(measurement.finish());
-            finished_by_finisher.store(true, std::sync::atomic::Ordering::Release);
-        });
-
-        while !allocation_counter::stopping_for_test() {
-            std::hint::spin_loop();
-        }
-        assert!(
-            !finished.load(std::sync::atomic::Ordering::Acquire),
-            "finish must wait while an allocator hook remains registered"
-        );
-        allocation_counter::unregister_hook_for_test();
-        finisher.join().expect("the finisher thread should exit");
-        assert!(finished.load(std::sync::atomic::Ordering::Acquire));
-    }
-
-    #[cfg(feature = "benchmark-allocations")]
-    #[test]
-    fn stale_hook_registration_does_not_cross_measurement_generations() {
-        let _test_lock = allocation_test_lock();
-        let first = allocation_counter::AllocationMeasurement::begin()
-            .expect("the first allocation measurement should start");
-        let stale_gate = allocation_counter::gate_for_test();
-        drop(first);
-
-        let second = allocation_counter::AllocationMeasurement::begin()
-            .expect("the second allocation measurement should start");
-        assert!(
-            !allocation_counter::register_hook_from_for_test(stale_gate),
-            "a hook that observed the prior generation must remain uncounted"
-        );
-        drop(second);
-    }
-
-    #[cfg(feature = "benchmark-allocations")]
-    #[test]
-    fn allocation_measurement_counts_zeroed_allocations_and_deallocations() {
-        let _test_lock = allocation_test_lock();
-        let layout = std::alloc::Layout::from_size_align(4096, 64)
-            .expect("the test allocation layout should be valid");
-        let measurement = allocation_counter::AllocationMeasurement::begin()
-            .expect("allocation measurement should start");
-        // SAFETY: `layout` has non-zero size and a valid power-of-two alignment.
-        // The returned pointer is checked before it is deallocated exactly once
-        // with the same layout.
-        let pointer = unsafe { std::alloc::alloc_zeroed(layout) };
-        assert!(!pointer.is_null(), "the test allocation should succeed");
-        // SAFETY: `pointer` came from `alloc_zeroed(layout)`, is non-null, and
-        // has not been deallocated or reallocated.
-        unsafe { std::alloc::dealloc(pointer, layout) };
-        let snapshot = measurement.finish();
-
-        assert!(snapshot.alloc_calls > 0);
-        assert!(snapshot.alloc_bytes >= 4096);
-        assert!(snapshot.dealloc_calls > 0);
-        assert!(snapshot.dealloc_bytes >= 4096);
-    }
-
-    #[cfg(feature = "benchmark-allocations")]
-    #[test]
-    fn allocation_measurement_counts_successful_reallocations() {
-        let _test_lock = allocation_test_lock();
-        let old_layout = std::alloc::Layout::from_size_align(1024, 64)
-            .expect("the old test allocation layout should be valid");
-        // SAFETY: `old_layout` has non-zero size and a valid power-of-two
-        // alignment. The pointer is checked and later passed exactly once to
-        // `realloc` with its original layout.
-        let pointer = unsafe { std::alloc::alloc(old_layout) };
-        assert!(
-            !pointer.is_null(),
-            "the initial test allocation should succeed"
-        );
-
-        let measurement = allocation_counter::AllocationMeasurement::begin()
-            .expect("allocation measurement should start");
-        // SAFETY: `pointer` is a live allocation created with `old_layout`, and
-        // 4096 is a valid non-zero new size for the same alignment.
-        let new_pointer = unsafe { std::alloc::realloc(pointer, old_layout, 4096) };
-        let snapshot = measurement.finish();
-        if new_pointer.is_null() {
-            // SAFETY: A failed `realloc` leaves the original allocation live,
-            // so it must be released with its original layout.
-            unsafe { std::alloc::dealloc(pointer, old_layout) };
-            panic!("the test reallocation should succeed");
-        }
-        let new_layout = std::alloc::Layout::from_size_align(4096, 64)
-            .expect("the new test allocation layout should be valid");
-        // SAFETY: `new_pointer` is the successful result of reallocating to
-        // 4096 bytes with alignment 64 and has not otherwise been freed.
-        unsafe { std::alloc::dealloc(new_pointer, new_layout) };
-
-        assert!(snapshot.realloc_calls > 0);
-        assert!(snapshot.realloc_old_bytes >= 1024);
-        assert!(snapshot.realloc_new_bytes >= 4096);
-    }
-}
+#[path = "engine_compare/tests.rs"]
+mod tests;

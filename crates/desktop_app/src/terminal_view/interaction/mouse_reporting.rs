@@ -179,16 +179,9 @@ impl TerminalView {
             .flat_map(|tab| tab.panes.iter())
             .find(|pane| pane.id == pane_id)?;
         let terminal = pane.terminal();
-        eprintln!(
-            "TERMY_MOUSE_DEBUG click pane={} cached={:?} parser={:?}",
-            pane.id,
-            pane.tmux_mouse_mode,
-            terminal.mouse_mode()
-        );
         Some(
             pane.tmux_mouse_mode
-                .map(terminal_mouse_mode_from_tmux)
-                .unwrap_or_else(|| terminal.mouse_mode()),
+                .map_or_else(|| terminal.mouse_mode(), terminal_mouse_mode_from_tmux),
         )
     }
 

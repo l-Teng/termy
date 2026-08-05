@@ -481,6 +481,44 @@ struct TmonTerminalInstance {
     terminal: tmon::Terminal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TerminalLineRange {
+    first_line: i32,
+    last_line: i32,
+    columns: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalViewportScrollDirection {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TerminalViewportScroll {
+    top: usize,
+    bottom: usize,
+    count: usize,
+    direction: TerminalViewportScrollDirection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TerminalRenderDamageSnapshot {
+    damage: TerminalDamageSnapshot,
+    scrolls: Vec<TerminalViewportScroll>,
+    generation: Option<u64>,
+}
+
+impl TerminalRenderDamageSnapshot {
+    fn from_core(damage: TerminalDamageSnapshot) -> Self {
+        Self {
+            damage,
+            scrolls: Vec::new(),
+            generation: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum TerminalCellRef<'a> {
     Alacritty(&'a alacritty_terminal::term::cell::Cell),
@@ -555,12 +593,24 @@ fn tmon_engine_requested(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|value| value == "1")
 }
 
-const fn tmon_engine_available() -> bool {
-    cfg!(unix)
+fn tmon_engine_available() -> bool {
+    tmon::native_pty_available()
+}
+
+fn tmon_engine_enabled_for(value: Option<&std::ffi::OsStr>, available: bool) -> bool {
+    tmon_engine_requested(value) && available
 }
 
 fn tmon_engine_enabled(value: Option<&std::ffi::OsStr>) -> bool {
-    tmon_engine_requested(value) && tmon_engine_available()
+    tmon_engine_enabled_for(value, tmon_engine_available())
+}
+
+fn terminal_engine_label(terminal: Option<&Terminal>) -> &'static str {
+    match terminal {
+        Some(Terminal::Tmon(_)) => "tmon",
+        Some(Terminal::Native(_) | Terminal::Tmux(_)) => "alacritty",
+        None => "-",
+    }
 }
 
 impl Deref for TmonTerminalInstance {
@@ -627,7 +677,7 @@ impl Terminal {
         let value = value.as_deref();
         if tmon_engine_requested(value) && !tmon_engine_available() {
             log::warn!(
-                "TERMY_EXPERIMENTAL_TMON_ENGINE=1 requested, but Tmon requires Unix PTY support; \
+                "TERMY_EXPERIMENTAL_TMON_ENGINE=1 requested, but Tmon's native PTY is unavailable; \
                  falling back to the native Alacritty terminal engine"
             );
         }
@@ -661,7 +711,7 @@ impl Terminal {
                         tab_title_shell_integration,
                         runtime_config,
                         launch.as_ref(),
-                    ),
+                    )?,
                     wakeup_router.map(|router| router.tmon_notifier(wakeup_id)),
                 )?,
             }));
@@ -700,7 +750,7 @@ impl Terminal {
                         tab_title_shell_integration,
                         runtime_config,
                         launch,
-                    ),
+                    )?,
                     wakeup_router.map(|router| router.tmon_notifier(wakeup_id)),
                 )?,
             }));
@@ -798,7 +848,7 @@ impl Terminal {
                             if let Some(text) = host
                                 .load_clipboard(tmon_adapter::clipboard_target(request.target()))
                             {
-                                terminal.write(&request.format_reply(&text));
+                                terminal.write_protocol_reply_owned(request.format_reply(&text));
                             }
                         }
                         event => translated.extend(tmon_adapter::event(event)),
@@ -998,15 +1048,18 @@ impl Terminal {
         }
     }
 
-    fn take_damage_snapshot(&self) -> TerminalDamageSnapshot {
+    fn take_render_damage_snapshot(&self) -> TerminalRenderDamageSnapshot {
         match self {
-            Self::Tmux(terminal) => terminal.take_damage_snapshot(),
-            Self::Native(terminal) => terminal
-                .lock()
-                .map_or(TerminalDamageSnapshot::Full, |terminal| {
-                    terminal.take_damage_snapshot()
-                }),
-            Self::Tmon(terminal) => tmon_adapter::damage(terminal.take_damage_snapshot()),
+            Self::Tmux(terminal) => {
+                TerminalRenderDamageSnapshot::from_core(terminal.take_damage_snapshot())
+            }
+            Self::Native(terminal) => terminal.lock().map_or_else(
+                |_| TerminalRenderDamageSnapshot::from_core(TerminalDamageSnapshot::Full),
+                |terminal| TerminalRenderDamageSnapshot::from_core(terminal.take_damage_snapshot()),
+            ),
+            Self::Tmon(terminal) => {
+                tmon_adapter::render_damage(terminal.take_render_damage_snapshot())
+            }
         }
     }
 
@@ -1124,28 +1177,57 @@ impl Terminal {
         }
     }
 
+    fn for_each_full_rebuild_cell(
+        &self,
+        mut visitor: impl FnMut(usize, i32, usize, TerminalCellRef<'_>),
+    ) -> Option<usize> {
+        match self {
+            Self::Tmon(terminal) => Some(
+                terminal
+                    .visit_viewport_cells_and_clear_damage(
+                        |display_offset, line, col, cell, combining| {
+                            visitor(
+                                display_offset,
+                                line,
+                                col,
+                                TerminalCellRef::Tmon(cell, combining),
+                            );
+                        },
+                    )
+                    .display_offset,
+            ),
+            Self::Tmux(_) | Self::Native(_) => self.for_each_renderable_cell(visitor),
+        }
+    }
+
     fn for_each_damage_cell(
         &self,
         spans: &[TerminalDirtySpan],
+        generation: Option<u64>,
         mut visitor: impl FnMut(usize, usize, i32, usize, TerminalCellRef<'_>),
     ) -> bool {
         match self {
             Self::Tmon(terminal) => {
-                terminal.for_each_viewport_range(
-                    spans
-                        .iter()
-                        .map(|span| (span.row, span.left_col, span.right_col)),
-                    |row, display_offset, line, col, cell, combining| {
-                        visitor(
-                            row,
-                            display_offset,
-                            line,
-                            col,
-                            TerminalCellRef::Tmon(cell, combining),
-                        );
-                    },
-                );
-                true
+                let Some(generation) = generation else {
+                    return false;
+                };
+                terminal
+                    .for_each_viewport_range_at_generation(
+                        generation,
+                        spans
+                            .iter()
+                            .map(|span| (span.row, span.left_col, span.right_col)),
+                        |row, display_offset, line, col, cell, combining| {
+                            visitor(
+                                row,
+                                display_offset,
+                                line,
+                                col,
+                                TerminalCellRef::Tmon(cell, combining),
+                            );
+                        },
+                    )
+                    .is_some()
             }
             Self::Tmux(_) | Self::Native(_) => self
                 .with_grid(|grid| {
@@ -1190,33 +1272,66 @@ impl Terminal {
         }
     }
 
-    fn for_each_line_cell(
+    /// Visit an inclusive line range while holding exactly one backing-terminal
+    /// lock, so bounds, dimensions, and cells all belong to the same state.
+    fn for_each_line_cell_range(
         &self,
-        line: i32,
-        mut visitor: impl FnMut(usize, TerminalCellRef<'_>),
-    ) -> bool {
+        requested_first: i32,
+        requested_last: i32,
+        mut visitor: impl FnMut(TerminalLineRange, i32, usize, TerminalCellRef<'_>),
+    ) -> Option<TerminalLineRange> {
         match self {
-            Self::Tmon(terminal) => terminal.for_each_line_cell(line, |col, cell, combining| {
-                visitor(col, TerminalCellRef::Tmon(cell, combining));
-            }),
-            Self::Tmux(_) | Self::Native(_) => self
-                .with_grid(|grid| {
-                    let history = grid.total_lines().saturating_sub(grid.screen_lines());
-                    if line < -(history as i32) || line >= grid.screen_lines() as i32 {
-                        return false;
-                    }
-                    let row = &grid[alacritty_terminal::index::Line(line)];
-                    for col in 0..grid.columns() {
+            Self::Tmon(terminal) => {
+                let range = terminal.for_each_line_cell_range(
+                    requested_first,
+                    requested_last,
+                    |range, line, col, cell, combining| {
                         visitor(
+                            TerminalLineRange {
+                                first_line: range.first_line,
+                                last_line: range.last_line,
+                                columns: range.columns,
+                            },
+                            line,
                             col,
-                            TerminalCellRef::Alacritty(
-                                &row[alacritty_terminal::index::Column(col)],
-                            ),
+                            TerminalCellRef::Tmon(cell, combining),
                         );
-                    }
-                    true
+                    },
+                );
+                Some(TerminalLineRange {
+                    first_line: range.first_line,
+                    last_line: range.last_line,
+                    columns: range.columns,
                 })
-                .unwrap_or(false),
+            }
+            Self::Tmux(_) | Self::Native(_) => self.with_grid(|grid| {
+                let history = grid.total_lines().saturating_sub(grid.screen_lines());
+                let range = TerminalLineRange {
+                    first_line: -(history as i32),
+                    last_line: grid.screen_lines().saturating_sub(1) as i32,
+                    columns: grid.columns(),
+                };
+                if requested_first <= requested_last {
+                    let first = requested_first.max(range.first_line);
+                    let last = requested_last.min(range.last_line);
+                    if first <= last {
+                        for line in first..=last {
+                            let row = &grid[alacritty_terminal::index::Line(line)];
+                            for col in 0..range.columns {
+                                visitor(
+                                    range,
+                                    line,
+                                    col,
+                                    TerminalCellRef::Alacritty(
+                                        &row[alacritty_terminal::index::Column(col)],
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                range
+            }),
         }
     }
 }
@@ -5102,6 +5217,37 @@ mod tests {
         assert!(!tmon_engine_requested(None));
         assert!(!tmon_engine_requested(Some(std::ffi::OsStr::new("0"))));
         assert!(!tmon_engine_requested(Some(std::ffi::OsStr::new("true"))));
+        assert!(tmon_engine_enabled_for(
+            Some(std::ffi::OsStr::new("1")),
+            true
+        ));
+        assert!(!tmon_engine_enabled_for(
+            Some(std::ffi::OsStr::new("1")),
+            false
+        ));
+    }
+
+    #[test]
+    fn engine_label_reports_tmon_without_changing_tmux_or_native_labels() {
+        let size = TerminalSize::default();
+        let options = TerminalOptions::default();
+        let tmux = Terminal::new_tmux(size, options);
+        let native = Terminal::Native(NativeTerminalInstance {
+            wakeup_id: 1,
+            terminal: Mutex::new(NativeTerminal::new_display(size, None)),
+        });
+        let tmon = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 2,
+            terminal: tmon::Terminal::new_display(
+                tmon_adapter::size(size),
+                tmon::Config::default(),
+            ),
+        });
+
+        assert_eq!(terminal_engine_label(Some(&tmux)), "alacritty");
+        assert_eq!(terminal_engine_label(Some(&native)), "alacritty");
+        assert_eq!(terminal_engine_label(Some(&tmon)), "tmon");
+        assert_eq!(terminal_engine_label(None), "-");
     }
 
     #[test]
@@ -5136,7 +5282,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[test]
     fn tmon_engine_is_enabled_when_requested_on_unix() {
         assert!(tmon_engine_available());
@@ -5146,7 +5292,24 @@ mod tests {
         assert!(!tmon_engine_enabled(Some(std::ffi::OsStr::new("true"))));
     }
 
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn tmon_engine_windows_gate_tracks_runtime_conpty_availability() {
+        assert_eq!(
+            tmon_engine_enabled(Some(std::ffi::OsStr::new("1"))),
+            tmon_engine_available()
+        );
+        assert!(!tmon_engine_enabled(None));
+        assert!(!tmon_engine_enabled(Some(std::ffi::OsStr::new("0"))));
+        assert!(!tmon_engine_enabled(Some(std::ffi::OsStr::new("true"))));
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "windows"
+    )))]
     #[test]
     fn tmon_engine_request_falls_back_when_unavailable() {
         assert!(!tmon_engine_available());
@@ -5171,6 +5334,40 @@ mod tests {
         assert_eq!(first.as_deref(), Some("clipboard"));
         assert_eq!(second.as_deref(), Some("clipboard"));
         assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn tmon_clipboard_query_reaches_the_desktop_reply_host() {
+        let size = TerminalSize {
+            cols: 12,
+            rows: 4,
+            cell_width: 9.0,
+            cell_height: 18.0,
+        };
+        let config = tmon::Config {
+            osc52: tmon::Osc52::CopyPaste,
+            ..tmon::Config::default()
+        };
+        let engine = tmon::Terminal::new_display(tmon_adapter::size(size), config);
+        engine.feed_output(b"\x1b]52;c;?\x07");
+        let terminal = Terminal::Tmon(TmonTerminalInstance {
+            wakeup_id: 1,
+            terminal: engine,
+        });
+        let mut requested = Vec::new();
+
+        let (_, has_more) = terminal.drain_events(&mut |target| {
+            requested.push(target);
+            Some("clipboard".to_string())
+        });
+        let replies = match &terminal {
+            Terminal::Tmon(terminal) => terminal.drain_protocol_replies(),
+            Terminal::Native(_) | Terminal::Tmux(_) => unreachable!("test constructs Tmon"),
+        };
+
+        assert!(!has_more);
+        assert_eq!(requested, [TerminalClipboardTarget::Clipboard]);
+        assert_eq!(replies, b"\x1b]52;c;Y2xpcGJvYXJk\x07");
     }
 
     #[test]

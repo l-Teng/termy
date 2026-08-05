@@ -200,7 +200,6 @@ impl TerminalView {
                 TmuxNotification::SubscriptionChanged {
                     name, pane, value, ..
                 } if name == TMUX_MOUSE_MODE_SUBSCRIPTION_NAME => {
-                    eprintln!("TERMY_MOUSE_DEBUG event pane={pane} value={value}");
                     if let Some(mode) = parse_tmux_mouse_mode_subscription(&value)
                         && let Some(pane) = self
                             .tabs
@@ -209,7 +208,6 @@ impl TerminalView {
                             .find(|candidate| candidate.id == pane)
                     {
                         pane.tmux_mouse_mode = Some(mode);
-                        eprintln!("TERMY_MOUSE_DEBUG applied mode={mode:?}");
                     }
                 }
                 TmuxNotification::SubscriptionChanged { .. } => {}

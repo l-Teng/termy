@@ -6,16 +6,34 @@ use crate::render_metrics::{
 use gpui::{
     App, Bounds, Element, Font, FontFeatures, FontStyle, FontWeight, Hsla, IntoElement,
     PathBuilder, Pixels, ShapedLine, SharedString, Size, StrikethroughStyle, TextAlign, TextRun,
-    UnderlineStyle, Window, point, px, quad,
+    UnderlineStyle as GpuiUnderlineStyle, Window, point, px, quad,
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 use termy_core::TerminalCursorStyle;
+
+/// The visual form of a terminal underline requested by SGR 4 variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalUnderlineStyle {
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+/// Semantic underline decoration for a terminal cell.
+///
+/// A missing color means that the cell's resolved foreground color is used.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerminalUnderline {
+    pub style: TerminalUnderlineStyle,
+    pub color: Option<Hsla>,
+}
 
 /// Info needed to render a single cell.
 #[derive(Clone)]
 pub struct CellRenderInfo {
     pub col: usize,
-    pub row: usize,
     pub char: char,
     pub combining: Option<SharedString>,
     pub fg: Hsla,
@@ -23,7 +41,7 @@ pub struct CellRenderInfo {
     pub uses_terminal_default_bg: bool,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: Option<TerminalUnderline>,
     pub strikethrough: bool,
     pub render_text: bool,
     pub selected: bool,
@@ -350,7 +368,7 @@ struct TextBatch {
     italic: bool,
     strikethrough: bool,
     fg: Hsla,
-    underline: Option<UnderlineStyle>,
+    underline: Option<TerminalUnderline>,
     cell_len: usize,
 }
 
@@ -513,7 +531,7 @@ struct TextBatchBuilder {
     italic: bool,
     strikethrough: bool,
     fg: Hsla,
-    underline: Option<UnderlineStyle>,
+    underline: Option<TerminalUnderline>,
     cell_len: usize,
 }
 
@@ -524,7 +542,7 @@ impl TextBatchBuilder {
         initial_char: char,
         initial_combining: Option<&str>,
         key: TextBatchKey,
-        underline: Option<UnderlineStyle>,
+        underline: Option<TerminalUnderline>,
     ) -> Self {
         let mut text = String::with_capacity(16);
         text.push(initial_char);
@@ -549,7 +567,7 @@ impl TextBatchBuilder {
         col: usize,
         row: usize,
         key: TextBatchKey,
-        underline: &Option<UnderlineStyle>,
+        underline: &Option<TerminalUnderline>,
     ) -> bool {
         self.row == row
             && self.start_col + self.cell_len == col
@@ -1570,6 +1588,129 @@ fn paint_diagonal_path(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CustomUnderlinePattern {
+    Solid,
+    Dotted,
+    Dashed,
+}
+
+/// Pixel-snapped geometry for underline styles that GPUI does not provide.
+///
+/// Every decoration is emitted as a single path primitive. `line_count` is at
+/// most two, so painting cost stays bounded per text batch even for wide rows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CustomUnderlinePathSpec {
+    start_x: f32,
+    end_x: f32,
+    line_y: [f32; 2],
+    line_count: usize,
+    pattern: CustomUnderlinePattern,
+}
+
+fn custom_underline_path_spec(
+    bounds: Bounds<Pixels>,
+    underline_origin_y: Pixels,
+    style: TerminalUnderlineStyle,
+) -> Option<CustomUnderlinePathSpec> {
+    let origin_x: f32 = bounds.origin.x.into();
+    let origin_y: f32 = bounds.origin.y.into();
+    let width: f32 = bounds.size.width.into();
+    let height: f32 = bounds.size.height.into();
+    let left = origin_x.round();
+    let right = (origin_x + width).round();
+    let top = origin_y.round();
+    let bottom = (origin_y + height).round();
+
+    if right - left < 1.0 || bottom - top < 1.0 {
+        return None;
+    }
+
+    // Half-pixel centers keep a one-pixel stroke inside the snapped batch
+    // bounds. Use the same baseline-relative origin as GPUI's text painter.
+    let start_x = left + 0.5;
+    let end_x = (right - 0.5).max(start_x);
+    let min_y = top + 0.5;
+    let underline_origin_y: f32 = underline_origin_y.into();
+    let lower_y = (underline_origin_y.round() + 0.5).clamp(min_y, bottom - 0.5);
+
+    match style {
+        TerminalUnderlineStyle::Double => {
+            let upper_y = (bottom - 3.5).max(min_y).min(lower_y);
+            let line_count = if upper_y < lower_y { 2 } else { 1 };
+            Some(CustomUnderlinePathSpec {
+                start_x,
+                end_x,
+                line_y: [upper_y, lower_y],
+                line_count,
+                pattern: CustomUnderlinePattern::Solid,
+            })
+        }
+        TerminalUnderlineStyle::Dotted => Some(CustomUnderlinePathSpec {
+            start_x,
+            end_x,
+            line_y: [lower_y, lower_y],
+            line_count: 1,
+            pattern: CustomUnderlinePattern::Dotted,
+        }),
+        TerminalUnderlineStyle::Dashed => Some(CustomUnderlinePathSpec {
+            start_x,
+            end_x,
+            line_y: [lower_y, lower_y],
+            line_count: 1,
+            pattern: CustomUnderlinePattern::Dashed,
+        }),
+        TerminalUnderlineStyle::Single | TerminalUnderlineStyle::Curly => None,
+    }
+}
+
+fn paint_custom_underline(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    underline_origin_y: Pixels,
+    underline: TerminalUnderline,
+    fallback_color: Hsla,
+) {
+    let Some(spec) = custom_underline_path_spec(bounds, underline_origin_y, underline.style) else {
+        return;
+    };
+
+    let mut builder = PathBuilder::stroke(px(1.0));
+    builder = match spec.pattern {
+        CustomUnderlinePattern::Solid => builder,
+        CustomUnderlinePattern::Dotted => builder.dash_array(&[px(1.0), px(1.0)]),
+        CustomUnderlinePattern::Dashed => builder.dash_array(&[px(3.0), px(2.0)]),
+    };
+
+    for y in spec.line_y.into_iter().take(spec.line_count) {
+        builder.move_to(point(px(spec.start_x), px(y)));
+        builder.line_to(point(px(spec.end_x), px(y)));
+    }
+
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, underline.color.unwrap_or(fallback_color));
+    }
+}
+
+fn gpui_underline_style(
+    underline: TerminalUnderline,
+    fallback_color: Hsla,
+) -> Option<GpuiUnderlineStyle> {
+    let wavy = match underline.style {
+        TerminalUnderlineStyle::Single => false,
+        TerminalUnderlineStyle::Curly => true,
+        TerminalUnderlineStyle::Double
+        | TerminalUnderlineStyle::Dotted
+        | TerminalUnderlineStyle::Dashed => return None,
+    };
+
+    Some(GpuiUnderlineStyle {
+        thickness: px(1.0),
+        color: Some(underline.color.unwrap_or(fallback_color)),
+        wavy,
+    })
+}
+
 fn hsla_bits(color: Hsla) -> [u32; 4] {
     [
         color.h.to_bits(),
@@ -1900,6 +2041,7 @@ impl TerminalGrid {
 
     fn collect_row_draw_ops_into(
         &self,
+        row: usize,
         row_cells: &[CellRenderInfo],
         cursor_fg: Hsla,
         highlight_fg: Hsla,
@@ -1917,11 +2059,11 @@ impl TerminalGrid {
                 continue;
             }
 
-            let fg = self.cell_fg_color(cell, cursor_fg, highlight_fg);
+            let fg = self.cell_fg_color(row, cell, cursor_fg, highlight_fg);
             if cell.combining.is_none() && rounded_corner_char(cell.char) {
                 Self::push_pending_text_batch(&mut current, ops);
                 ops.push(TextDrawOp::RoundedCorner(RoundedCornerDraw {
-                    row: cell.row,
+                    row,
                     col: cell.col,
                     glyph: cell.char,
                     fg,
@@ -1932,7 +2074,7 @@ impl TerminalGrid {
             if cell.combining.is_none() && diagonal_char(cell.char) {
                 Self::push_pending_text_batch(&mut current, ops);
                 ops.push(TextDrawOp::Diagonal(DiagonalDraw {
-                    row: cell.row,
+                    row,
                     col: cell.col,
                     glyph: cell.char,
                     fg,
@@ -1945,7 +2087,7 @@ impl TerminalGrid {
             {
                 Self::push_pending_text_batch(&mut current, ops);
                 ops.push(TextDrawOp::Sextant(SextantDraw {
-                    row: cell.row,
+                    row,
                     col: cell.col,
                     packed,
                     fg,
@@ -1964,7 +2106,7 @@ impl TerminalGrid {
             {
                 Self::push_pending_text_batch(&mut current, ops);
                 ops.push(TextDrawOp::Block(BlockDraw {
-                    row: cell.row,
+                    row,
                     col: cell.col,
                     geometry,
                     fg,
@@ -1972,7 +2114,7 @@ impl TerminalGrid {
                 continue;
             }
 
-            let underline = self.cell_underline(cell.row, cell.col, fg, cell.underline);
+            let underline = self.cell_underline(row, cell.col, fg, cell.underline);
             let key = TextBatchKey {
                 bold: cell.bold,
                 italic: cell.italic,
@@ -1982,7 +2124,7 @@ impl TerminalGrid {
 
             let should_append = current
                 .as_ref()
-                .is_some_and(|batch| batch.can_append(cell.col, cell.row, key, &underline));
+                .is_some_and(|batch| batch.can_append(cell.col, row, key, &underline));
             if should_append {
                 if let Some(batch) = current.as_mut() {
                     batch.append_cell(cell.char, cell.combining.as_deref().map(|text| &**text));
@@ -1993,7 +2135,7 @@ impl TerminalGrid {
             Self::push_pending_text_batch(&mut current, ops);
             current = Some(TextBatchBuilder::new(
                 cell.col,
-                cell.row,
+                row,
                 cell.char,
                 cell.combining.as_deref().map(|text| &**text),
                 key,
@@ -2007,6 +2149,7 @@ impl TerminalGrid {
     #[cfg(test)]
     fn rebuild_cached_row_ops_into(
         &self,
+        row: usize,
         row_cells: &[CellRenderInfo],
         cursor_fg: Hsla,
         highlight_fg: Hsla,
@@ -2014,7 +2157,7 @@ impl TerminalGrid {
         scratch_bg: &mut Vec<BackgroundSpan>,
         scratch_ops: &mut Vec<TextDrawOp>,
     ) -> CachedRowPaintOps {
-        self.collect_row_draw_ops_into(row_cells, cursor_fg, highlight_fg, scratch_ops);
+        self.collect_row_draw_ops_into(row, row_cells, cursor_fg, highlight_fg, scratch_ops);
         self.build_row_background_spans_into(row_cells, color_cache, scratch_bg);
         let ops_len = scratch_ops.len();
         let bg_cap = scratch_bg.capacity();
@@ -2030,6 +2173,7 @@ impl TerminalGrid {
     #[cfg(test)]
     fn rebuild_cached_row_ops(
         &self,
+        row: usize,
         row_cells: &[CellRenderInfo],
         cursor_fg: Hsla,
         highlight_fg: Hsla,
@@ -2038,6 +2182,7 @@ impl TerminalGrid {
         let mut scratch_bg = Vec::new();
         let mut scratch_ops = Vec::new();
         self.rebuild_cached_row_ops_into(
+            row,
             row_cells,
             cursor_fg,
             highlight_fg,
@@ -2131,7 +2276,9 @@ impl TerminalGrid {
                             font: font.clone(),
                             color: batch.fg,
                             background_color: None,
-                            underline: batch.underline,
+                            underline: batch
+                                .underline
+                                .and_then(|underline| gpui_underline_style(underline, batch.fg)),
                             strikethrough: batch.strikethrough.then_some(StrikethroughStyle {
                                 thickness: px(1.0),
                                 color: Some(batch.fg),
@@ -2152,6 +2299,33 @@ impl TerminalGrid {
                             .as_ref()
                             .expect("cached shaped line must be created")
                     };
+                    if let Some(underline) = batch.underline
+                        && matches!(
+                            underline.style,
+                            TerminalUnderlineStyle::Double
+                                | TerminalUnderlineStyle::Dotted
+                                | TerminalUnderlineStyle::Dashed
+                        )
+                    {
+                        let padding_top = (self.cell_size.height - line.ascent - line.descent) / 2.;
+                        let underline_origin_y =
+                            origin.y + padding_top + line.ascent + line.descent * 0.618;
+                        paint_custom_underline(
+                            window,
+                            Bounds {
+                                origin: point(x, origin.y),
+                                size: Size {
+                                    width: self.cell_size.width * batch.cell_len as f32,
+                                    height: self.cell_size.height,
+                                },
+                            },
+                            underline_origin_y,
+                            underline,
+                            batch.fg,
+                        );
+                    }
+                    // Keep custom decorations below glyphs, matching GPUI's
+                    // built-in underline paint order.
                     let _ = line.paint(
                         point(x, origin.y),
                         self.cell_size.height,
@@ -2374,6 +2548,7 @@ impl TerminalGrid {
                 row_slot.draw_ops.clear();
                 row_slot.background_spans.clear();
                 self.collect_row_draw_ops_into(
+                    row,
                     row_cells.as_slice(),
                     cursor_fg,
                     highlight_fg,
@@ -2541,14 +2716,20 @@ impl TerminalGrid {
         cell.render_text
             && (cell.char != ' '
                 || cell.combining.is_some()
-                || cell.underline
+                || cell.underline.is_some()
                 || cell.strikethrough)
             && cell.char != '\0'
             && !cell.char.is_control()
     }
 
-    fn cell_fg_color(&self, cell: &CellRenderInfo, cursor_fg: Hsla, highlight_fg: Hsla) -> Hsla {
-        if self.cursor_cell == Some((cell.col, cell.row))
+    fn cell_fg_color(
+        &self,
+        row: usize,
+        cell: &CellRenderInfo,
+        cursor_fg: Hsla,
+        highlight_fg: Hsla,
+    ) -> Hsla {
+        if self.cursor_cell == Some((cell.col, row))
             && self.cursor_style == TerminalCursorStyle::Block
             && self.cursor_visible
         {
@@ -2567,12 +2748,12 @@ impl TerminalGrid {
         row: usize,
         col: usize,
         color: Hsla,
-        terminal_underlined: bool,
-    ) -> Option<UnderlineStyle> {
+        terminal_underline: Option<TerminalUnderline>,
+    ) -> Option<TerminalUnderline> {
         let hovered =
             self.hovered_link_range
                 .is_some_and(|(start_row, start_col, end_row, end_col)| {
-                    let in_range = if start_row == end_row {
+                    if start_row == end_row {
                         row == start_row && col >= start_col && col <= end_col
                     } else if row == start_row {
                         col >= start_col
@@ -2580,13 +2761,13 @@ impl TerminalGrid {
                         col <= end_col
                     } else {
                         row > start_row && row < end_row
-                    };
-                    in_range
+                    }
                 });
-        (terminal_underlined || hovered).then_some(UnderlineStyle {
-            thickness: px(1.0),
-            color: Some(color),
-            wavy: false,
+        terminal_underline.or_else(|| {
+            hovered.then_some(TerminalUnderline {
+                style: TerminalUnderlineStyle::Single,
+                color: Some(color),
+            })
         })
     }
 
@@ -2600,8 +2781,9 @@ impl TerminalGrid {
     fn collect_draw_ops(&self, cursor_fg: Hsla, highlight_fg: Hsla) -> Vec<TextDrawOp> {
         let mut ops = Vec::with_capacity(self.cell_count());
         let mut scratch = Vec::new();
-        for row_cells in self.cells.iter() {
+        for (row, row_cells) in self.cells.iter().enumerate() {
             self.collect_row_draw_ops_into(
+                row,
                 row_cells.as_ref(),
                 cursor_fg,
                 highlight_fg,
@@ -2645,10 +2827,9 @@ mod tests {
         Hsla { h, s, l, a: 1.0 }
     }
 
-    fn test_cell(col: usize, row: usize, c: char) -> CellRenderInfo {
+    fn test_cell(col: usize, c: char) -> CellRenderInfo {
         CellRenderInfo {
             col,
-            row,
             char: c,
             combining: None,
             fg: test_color(0.4, 0.5, 0.6),
@@ -2656,7 +2837,7 @@ mod tests {
             uses_terminal_default_bg: false,
             bold: false,
             italic: false,
-            underline: false,
+            underline: None,
             strikethrough: false,
             render_text: true,
             selected: false,
@@ -2808,10 +2989,10 @@ mod tests {
     fn draw_ops_render_braille_as_block_geometry() {
         let grid = test_grid(
             vec![
-                test_cell(0, 0, '\u{28FF}'),
-                test_cell(1, 0, '\u{28FF}'),
-                test_cell(2, 0, '\u{28FF}'),
-                test_cell(3, 0, 'x'),
+                test_cell(0, '\u{28FF}'),
+                test_cell(1, '\u{28FF}'),
+                test_cell(2, '\u{28FF}'),
+                test_cell(3, 'x'),
             ],
             None,
         );
@@ -2827,9 +3008,9 @@ mod tests {
     fn draw_ops_keep_two_cell_braille_spinners_as_text() {
         let grid = test_grid(
             vec![
-                test_cell(0, 0, '\u{2830}'),
-                test_cell(1, 0, '\u{2830}'),
-                test_cell(2, 0, 'x'),
+                test_cell(0, '\u{2830}'),
+                test_cell(1, '\u{2830}'),
+                test_cell(2, 'x'),
             ],
             None,
         );
@@ -3110,7 +3291,7 @@ mod tests {
 
     #[test]
     fn batches_merge_adjacent_cells_with_same_style() {
-        let grid = test_grid(vec![test_cell(0, 0, 'a'), test_cell(1, 0, 'b')], None);
+        let grid = test_grid(vec![test_cell(0, 'a'), test_cell(1, 'b')], None);
         let batches = collect_batches(&grid);
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].row, 0);
@@ -3120,7 +3301,7 @@ mod tests {
 
     #[test]
     fn batches_split_on_row_change() {
-        let grid = test_grid(vec![test_cell(0, 0, 'a'), test_cell(0, 1, 'b')], None);
+        let grid = test_grid_rows(vec![vec![test_cell(0, 'a')], vec![test_cell(0, 'b')]], None);
         let batches = collect_batches(&grid);
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].text, "a");
@@ -3131,9 +3312,9 @@ mod tests {
 
     #[test]
     fn batches_split_on_bold_or_color_change() {
-        let first = test_cell(0, 0, 'a');
-        let mut second = test_cell(1, 0, 'b');
-        let mut third = test_cell(2, 0, 'c');
+        let first = test_cell(0, 'a');
+        let mut second = test_cell(1, 'b');
+        let mut third = test_cell(2, 'c');
         second.bold = true;
         third.fg = test_color(0.8, 0.4, 0.3);
         let grid = test_grid(vec![first, second, third], None);
@@ -3146,11 +3327,14 @@ mod tests {
 
     #[test]
     fn batches_preserve_sgr_text_attributes() {
-        let mut italic = test_cell(0, 0, 'i');
-        let mut underlined = test_cell(1, 0, 'u');
-        let mut struck = test_cell(2, 0, 's');
+        let mut italic = test_cell(0, 'i');
+        let mut underlined = test_cell(1, 'u');
+        let mut struck = test_cell(2, 's');
         italic.italic = true;
-        underlined.underline = true;
+        underlined.underline = Some(TerminalUnderline {
+            style: TerminalUnderlineStyle::Single,
+            color: None,
+        });
         struck.strikethrough = true;
 
         let grid = test_grid(vec![italic, underlined, struck], None);
@@ -3169,13 +3353,184 @@ mod tests {
     }
 
     #[test]
+    fn terminal_underlines_map_single_and_curly_to_gpui_decorations() {
+        let foreground = test_color(0.2, 0.4, 0.6);
+        let explicit = test_color(0.8, 0.5, 0.3);
+
+        let single = gpui_underline_style(
+            TerminalUnderline {
+                style: TerminalUnderlineStyle::Single,
+                color: None,
+            },
+            foreground,
+        )
+        .expect("single underline should use GPUI decoration");
+        assert_eq!(single.thickness, px(1.0));
+        assert_eq!(single.color, Some(foreground));
+        assert!(!single.wavy);
+
+        let curly = gpui_underline_style(
+            TerminalUnderline {
+                style: TerminalUnderlineStyle::Curly,
+                color: Some(explicit),
+            },
+            foreground,
+        )
+        .expect("curly underline should use GPUI decoration");
+        assert_eq!(curly.thickness, px(1.0));
+        assert_eq!(curly.color, Some(explicit));
+        assert!(curly.wavy);
+
+        for style in [
+            TerminalUnderlineStyle::Double,
+            TerminalUnderlineStyle::Dotted,
+            TerminalUnderlineStyle::Dashed,
+        ] {
+            assert!(
+                gpui_underline_style(TerminalUnderline { style, color: None }, foreground)
+                    .is_none(),
+                "{style:?} must use the custom painter"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_underline_geometry_is_pixel_snapped_and_bounded() {
+        let bounds = Bounds {
+            origin: point(px(12.3), px(40.7)),
+            size: Size {
+                width: px(20.2),
+                height: px(10.2),
+            },
+        };
+
+        let underline_origin_y = px(49.0);
+        let double =
+            custom_underline_path_spec(bounds, underline_origin_y, TerminalUnderlineStyle::Double)
+                .expect("double underline geometry");
+        assert_f32_eq(double.start_x, 12.5);
+        assert_f32_eq(double.end_x, 32.5);
+        assert_eq!(double.line_count, 2);
+        assert_f32_eq(double.line_y[0], 47.5);
+        assert_f32_eq(double.line_y[1], 49.5);
+        assert_eq!(double.pattern, CustomUnderlinePattern::Solid);
+
+        let dotted =
+            custom_underline_path_spec(bounds, underline_origin_y, TerminalUnderlineStyle::Dotted)
+                .expect("dotted underline geometry");
+        assert_eq!(dotted.line_count, 1);
+        assert_f32_eq(dotted.line_y[0], 49.5);
+        assert_eq!(dotted.pattern, CustomUnderlinePattern::Dotted);
+
+        let dashed =
+            custom_underline_path_spec(bounds, underline_origin_y, TerminalUnderlineStyle::Dashed)
+                .expect("dashed underline geometry");
+        assert_eq!(dashed.line_count, 1);
+        assert_eq!(dashed.pattern, CustomUnderlinePattern::Dashed);
+
+        for spec in [double, dotted, dashed] {
+            assert!(spec.start_x >= 12.0);
+            assert!(spec.end_x <= 33.0);
+            assert!(
+                spec.line_y[..spec.line_count]
+                    .iter()
+                    .all(|y| *y >= 41.0 && *y <= 51.0)
+            );
+        }
+        assert!(
+            custom_underline_path_spec(bounds, underline_origin_y, TerminalUnderlineStyle::Single,)
+                .is_none()
+        );
+        assert!(
+            custom_underline_path_spec(bounds, underline_origin_y, TerminalUnderlineStyle::Curly,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn batches_split_on_underline_style_and_color() {
+        let explicit = test_color(0.9, 0.4, 0.2);
+        let mut single = test_cell(0, 'a');
+        let mut double = test_cell(1, 'b');
+        let mut colored = test_cell(2, 'c');
+        let mut same_colored = test_cell(3, 'd');
+        single.underline = Some(TerminalUnderline {
+            style: TerminalUnderlineStyle::Single,
+            color: None,
+        });
+        double.underline = Some(TerminalUnderline {
+            style: TerminalUnderlineStyle::Double,
+            color: None,
+        });
+        colored.underline = Some(TerminalUnderline {
+            style: TerminalUnderlineStyle::Double,
+            color: Some(explicit),
+        });
+        same_colored.underline = colored.underline;
+
+        let batches = collect_batches(&test_grid(
+            vec![single, double, colored, same_colored],
+            None,
+        ));
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].text, "a");
+        assert_eq!(batches[1].text, "b");
+        assert_eq!(batches[2].text, "cd");
+        assert_eq!(
+            batches[0].underline,
+            Some(TerminalUnderline {
+                style: TerminalUnderlineStyle::Single,
+                color: None,
+            })
+        );
+        assert_eq!(
+            batches[1].underline,
+            Some(TerminalUnderline {
+                style: TerminalUnderlineStyle::Double,
+                color: None,
+            })
+        );
+        assert_eq!(
+            batches[2].underline,
+            Some(TerminalUnderline {
+                style: TerminalUnderlineStyle::Double,
+                color: Some(explicit),
+            })
+        );
+    }
+
+    #[test]
+    fn cached_text_batch_equality_rejects_stale_underline_decoration() {
+        let key = TextBatchKey {
+            bold: false,
+            italic: false,
+            strikethrough: false,
+            fg: test_color(0.4, 0.5, 0.6),
+        };
+        let make_batch =
+            |underline| TextBatchBuilder::new(0, 0, 'x', None, key, Some(underline)).finalize();
+        let single = make_batch(TerminalUnderline {
+            style: TerminalUnderlineStyle::Single,
+            color: None,
+        });
+        let curly = make_batch(TerminalUnderline {
+            style: TerminalUnderlineStyle::Curly,
+            color: None,
+        });
+        let colored = make_batch(TerminalUnderline {
+            style: TerminalUnderlineStyle::Single,
+            color: Some(test_color(0.7, 0.2, 0.3)),
+        });
+
+        assert!(!text_batches_match_without_row(&single, &curly));
+        assert!(!text_batches_match_without_row(&single, &colored));
+        assert!(text_batches_match_without_row(&single, &single.clone()));
+    }
+
+    #[test]
     fn batches_split_on_hover_underline_boundary() {
         let grid = test_grid(
-            vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, 'b'),
-                test_cell(2, 0, 'c'),
-            ],
+            vec![test_cell(0, 'a'), test_cell(1, 'b'), test_cell(2, 'c')],
             Some((0, 1, 0, 2)),
         );
         let batches = collect_batches(&grid);
@@ -3190,31 +3545,38 @@ mod tests {
     fn hover_underline_covers_each_row_of_wrapped_link() {
         let grid = test_grid_rows(
             vec![
-                vec![test_cell(0, 0, 'a'), test_cell(1, 0, 'b')],
-                vec![test_cell(0, 1, 'c'), test_cell(1, 1, 'd')],
-                vec![test_cell(0, 2, 'e'), test_cell(1, 2, 'f')],
+                vec![test_cell(0, 'a'), test_cell(1, 'b')],
+                vec![test_cell(0, 'c'), test_cell(1, 'd')],
+                vec![test_cell(0, 'e'), test_cell(1, 'f')],
             ],
             Some((0, 1, 2, 0)),
         );
         let color = test_color(1.0, 1.0, 1.0);
 
-        assert!(grid.cell_underline(0, 0, color, false).is_none());
-        assert!(grid.cell_underline(0, 1, color, false).is_some());
-        assert!(grid.cell_underline(1, 0, color, false).is_some());
-        assert!(grid.cell_underline(1, 1, color, false).is_some());
-        assert!(grid.cell_underline(2, 0, color, false).is_some());
-        assert!(grid.cell_underline(2, 1, color, false).is_none());
-        assert!(grid.cell_underline(2, 1, color, true).is_some());
+        assert!(grid.cell_underline(0, 0, color, None).is_none());
+        assert!(grid.cell_underline(0, 1, color, None).is_some());
+        assert!(grid.cell_underline(1, 0, color, None).is_some());
+        assert!(grid.cell_underline(1, 1, color, None).is_some());
+        assert!(grid.cell_underline(2, 0, color, None).is_some());
+        assert!(grid.cell_underline(2, 1, color, None).is_none());
+        assert!(
+            grid.cell_underline(
+                2,
+                1,
+                color,
+                Some(TerminalUnderline {
+                    style: TerminalUnderlineStyle::Single,
+                    color: None,
+                })
+            )
+            .is_some()
+        );
     }
 
     #[test]
     fn batches_keep_emoji_in_normal_text_flow() {
         let grid = test_grid(
-            vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, '📦'),
-                test_cell(2, 0, 'b'),
-            ],
+            vec![test_cell(0, 'a'), test_cell(1, '📦'), test_cell(2, 'b')],
             None,
         );
         let batches = collect_batches(&grid);
@@ -3226,11 +3588,7 @@ mod tests {
     #[test]
     fn draw_ops_include_emoji_cells() {
         let grid = test_grid(
-            vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, '📦'),
-                test_cell(2, 0, 'b'),
-            ],
+            vec![test_cell(0, 'a'), test_cell(1, '📦'), test_cell(2, 'b')],
             None,
         );
         let ops = grid.collect_draw_ops(test_color(0.0, 0.0, 1.0), test_color(0.0, 0.0, 1.0));
@@ -3242,18 +3600,18 @@ mod tests {
 
     #[test]
     fn batches_split_on_non_render_text_cells_and_controls() {
-        let mut spacer = test_cell(1, 0, 'x');
+        let mut spacer = test_cell(1, 'x');
         spacer.render_text = false;
-        let mut control = test_cell(2, 0, '\u{001B}');
+        let mut control = test_cell(2, '\u{001B}');
         control.render_text = true;
         let grid = test_grid(
             vec![
-                test_cell(0, 0, 'a'),
+                test_cell(0, 'a'),
                 spacer,
                 control,
-                test_cell(3, 0, ' '),
-                test_cell(4, 0, '\0'),
-                test_cell(5, 0, 'b'),
+                test_cell(3, ' '),
+                test_cell(4, '\0'),
+                test_cell(5, 'b'),
             ],
             None,
         );
@@ -3267,9 +3625,9 @@ mod tests {
     fn batches_do_not_include_block_element_glyphs() {
         let grid = test_grid(
             vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, '\u{2588}'),
-                test_cell(2, 0, 'b'),
+                test_cell(0, 'a'),
+                test_cell(1, '\u{2588}'),
+                test_cell(2, 'b'),
             ],
             None,
         );
@@ -3281,12 +3639,9 @@ mod tests {
 
     #[test]
     fn batches_break_around_wide_char_spacer_boundaries() {
-        let mut spacer = test_cell(1, 0, ' ');
+        let mut spacer = test_cell(1, ' ');
         spacer.render_text = false;
-        let grid = test_grid(
-            vec![test_cell(0, 0, '你'), spacer, test_cell(2, 0, 'x')],
-            None,
-        );
+        let grid = test_grid(vec![test_cell(0, '你'), spacer, test_cell(2, 'x')], None);
         let batches = collect_batches(&grid);
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].text, "你");
@@ -3297,9 +3652,9 @@ mod tests {
     fn draw_ops_interleave_text_and_block_in_cell_order() {
         let grid = test_grid(
             vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, '\u{2588}'),
-                test_cell(2, 0, 'b'),
+                test_cell(0, 'a'),
+                test_cell(1, '\u{2588}'),
+                test_cell(2, 'b'),
             ],
             None,
         );
@@ -3314,11 +3669,11 @@ mod tests {
     fn draw_ops_flush_batch_before_block() {
         let grid = test_grid(
             vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, 'b'),
-                test_cell(2, 0, '\u{2588}'),
-                test_cell(3, 0, 'c'),
-                test_cell(4, 0, 'd'),
+                test_cell(0, 'a'),
+                test_cell(1, 'b'),
+                test_cell(2, '\u{2588}'),
+                test_cell(3, 'c'),
+                test_cell(4, 'd'),
             ],
             None,
         );
@@ -3333,11 +3688,11 @@ mod tests {
     fn draw_ops_flush_batch_before_box_draw() {
         let grid = test_grid(
             vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, 'b'),
-                test_cell(2, 0, '\u{2502}'),
-                test_cell(3, 0, 'c'),
-                test_cell(4, 0, 'd'),
+                test_cell(0, 'a'),
+                test_cell(1, 'b'),
+                test_cell(2, '\u{2502}'),
+                test_cell(3, 'c'),
+                test_cell(4, 'd'),
             ],
             None,
         );
@@ -3352,9 +3707,9 @@ mod tests {
     fn draw_ops_emit_rounded_corner_variant() {
         let grid = test_grid(
             vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, '\u{256D}'),
-                test_cell(2, 0, 'b'),
+                test_cell(0, 'a'),
+                test_cell(1, '\u{256D}'),
+                test_cell(2, 'b'),
             ],
             None,
         );
@@ -3371,9 +3726,9 @@ mod tests {
     fn draw_ops_emit_diagonal_variant() {
         let grid = test_grid(
             vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, '\u{2573}'),
-                test_cell(2, 0, 'b'),
+                test_cell(0, 'a'),
+                test_cell(1, '\u{2573}'),
+                test_cell(2, 'b'),
             ],
             None,
         );
@@ -3388,17 +3743,17 @@ mod tests {
 
     #[test]
     fn draw_ops_skip_non_drawable_and_preserve_subsequent_order() {
-        let mut spacer = test_cell(1, 0, 'x');
+        let mut spacer = test_cell(1, 'x');
         spacer.render_text = false;
-        let mut control = test_cell(3, 0, '\u{001B}');
+        let mut control = test_cell(3, '\u{001B}');
         control.render_text = true;
         let grid = test_grid(
             vec![
-                test_cell(0, 0, 'a'),
+                test_cell(0, 'a'),
                 spacer,
-                test_cell(2, 0, '\u{2588}'),
+                test_cell(2, '\u{2588}'),
                 control,
-                test_cell(4, 0, 'b'),
+                test_cell(4, 'b'),
             ],
             None,
         );
@@ -3411,13 +3766,14 @@ mod tests {
 
     #[test]
     fn draw_ops_preserve_row_boundaries_with_blocks() {
-        let grid = test_grid(
+        let grid = test_grid_rows(
             vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, 'b'),
-                test_cell(0, 1, 'c'),
-                test_cell(1, 1, '\u{2588}'),
-                test_cell(2, 1, 'd'),
+                vec![test_cell(0, 'a'), test_cell(1, 'b')],
+                vec![
+                    test_cell(0, 'c'),
+                    test_cell(1, '\u{2588}'),
+                    test_cell(2, 'd'),
+                ],
             ],
             None,
         );
@@ -3432,10 +3788,41 @@ mod tests {
     }
 
     #[test]
+    fn moved_cached_row_uses_outer_row_for_cursor_and_hover() {
+        let cached_row = Arc::new(vec![test_cell(0, 'x')]);
+        let empty_row = Arc::new(Vec::new());
+        let mut grid = test_grid_rows(vec![Vec::new(), Vec::new()], Some((0, 0, 0, 0)));
+        grid.cols = 1;
+        grid.cells = Arc::new(vec![Arc::clone(&cached_row), Arc::clone(&empty_row)]);
+        grid.cursor_cell = Some((0, 0));
+        grid.cursor_visible = true;
+        let cursor_fg = test_color(0.7, 0.6, 0.5);
+        let highlight_fg = test_color(0.2, 0.3, 0.4);
+
+        let original_ops = grid.collect_draw_ops(cursor_fg, highlight_fg);
+        assert!(matches!(
+            &original_ops[..],
+            [TextDrawOp::Batch(batch)]
+                if batch.row == 0 && batch.fg == cursor_fg && batch.underline.is_some()
+        ));
+
+        grid.cells = Arc::new(vec![empty_row, cached_row]);
+        grid.cursor_cell = Some((0, 1));
+        grid.hovered_link_range = Some((1, 0, 1, 0));
+
+        let moved_ops = grid.collect_draw_ops(cursor_fg, highlight_fg);
+        assert!(matches!(
+            &moved_ops[..],
+            [TextDrawOp::Batch(batch)]
+                if batch.row == 1 && batch.fg == cursor_fg && batch.underline.is_some()
+        ));
+    }
+
+    #[test]
     fn block_draw_uses_same_fg_precedence_as_text() {
-        let mut selected_text = test_cell(0, 0, 'x');
+        let mut selected_text = test_cell(0, 'x');
         selected_text.selected = true;
-        let mut selected_block = test_cell(1, 0, '\u{2588}');
+        let mut selected_block = test_cell(1, '\u{2588}');
         selected_block.selected = true;
         let grid = test_grid(vec![selected_text, selected_block], None);
         let ops = collect_draw_ops(&grid);
@@ -3461,7 +3848,7 @@ mod tests {
         assert_eq!(text_fg, grid.selection_fg);
         assert_eq!(block_fg, grid.selection_fg);
 
-        let mut cursor_block = test_cell(0, 0, '\u{2588}');
+        let mut cursor_block = test_cell(0, '\u{2588}');
         cursor_block.selected = true;
         cursor_block.search_current = true;
         let mut grid = test_grid(vec![cursor_block], None);
@@ -3490,7 +3877,7 @@ mod tests {
 
     #[test]
     fn dirty_rows_for_pass_includes_cursor_transition_rows() {
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], None);
+        let mut grid = test_grid(vec![test_cell(0, 'a')], None);
         grid.rows = 5;
         grid.paint_damage = TerminalGridPaintDamage::Rows(vec![2usize].into());
         grid.cursor_cell = Some((0, 1));
@@ -3510,7 +3897,7 @@ mod tests {
     fn blink_only_does_not_dirty_rows_for_line_cursor() {
         // Line cursor: toggling cursor_visible should NOT mark the cursor row dirty,
         // since the cursor quad is painted as an overlay and row draw ops are unchanged.
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], None);
+        let mut grid = test_grid(vec![test_cell(0, 'a')], None);
         grid.rows = 3;
         grid.paint_damage = TerminalGridPaintDamage::None;
         grid.cursor_cell = Some((0, 1));
@@ -3536,7 +3923,7 @@ mod tests {
     fn blink_only_dirties_cursor_row_for_block_cursor() {
         // Block cursor: toggling cursor_visible MUST mark the cursor row dirty,
         // since the text fg color at the cursor cell is baked into draw ops.
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], None);
+        let mut grid = test_grid(vec![test_cell(0, 'a')], None);
         grid.rows = 3;
         grid.paint_damage = TerminalGridPaintDamage::None;
         grid.cursor_cell = Some((0, 1));
@@ -3561,7 +3948,7 @@ mod tests {
 
     #[test]
     fn dirty_rows_for_pass_includes_hover_transition_rows() {
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], Some((3, 1, 3, 2)));
+        let mut grid = test_grid(vec![test_cell(0, 'a')], Some((3, 1, 3, 2)));
         grid.rows = 5;
         grid.paint_damage = TerminalGridPaintDamage::None;
         let mut cache = TerminalGridPaintCache {
@@ -3577,7 +3964,7 @@ mod tests {
 
     #[test]
     fn dirty_rows_for_pass_includes_every_wrapped_link_row() {
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], Some((2, 1, 4, 3)));
+        let mut grid = test_grid(vec![test_cell(0, 'a')], Some((2, 1, 4, 3)));
         grid.rows = 6;
         grid.paint_damage = TerminalGridPaintDamage::None;
         let mut cache = TerminalGridPaintCache {
@@ -3595,7 +3982,7 @@ mod tests {
 
     #[test]
     fn dirty_rows_for_pass_forces_full_repaint_when_style_changes() {
-        let grid = test_grid(vec![test_cell(0, 0, 'a')], None);
+        let grid = test_grid(vec![test_cell(0, 'a')], None);
         let mut cache = TerminalGridPaintCache::default();
         let (full, style_changed, dirty_rows) = grid.dirty_rows_for_pass(&mut cache);
         assert!(full);
@@ -3605,11 +3992,11 @@ mod tests {
 
     #[test]
     fn row_background_spans_merge_contiguous_cells_with_same_fill() {
-        let mut first = test_cell(0, 0, 'a');
-        let mut second = test_cell(1, 0, 'b');
-        let mut third = test_cell(2, 0, 'c');
-        let mut fourth = test_cell(3, 0, 'd');
-        let mut fifth = test_cell(4, 0, 'e');
+        let mut first = test_cell(0, 'a');
+        let mut second = test_cell(1, 'b');
+        let mut third = test_cell(2, 'c');
+        let mut fourth = test_cell(3, 'd');
+        let mut fifth = test_cell(4, 'e');
         let shared_bg = test_color(0.6, 0.3, 0.2);
         first.bg = shared_bg;
         second.bg = shared_bg;
@@ -3635,8 +4022,8 @@ mod tests {
 
     #[test]
     fn row_background_spans_skip_default_background_that_matches_surface() {
-        let mut default_bg_cell = test_cell(0, 0, 'a');
-        let mut ansi_bg_cell = test_cell(1, 0, 'b');
+        let mut default_bg_cell = test_cell(0, 'a');
+        let mut ansi_bg_cell = test_cell(1, 'b');
         default_bg_cell.uses_terminal_default_bg = true;
         default_bg_cell.bg = test_color(0.2, 0.2, 0.2);
         ansi_bg_cell.bg = test_color(0.2, 0.2, 0.2);
@@ -3658,7 +4045,7 @@ mod tests {
 
     #[test]
     fn row_background_spans_include_transformed_default_background_cells() {
-        let mut default_bg_cell = test_cell(0, 0, 'a');
+        let mut default_bg_cell = test_cell(0, 'a');
         default_bg_cell.uses_terminal_default_bg = true;
         default_bg_cell.bg = test_color(0.2, 0.2, 0.2);
 
@@ -3679,7 +4066,7 @@ mod tests {
 
     #[test]
     fn upper_half_block_cells_keep_non_default_background_spans() {
-        let mut half_block = test_cell(0, 0, '\u{2580}');
+        let mut half_block = test_cell(0, '\u{2580}');
         half_block.bg = test_color(0.8, 0.4, 0.2);
 
         let grid = test_grid(vec![half_block], None);
@@ -3698,14 +4085,8 @@ mod tests {
 
     #[test]
     fn matching_previous_row_ops_ignores_row_index_for_shifted_content() {
-        let old_grid = test_grid_rows(
-            vec![vec![test_cell(0, 0, 'a')], vec![test_cell(0, 1, 'b')]],
-            None,
-        );
-        let new_grid = test_grid_rows(
-            vec![vec![test_cell(0, 0, 'b')], vec![test_cell(0, 1, 'c')]],
-            None,
-        );
+        let old_grid = test_grid_rows(vec![vec![test_cell(0, 'a')], vec![test_cell(0, 'b')]], None);
+        let new_grid = test_grid_rows(vec![vec![test_cell(0, 'b')], vec![test_cell(0, 'c')]], None);
         let cursor_fg = Hsla {
             h: 0.0,
             s: 0.0,
@@ -3721,12 +4102,14 @@ mod tests {
 
         let previous_row_ops = vec![
             old_grid.rebuild_cached_row_ops(
+                0,
                 old_grid.cells[0].as_slice(),
                 cursor_fg,
                 highlight_fg,
                 &mut HashMap::new(),
             ),
             old_grid.rebuild_cached_row_ops(
+                1,
                 old_grid.cells[1].as_slice(),
                 cursor_fg,
                 highlight_fg,
@@ -3734,6 +4117,7 @@ mod tests {
             ),
         ];
         let next_row_ops = new_grid.rebuild_cached_row_ops(
+            0,
             new_grid.cells[0].as_slice(),
             cursor_fg,
             highlight_fg,
@@ -3748,8 +4132,8 @@ mod tests {
 
     #[test]
     fn matching_previous_row_ops_rejects_hover_style_mismatches() {
-        let previous_grid = test_grid(vec![test_cell(0, 0, 'a')], Some((0, 0, 0, 0)));
-        let next_grid = test_grid(vec![test_cell(0, 0, 'a')], None);
+        let previous_grid = test_grid(vec![test_cell(0, 'a')], Some((0, 0, 0, 0)));
+        let next_grid = test_grid(vec![test_cell(0, 'a')], None);
         let cursor_fg = Hsla {
             h: 0.0,
             s: 0.0,
@@ -3764,12 +4148,14 @@ mod tests {
         };
 
         let previous_row_ops = vec![previous_grid.rebuild_cached_row_ops(
+            0,
             previous_grid.cells[0].as_slice(),
             cursor_fg,
             highlight_fg,
             &mut HashMap::new(),
         )];
         let next_row_ops = next_grid.rebuild_cached_row_ops(
+            0,
             next_grid.cells[0].as_slice(),
             cursor_fg,
             highlight_fg,
@@ -3786,13 +4172,14 @@ mod tests {
     fn rebuild_cached_row_ops_initializes_pointer_sized_shaped_line_slots_per_draw_op() {
         let grid = test_grid(
             vec![
-                test_cell(0, 0, 'a'),
-                test_cell(1, 0, '\u{2588}'),
-                test_cell(2, 0, 'b'),
+                test_cell(0, 'a'),
+                test_cell(1, '\u{2588}'),
+                test_cell(2, 'b'),
             ],
             None,
         );
         let row_ops = grid.rebuild_cached_row_ops(
+            0,
             grid.cells[0].as_slice(),
             Hsla {
                 h: 0.0,
@@ -3821,9 +4208,9 @@ mod tests {
 
     #[test]
     fn rebuild_cached_rows_for_pass_clears_rows_missing_from_cells() {
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], None);
+        let mut grid = test_grid(vec![test_cell(0, 'a')], None);
         grid.rows = 2;
-        grid.cells = Arc::new(vec![Arc::new(vec![test_cell(0, 0, 'a')])]);
+        grid.cells = Arc::new(vec![Arc::new(vec![test_cell(0, 'a')])]);
 
         let cursor_fg = Hsla {
             h: 0.0,
@@ -3838,11 +4225,12 @@ mod tests {
             a: 1.0,
         };
 
-        let stale_row_cells = vec![test_cell(0, 1, 'z')];
+        let stale_row_cells = vec![test_cell(0, 'z')];
         let mut cache = TerminalGridPaintCache {
             row_ops: vec![
                 CachedRowPaintOps::default(),
                 grid.rebuild_cached_row_ops(
+                    1,
                     stale_row_cells.as_slice(),
                     cursor_fg,
                     highlight_fg,
@@ -3881,7 +4269,7 @@ mod tests {
 
     #[test]
     fn dirty_rows_for_pass_row_ranges_extracts_rows_and_col_ranges() {
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], None);
+        let mut grid = test_grid(vec![test_cell(0, 'a')], None);
         grid.rows = 5;
         grid.paint_damage = TerminalGridPaintDamage::RowRanges(vec![(1, 10, 20), (3, 5, 8)].into());
 
@@ -3903,7 +4291,7 @@ mod tests {
 
     #[test]
     fn dirty_rows_for_pass_row_ranges_merges_spans_on_same_row() {
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], None);
+        let mut grid = test_grid(vec![test_cell(0, 'a')], None);
         grid.rows = 3;
         // Two spans on row 1: cols 5-10 and cols 15-20 → should merge to 5-20
         grid.paint_damage =
@@ -3962,7 +4350,7 @@ mod tests {
 
     #[test]
     fn draw_ops_shape_combining_text_with_its_base_cell() {
-        let mut cell = test_cell(0, 0, 'e');
+        let mut cell = test_cell(0, 'e');
         cell.combining = Some(SharedString::from("\u{301}"));
         let grid = test_grid(vec![cell], None);
         let ops = collect_draw_ops(&grid);
@@ -4005,10 +4393,7 @@ mod tests {
 
     #[test]
     fn draw_ops_emit_sextant_for_legacy_mosaic() {
-        let grid = test_grid(
-            vec![test_cell(0, 0, 'a'), test_cell(1, 0, '\u{1FB00}')],
-            None,
-        );
+        let grid = test_grid(vec![test_cell(0, 'a'), test_cell(1, '\u{1FB00}')], None);
         let ops = collect_draw_ops(&grid);
         assert_eq!(ops.len(), 2);
         assert!(matches!(&ops[0], TextDrawOp::Batch(batch) if batch.text == "a"));
@@ -4035,7 +4420,7 @@ mod tests {
     #[test]
     fn dirty_rows_for_pass_row_ranges_resets_each_pass() {
         // Verify that dirty_col_ranges is cleared between passes (via ensure_row_capacity)
-        let mut grid = test_grid(vec![test_cell(0, 0, 'a')], None);
+        let mut grid = test_grid(vec![test_cell(0, 'a')], None);
         grid.rows = 3;
         grid.paint_damage = TerminalGridPaintDamage::RowRanges(vec![(1, 5, 10)].into());
 

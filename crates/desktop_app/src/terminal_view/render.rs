@@ -198,7 +198,6 @@ struct CellColorTransform {
 struct CellTextAttributes {
     bold: bool,
     italic: bool,
-    underline: bool,
     strikethrough: bool,
 }
 
@@ -206,7 +205,6 @@ fn cell_text_attributes(flags: Flags) -> CellTextAttributes {
     CellTextAttributes {
         bold: flags.contains(Flags::BOLD),
         italic: flags.contains(Flags::ITALIC),
-        underline: flags.intersects(Flags::ALL_UNDERLINES),
         strikethrough: flags.contains(Flags::STRIKEOUT),
     }
 }
@@ -217,9 +215,53 @@ fn terminal_cell_text_attributes(cell: TerminalCellRef<'_>) -> CellTextAttribute
         TerminalCellRef::Tmon(cell, _) => CellTextAttributes {
             bold: cell.attributes.bold(),
             italic: cell.attributes.italic(),
-            underline: cell.attributes.underline(),
             strikethrough: cell.attributes.strikethrough(),
         },
+    }
+}
+
+fn tmon_terminal_underline_style(
+    style: tmon::UnderlineStyle,
+) -> Option<termy_terminal_ui::TerminalUnderlineStyle> {
+    Some(match style {
+        tmon::UnderlineStyle::None => return None,
+        tmon::UnderlineStyle::Single => termy_terminal_ui::TerminalUnderlineStyle::Single,
+        tmon::UnderlineStyle::Double => termy_terminal_ui::TerminalUnderlineStyle::Double,
+        tmon::UnderlineStyle::Curly => termy_terminal_ui::TerminalUnderlineStyle::Curly,
+        tmon::UnderlineStyle::Dotted => termy_terminal_ui::TerminalUnderlineStyle::Dotted,
+        tmon::UnderlineStyle::Dashed => termy_terminal_ui::TerminalUnderlineStyle::Dashed,
+    })
+}
+
+fn terminal_cell_underline(
+    cell: TerminalCellRef<'_>,
+    context: PaneCellBuildContext<'_>,
+) -> Option<termy_terminal_ui::TerminalUnderline> {
+    match cell {
+        // Preserve the existing native/tmux rendering contract: every
+        // Alacritty underline variant is painted as a single underline using
+        // the effective foreground. Native underline colors intentionally
+        // remain outside this adapter boundary for now.
+        TerminalCellRef::Alacritty(cell) => cell.flags.intersects(Flags::ALL_UNDERLINES).then_some(
+            termy_terminal_ui::TerminalUnderline {
+                style: termy_terminal_ui::TerminalUnderlineStyle::Single,
+                color: None,
+            },
+        ),
+        TerminalCellRef::Tmon(cell, _) => {
+            let style = tmon_terminal_underline_style(cell.attributes.underline_style())?;
+            let color = cell.underline_color.map(|color| {
+                resolve_tmon_color(
+                    color,
+                    context.colors.foreground,
+                    context.colors,
+                    context.tmon_palette,
+                    context.tmon_palette.and_then(tmon::Palette::foreground),
+                )
+                .into()
+            });
+            Some(termy_terminal_ui::TerminalUnderline { style, color })
+        }
     }
 }
 
@@ -317,6 +359,8 @@ fn finalized_cache_update_strategy(
 thread_local! {
     static DIRTY_SPAN_RANGES: std::cell::RefCell<Vec<(usize, usize, usize)>> =
         std::cell::RefCell::new(Vec::with_capacity(128));
+    static SCROLL_DAMAGE_ROWS: std::cell::RefCell<Vec<usize>> =
+        std::cell::RefCell::new(Vec::with_capacity(128));
 }
 
 fn dirty_span_cell_upper_bound(spans: &[TerminalDirtySpan], rows: usize, cols: usize) -> usize {
@@ -394,6 +438,43 @@ fn paint_damage_from_dirty_spans(
             TerminalGridPaintDamage::RowRanges(Arc::from(ranges.as_slice()))
         })
     };
+    if let Some(started_at) = metrics_started_at {
+        add_span_damage_compute_us(started_at.elapsed().as_micros() as u64);
+    }
+    result
+}
+
+fn paint_damage_from_scrolls_and_spans(
+    scrolls: &[TerminalViewportScroll],
+    spans: &[TerminalDirtySpan],
+    row_count: usize,
+) -> TerminalGridPaintDamage {
+    if scrolls.is_empty() {
+        return paint_damage_from_dirty_spans(spans, row_count);
+    }
+    let metrics_started_at = terminal_ui_render_metrics_enabled().then(Instant::now);
+    let result = SCROLL_DAMAGE_ROWS.with(|buf| {
+        let mut rows = buf.borrow_mut();
+        rows.clear();
+        for scroll in scrolls {
+            if scroll.top > scroll.bottom || scroll.top >= row_count {
+                continue;
+            }
+            rows.extend(scroll.top..=scroll.bottom.min(row_count.saturating_sub(1)));
+        }
+        rows.extend(
+            spans
+                .iter()
+                .filter_map(|span| (span.row < row_count).then_some(span.row)),
+        );
+        rows.sort_unstable();
+        rows.dedup();
+        if rows.is_empty() {
+            TerminalGridPaintDamage::None
+        } else {
+            TerminalGridPaintDamage::Rows(Arc::from(rows.as_slice()))
+        }
+    });
     if let Some(started_at) = metrics_started_at {
         add_span_damage_compute_us(started_at.elapsed().as_micros() as u64);
     }
@@ -625,6 +706,26 @@ fn pane_render_cells_match_dimensions(cells: &PaneRenderCells, cols: usize, rows
     cells.len() == rows && cells.iter().all(|row_cells| row_cells.len() == cols)
 }
 
+fn replay_viewport_scrolls<T>(rows: &mut [T], scrolls: &[TerminalViewportScroll]) -> bool {
+    let row_count = rows.len();
+    if scrolls.iter().any(|scroll| {
+        scroll.top > scroll.bottom
+            || scroll.bottom >= row_count
+            || scroll.count == 0
+            || scroll.count > scroll.bottom - scroll.top + 1
+    }) {
+        return false;
+    }
+    for scroll in scrolls {
+        let region = &mut rows[scroll.top..=scroll.bottom];
+        match scroll.direction {
+            TerminalViewportScrollDirection::Up => region.rotate_left(scroll.count),
+            TerminalViewportScrollDirection::Down => region.rotate_right(scroll.count),
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 fn patch_pane_render_row(
     cells: &mut [Arc<Vec<CellRenderInfo>>],
@@ -647,8 +748,13 @@ fn patch_pane_render_row(
 
     let row_cells = Arc::make_mut(row_cells);
     let right_col = right_col.min(cols.saturating_sub(1));
-    for col in left_col..=right_col {
-        row_cells[col] = build_cell(col);
+    for (col, cell) in row_cells
+        .iter_mut()
+        .enumerate()
+        .take(right_col.saturating_add(1))
+        .skip(left_col)
+    {
+        *cell = build_cell(col);
     }
     right_col.saturating_sub(left_col).saturating_add(1)
 }
@@ -799,13 +905,13 @@ impl TerminalView {
     fn build_cell_render_info(
         &self,
         col: usize,
-        row: usize,
         term_line: i32,
         cell_content: TerminalCellRef<'_>,
         context: PaneCellBuildContext<'_>,
     ) -> CellRenderInfo {
         let resolved_colors = resolve_cell_colors(cell_content, context);
         let text_attributes = terminal_cell_text_attributes(cell_content);
+        let underline = terminal_cell_underline(cell_content, context);
 
         let (search_current, search_match) = if let Some(results) = context.pane_search_results {
             let is_current = results.is_current_match(term_line, col);
@@ -817,7 +923,6 @@ impl TerminalView {
 
         CellRenderInfo {
             col,
-            row,
             char: cell_content.character(),
             combining: cell_content.combining(),
             fg: resolved_colors.fg.into(),
@@ -825,7 +930,7 @@ impl TerminalView {
             uses_terminal_default_bg: resolved_colors.uses_terminal_default_bg,
             bold: text_attributes.bold,
             italic: text_attributes.italic,
-            underline: text_attributes.underline,
+            underline,
             strikethrough: text_attributes.strikethrough,
             render_text: !cell_content.is_wide_spacer() && !cell_content.is_hidden(),
             selected: selection_range_contains(context.selection_range, col, term_line),
@@ -855,7 +960,7 @@ impl TerminalView {
         let mut expected_col = 0usize;
         let mut ordering_failed = false;
 
-        let _ = terminal.for_each_renderable_cell(
+        let _ = terminal.for_each_full_rebuild_cell(
             |cell_display_offset, term_line, col, cell_content| {
                 if ordering_failed || cell_display_offset != display_offset {
                     return;
@@ -876,7 +981,6 @@ impl TerminalView {
 
                 row_cells[row].push(self.build_cell_render_info(
                     col,
-                    row,
                     term_line,
                     cell_content,
                     context,
@@ -911,7 +1015,6 @@ impl TerminalView {
         let (default_fg, default_bg) = resolved_default_cell_colors(context);
         let default_cell = CellRenderInfo {
             col: 0,
-            row: 0,
             char: ' ',
             combining: None,
             fg: default_fg.into(),
@@ -919,7 +1022,7 @@ impl TerminalView {
             uses_terminal_default_bg: true,
             bold: false,
             italic: false,
-            underline: false,
+            underline: None,
             strikethrough: false,
             render_text: false,
             selected: false,
@@ -927,16 +1030,15 @@ impl TerminalView {
             search_match: false,
         };
         let mut rows_cache: Vec<Vec<CellRenderInfo>> = Vec::with_capacity(rows);
-        for row in 0..rows {
+        for _ in 0..rows {
             let mut row_cells = vec![default_cell.clone(); cols];
             for (col, cell) in row_cells.iter_mut().enumerate() {
                 cell.col = col;
-                cell.row = row;
             }
             rows_cache.push(row_cells);
         }
 
-        let _ = terminal.for_each_renderable_cell(
+        let _ = terminal.for_each_full_rebuild_cell(
             |cell_display_offset, term_line, col, cell_content| {
                 if cell_display_offset != display_offset || col >= cols {
                     return;
@@ -950,7 +1052,7 @@ impl TerminalView {
                 }
 
                 rows_cache[row][col] =
-                    self.build_cell_render_info(col, row, term_line, cell_content, context);
+                    self.build_cell_render_info(col, term_line, cell_content, context);
             },
         );
 
@@ -966,6 +1068,7 @@ impl TerminalView {
         display_offset: usize,
         cells: &mut PaneRenderCells,
         spans: &[TerminalDirtySpan],
+        generation: Option<u64>,
         context: PaneCellBuildContext<'_>,
     ) -> (usize, bool) {
         if !pane_render_cells_match_dimensions(cells, cols, rows) {
@@ -973,34 +1076,41 @@ impl TerminalView {
             return (0, true);
         }
 
-        let mut patched_cell_count = 0usize;
-        // Clone the outer row table at most once for this partial update. Each
-        // dirty row is then made mutable once before all cells in its span are
-        // patched, instead of checking both Arcs for every individual cell.
-        let cells: &mut Vec<_> = Arc::make_mut(cells);
         let Some((min_line, max_line)) = terminal.line_bounds() else {
+            *cells = self.rebuild_pane_render_cache(terminal, cols, rows, display_offset, context);
             return (0, true);
         };
-        for span in spans {
-            if span.row < rows {
-                let _ = Arc::make_mut(&mut cells[span.row]);
-            }
-        }
-        let visited =
-            terminal.for_each_damage_cell(spans, |row, cell_offset, term_line, col, cell| {
-                if row >= rows
-                    || col >= cols
-                    || cell_offset != display_offset
-                    || term_line < min_line
-                    || term_line > max_line
-                {
-                    return;
+        let mut patched_cell_count = 0usize;
+        let visited = {
+            // Clone the outer row table at most once for this partial update. Each
+            // dirty row is then made mutable once before all cells in its span are
+            // patched, instead of checking both Arcs for every individual cell.
+            let rows_cache: &mut Vec<_> = Arc::make_mut(cells);
+            for span in spans {
+                if span.row < rows {
+                    let _ = Arc::make_mut(&mut rows_cache[span.row]);
                 }
-                Arc::make_mut(&mut cells[row])[col] =
-                    self.build_cell_render_info(col, row, term_line, cell, context);
-                patched_cell_count = patched_cell_count.saturating_add(1);
-            });
+            }
+            terminal.for_each_damage_cell(
+                spans,
+                generation,
+                |row, cell_offset, term_line, col, cell| {
+                    if row >= rows
+                        || col >= cols
+                        || cell_offset != display_offset
+                        || term_line < min_line
+                        || term_line > max_line
+                    {
+                        return;
+                    }
+                    Arc::make_mut(&mut rows_cache[row])[col] =
+                        self.build_cell_render_info(col, term_line, cell, context);
+                    patched_cell_count = patched_cell_count.saturating_add(1);
+                },
+            )
+        };
         if !visited {
+            *cells = self.rebuild_pane_render_cache(terminal, cols, rows, display_offset, context);
             return (0, true);
         }
 
@@ -1023,16 +1133,25 @@ impl TerminalView {
         PaneCacheUpdateStrategy,
         TerminalGridPaintDamage,
     ) {
-        let damage = terminal.take_damage_snapshot();
+        let damage = terminal.take_render_damage_snapshot();
         let mut strategy = pane_cache_update_strategy(
             !cache.cells.is_empty(),
             cache.cols == cols && cache.rows == rows,
             cache.display_offset == display_offset,
             cache.key.as_ref() == Some(&cache_key),
-            &damage,
+            &damage.damage,
         );
+        if strategy == PaneCacheUpdateStrategy::Reuse && !damage.scrolls.is_empty() {
+            strategy = PaneCacheUpdateStrategy::Partial;
+        }
         if strategy == PaneCacheUpdateStrategy::Partial
-            && let TerminalDamageSnapshot::Partial(spans) = &damage
+            && !damage.scrolls.is_empty()
+            && (cache_key.selection_range.is_some() || cache_key.search_results_revision.is_some())
+        {
+            strategy = PaneCacheUpdateStrategy::Full;
+        }
+        if strategy == PaneCacheUpdateStrategy::Partial
+            && let TerminalDamageSnapshot::Partial(spans) = &damage.damage
             && partial_damage_should_rebuild_full(spans, rows, cols)
         {
             strategy = PaneCacheUpdateStrategy::Full;
@@ -1040,9 +1159,9 @@ impl TerminalView {
         let mut paint_damage = match strategy {
             PaneCacheUpdateStrategy::Reuse => TerminalGridPaintDamage::None,
             PaneCacheUpdateStrategy::Full => TerminalGridPaintDamage::Full,
-            PaneCacheUpdateStrategy::Partial => match &damage {
+            PaneCacheUpdateStrategy::Partial => match &damage.damage {
                 TerminalDamageSnapshot::Partial(spans) => {
-                    paint_damage_from_dirty_spans(spans, rows)
+                    paint_damage_from_scrolls_and_spans(&damage.scrolls, spans, rows)
                 }
                 TerminalDamageSnapshot::Full => TerminalGridPaintDamage::Full,
             },
@@ -1055,7 +1174,12 @@ impl TerminalView {
                     self.rebuild_pane_render_cache(terminal, cols, rows, display_offset, context);
             }
             PaneCacheUpdateStrategy::Partial => {
-                let TerminalDamageSnapshot::Partial(spans) = damage else {
+                let TerminalRenderDamageSnapshot {
+                    damage: TerminalDamageSnapshot::Partial(spans),
+                    scrolls,
+                    generation,
+                } = damage
+                else {
                     cache.cells = self.rebuild_pane_render_cache(
                         terminal,
                         cols,
@@ -1074,15 +1198,29 @@ impl TerminalView {
                     );
                 };
                 #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-                let (patched_cell_count, did_full_rebuild) = self.patch_pane_render_cache(
-                    terminal,
-                    cols,
-                    rows,
-                    display_offset,
-                    &mut cache.cells,
-                    &spans,
-                    context,
-                );
+                let rows_cache: &mut Vec<_> = Arc::make_mut(&mut cache.cells);
+                let (patched_cell_count, did_full_rebuild) =
+                    if replay_viewport_scrolls(rows_cache.as_mut_slice(), &scrolls) {
+                        self.patch_pane_render_cache(
+                            terminal,
+                            cols,
+                            rows,
+                            display_offset,
+                            &mut cache.cells,
+                            &spans,
+                            generation,
+                            context,
+                        )
+                    } else {
+                        cache.cells = self.rebuild_pane_render_cache(
+                            terminal,
+                            cols,
+                            rows,
+                            display_offset,
+                            context,
+                        );
+                        (0, true)
+                    };
                 strategy = finalized_cache_update_strategy(strategy, did_full_rebuild);
                 if strategy == PaneCacheUpdateStrategy::Full {
                     paint_damage = TerminalGridPaintDamage::Full;
@@ -4029,10 +4167,9 @@ mod tests {
         );
     }
 
-    fn test_render_cell(col: usize, row: usize, c: char) -> CellRenderInfo {
+    fn test_render_cell(col: usize, c: char) -> CellRenderInfo {
         CellRenderInfo {
             col,
-            row,
             char: c,
             combining: None,
             fg: gpui::Hsla::transparent_black(),
@@ -4040,7 +4177,7 @@ mod tests {
             uses_terminal_default_bg: false,
             bold: false,
             italic: false,
-            underline: false,
+            underline: None,
             strikethrough: false,
             render_text: true,
             selected: false,
@@ -4113,8 +4250,133 @@ mod tests {
 
         assert!(attributes.bold);
         assert!(attributes.italic);
-        assert!(attributes.underline);
         assert!(attributes.strikethrough);
+    }
+
+    #[test]
+    fn native_underline_variants_preserve_the_existing_single_foreground_rendering() {
+        let context = test_build_context(1.0);
+        for flags in [
+            Flags::UNDERLINE,
+            Flags::DOUBLE_UNDERLINE,
+            Flags::UNDERCURL,
+            Flags::DOTTED_UNDERLINE,
+            Flags::DASHED_UNDERLINE,
+        ] {
+            let cell = test_term_cell(
+                AnsiColor::Named(NamedColor::Foreground),
+                AnsiColor::Named(NamedColor::Background),
+                flags,
+            );
+            let underline = terminal_cell_underline((&cell).into(), context)
+                .expect("native underline flag should render");
+            assert_eq!(
+                underline.style,
+                termy_terminal_ui::TerminalUnderlineStyle::Single
+            );
+            assert_eq!(underline.color, None);
+        }
+
+        let cell = test_term_cell(
+            AnsiColor::Named(NamedColor::Foreground),
+            AnsiColor::Named(NamedColor::Background),
+            Flags::empty(),
+        );
+        assert_eq!(terminal_cell_underline((&cell).into(), context), None);
+    }
+
+    #[test]
+    fn tmon_underline_preserves_style_and_resolves_explicit_color() {
+        let context = test_build_context(1.0);
+        let cases = [
+            (
+                tmon::UnderlineStyle::Single,
+                termy_terminal_ui::TerminalUnderlineStyle::Single,
+            ),
+            (
+                tmon::UnderlineStyle::Double,
+                termy_terminal_ui::TerminalUnderlineStyle::Double,
+            ),
+            (
+                tmon::UnderlineStyle::Curly,
+                termy_terminal_ui::TerminalUnderlineStyle::Curly,
+            ),
+            (
+                tmon::UnderlineStyle::Dotted,
+                termy_terminal_ui::TerminalUnderlineStyle::Dotted,
+            ),
+            (
+                tmon::UnderlineStyle::Dashed,
+                termy_terminal_ui::TerminalUnderlineStyle::Dashed,
+            ),
+        ];
+
+        for (tmon_style, expected_style) in cases {
+            let mut cell = tmon::Cell::default();
+            cell.attributes = tmon::Attributes::default().with_underline_style(tmon_style);
+            cell.underline_color = Some(tmon::Color::Indexed(1));
+
+            let underline = terminal_cell_underline((&cell).into(), context)
+                .expect("Tmon underline style should render");
+            assert_eq!(underline.style, expected_style);
+            assert_eq!(underline.color, Some(context.colors.ansi[1].into()));
+        }
+
+        let mut implicit = tmon::Cell::default();
+        implicit.attributes =
+            tmon::Attributes::default().with_underline_style(tmon::UnderlineStyle::Single);
+        let underline = terminal_cell_underline((&implicit).into(), context)
+            .expect("implicit Tmon underline should render");
+        assert_eq!(underline.color, None);
+
+        let none = tmon::Cell::default();
+        assert_eq!(terminal_cell_underline((&none).into(), context), None);
+    }
+
+    #[test]
+    fn tmon_underline_color_uses_rgb_and_live_palette_conversion() {
+        let terminal = tmon::Terminal::new_display(tmon::Size::default(), tmon::Config::default());
+        terminal.hydrate_output(b"\x1b]4;7;#123456\x07");
+        let palette = terminal.palette();
+        let mut context = test_build_context(1.0);
+        context.tmon_palette = Some(&palette);
+
+        let mut cell = tmon::Cell::default();
+        cell.attributes =
+            tmon::Attributes::default().with_underline_style(tmon::UnderlineStyle::Single);
+        cell.underline_color = Some(tmon::Color::Indexed(7));
+        let indexed = terminal_cell_underline((&cell).into(), context)
+            .expect("indexed Tmon underline should render");
+        assert_eq!(
+            indexed.color,
+            Some(
+                tmon_rgb_to_rgba(tmon::Rgb {
+                    r: 0x12,
+                    g: 0x34,
+                    b: 0x56,
+                })
+                .into()
+            )
+        );
+
+        cell.underline_color = Some(tmon::Color::Rgb {
+            r: 0xab,
+            g: 0xcd,
+            b: 0xef,
+        });
+        let rgb = terminal_cell_underline((&cell).into(), context)
+            .expect("RGB Tmon underline should render");
+        assert_eq!(
+            rgb.color,
+            Some(
+                tmon_rgb_to_rgba(tmon::Rgb {
+                    r: 0xab,
+                    g: 0xcd,
+                    b: 0xef,
+                })
+                .into()
+            )
+        );
     }
 
     fn tmux_test_pane(id: &str, left: u16, top: u16, cols: u16, rows: u16) -> TerminalPane {
@@ -4261,15 +4523,15 @@ mod tests {
     #[test]
     fn patch_pane_render_row_updates_only_touched_row_cells() {
         let mut cells = test_render_rows(vec![
-            vec![test_render_cell(0, 0, 'a'), test_render_cell(1, 0, 'b')],
-            vec![test_render_cell(0, 1, 'c'), test_render_cell(1, 1, 'd')],
-            vec![test_render_cell(0, 2, 'e'), test_render_cell(1, 2, 'f')],
+            vec![test_render_cell(0, 'a'), test_render_cell(1, 'b')],
+            vec![test_render_cell(0, 'c'), test_render_cell(1, 'd')],
+            vec![test_render_cell(0, 'e'), test_render_cell(1, 'f')],
         ]);
         let original = cells.clone();
 
         let rows: &mut Vec<_> = Arc::make_mut(&mut cells);
         let patched = patch_pane_render_row(rows, 3, 2, 1, 0, 1, |col| {
-            test_render_cell(col, 1, if col == 0 { 'w' } else { 'x' })
+            test_render_cell(col, if col == 0 { 'w' } else { 'x' })
         });
 
         assert_eq!(patched, 2);
@@ -4285,23 +4547,155 @@ mod tests {
     #[test]
     fn patch_pane_render_row_rejects_out_of_bounds_updates() {
         let mut cells = test_render_rows(vec![vec![
-            test_render_cell(0, 0, 'a'),
-            test_render_cell(1, 0, 'b'),
+            test_render_cell(0, 'a'),
+            test_render_cell(1, 'b'),
         ]]);
         let original = cells.clone();
         let rows: &mut Vec<_> = Arc::make_mut(&mut cells);
 
         assert_eq!(
-            patch_pane_render_row(rows, 1, 2, 7, 0, 0, |col| test_render_cell(col, 7, 'x'),),
+            patch_pane_render_row(rows, 1, 2, 7, 0, 0, |col| test_render_cell(col, 'x'),),
             0
         );
         assert_eq!(
-            patch_pane_render_row(rows, 1, 2, 0, 7, 7, |col| test_render_cell(col, 0, 'x'),),
+            patch_pane_render_row(rows, 1, 2, 0, 7, 7, |col| test_render_cell(col, 'x'),),
             0
         );
         assert!(Arc::ptr_eq(&original[0], &cells[0]));
         assert_eq!(cells[0][0].char, 'a');
         assert_eq!(cells[0][1].char, 'b');
+    }
+
+    #[test]
+    fn replay_viewport_scrolls_preserves_order_and_row_identity() {
+        let mut cells = test_render_rows(vec![
+            vec![test_render_cell(0, 'a')],
+            vec![test_render_cell(0, 'b')],
+            vec![test_render_cell(0, 'c')],
+            vec![test_render_cell(0, 'd')],
+        ]);
+        let original = cells.clone();
+        let scrolls = [
+            TerminalViewportScroll {
+                top: 0,
+                bottom: 3,
+                count: 1,
+                direction: TerminalViewportScrollDirection::Up,
+            },
+            TerminalViewportScroll {
+                top: 1,
+                bottom: 3,
+                count: 1,
+                direction: TerminalViewportScrollDirection::Down,
+            },
+        ];
+
+        let rows: &mut Vec<_> = Arc::make_mut(&mut cells);
+        assert!(replay_viewport_scrolls(rows.as_mut_slice(), &scrolls));
+        assert_eq!(
+            cells.iter().map(|row| row[0].char).collect::<String>(),
+            "bacd"
+        );
+        assert!(Arc::ptr_eq(&cells[0], &original[1]));
+        assert!(Arc::ptr_eq(&cells[1], &original[0]));
+        assert!(Arc::ptr_eq(&cells[2], &original[2]));
+        assert!(Arc::ptr_eq(&cells[3], &original[3]));
+    }
+
+    #[test]
+    fn replay_viewport_scrolls_rejects_invalid_regions_without_moving_rows() {
+        let mut rows = vec!["a", "b", "c"];
+        let before = rows.clone();
+        assert!(!replay_viewport_scrolls(
+            &mut rows,
+            &[TerminalViewportScroll {
+                top: 1,
+                bottom: 3,
+                count: 1,
+                direction: TerminalViewportScrollDirection::Up,
+            }],
+        ));
+        assert_eq!(rows, before);
+    }
+
+    #[test]
+    fn scroll_paint_damage_rebuilds_moved_and_dirty_rows() {
+        let damage = paint_damage_from_scrolls_and_spans(
+            &[TerminalViewportScroll {
+                top: 1,
+                bottom: 3,
+                count: 1,
+                direction: TerminalViewportScrollDirection::Up,
+            }],
+            &[TerminalDirtySpan {
+                row: 5,
+                left_col: 2,
+                right_col: 4,
+            }],
+            6,
+        );
+        assert_eq!(
+            damage,
+            TerminalGridPaintDamage::Rows(Arc::from([1, 2, 3, 5]))
+        );
+    }
+
+    #[test]
+    fn tmon_incremental_scroll_damage_matches_fresh_snapshots() {
+        let terminal = tmon::Terminal::new_display(
+            tmon::Size {
+                cols: 8,
+                rows: 4,
+                ..tmon::Size::default()
+            },
+            tmon::Config::default(),
+        );
+        let _ = terminal.take_render_damage_snapshot();
+        terminal.feed_output(b"row0\r\nrow1\r\nrow2\r\nrow3");
+        let _ = terminal.take_render_damage_snapshot();
+
+        let snapshot_rows = |terminal: &tmon::Terminal| {
+            terminal
+                .snapshot()
+                .cells
+                .chunks(8)
+                .map(<[tmon::Cell]>::to_vec)
+                .collect::<Vec<_>>()
+        };
+        let mut incremental = snapshot_rows(&terminal);
+        let mut replayed_scrolls = 0usize;
+        for output in [
+            b"\r\nA".as_slice(),
+            b"\x1b[2;1Hxx",
+            b"\x1b[4;1H\r\nB",
+            b"\x1b[2;3r\x1b[3;1H\nC\x1b[r",
+            b"\x1b[2;4r\x1b[2;1H\x1bMZ\x1b[r",
+            b"\x1b[2S\x1b[1T",
+        ] {
+            terminal.feed_output(output);
+            let update = tmon_adapter::render_damage(terminal.take_render_damage_snapshot());
+            match update.damage {
+                TerminalDamageSnapshot::Full => incremental = snapshot_rows(&terminal),
+                TerminalDamageSnapshot::Partial(spans) => {
+                    replayed_scrolls = replayed_scrolls.saturating_add(update.scrolls.len());
+                    assert!(replay_viewport_scrolls(&mut incremental, &update.scrolls));
+                    let generation = update.generation.expect("Tmon render generation");
+                    assert!(
+                        terminal
+                            .for_each_viewport_range_at_generation(
+                                generation,
+                                spans
+                                    .iter()
+                                    .map(|span| { (span.row, span.left_col, span.right_col) }),
+                                |row, _, _, col, cell, _| incremental[row][col] = *cell,
+                            )
+                            .is_some()
+                    );
+                }
+            }
+            assert_eq!(incremental, snapshot_rows(&terminal), "output {output:?}");
+        }
+        assert!(replayed_scrolls >= 4, "replayed {replayed_scrolls} scrolls");
     }
 
     #[test]
@@ -4792,7 +5186,7 @@ mod tests {
         };
         let current_key = TerminalPaneRenderCacheKey {
             tmon_palette_revision: Some(5),
-            ..cached_key.clone()
+            ..cached_key
         };
 
         let strategy = pane_cache_update_strategy(
