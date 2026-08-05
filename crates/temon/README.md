@@ -154,6 +154,30 @@ curly underlines use GPUI's native straight/wavy decoration, while double,
 dotted, and dashed styles use bounded batched paths. Native Alacritty and tmux
 cells retain their previous single-underline rendering behavior.
 
+## Compact scrollback
+
+Primary and alternate screens remain dense so parsing and rendering keep direct
+cell access. A row is compacted only when it enters primary-screen scrollback:
+its logical width is stored separately, an exact-default suffix is omitted,
+ordinary default-style cells pack their Unicode scalar and state into 32 bits,
+and cells carrying rare metadata use a lossless metadata form. Rows with colors
+or text attributes fall back to trimmed dense cells, preserving every public
+`Cell` field without making the common path pay for it.
+
+History reads use a logical row view that supplies default cells for the omitted
+suffix and can visit cells without allocating. Resize and reflow materialize
+dense storage only while rebuilding rows; cross-row wide-spacer repair updates
+the compact encoding in place. Evicted row storage is reused when its encoding
+matches, pooled combining metadata is released with its owning row, and
+clearing or shrinking history releases unused compact storage. Live row extents
+avoid rescanning known-default tails when scrolling without changing the dense
+live-grid representation.
+
+The ten-sample macOS ARM64 results and tradeoffs are recorded in
+[PERFORMANCE.md](PERFORMANCE.md). The compact uncompressed representation meets
+the current memory target, so no cold-page compression or new dependency is
+included.
+
 ## Benchmarking
 
 Run the headless Tmon versus Alacritty parser/grid comparison and write

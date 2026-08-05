@@ -173,7 +173,7 @@ impl Grid {
                 let screen = self.active();
                 (screen.cursor_row, screen.cursor_col)
             };
-            self.active_mut().row_mut(row)[col].set_wrapped(true);
+            self.active_mut().row_mut_through(row, col + 1)[col].set_wrapped(true);
             self.damage.mark(row, col, col);
             self.carriage_return();
             self.line_feed();
@@ -185,7 +185,7 @@ impl Grid {
             (screen.cursor_row, screen.cursor_col)
         };
         if self.active().row(row)[col].character == ' ' {
-            self.active_mut().row_mut(row)[col].character = '\t';
+            self.active_mut().row_mut_through(row, col + 1)[col].character = '\t';
             self.damage.mark(row, col, col);
         }
         self.move_forward_tabs(1);
@@ -308,7 +308,8 @@ impl Grid {
         );
 
         let pen = self.pen();
-        for (cell, byte) in self.active_mut().row_mut(row)[col..col + run_len]
+        for (cell, byte) in self.active_mut().row_mut_through(row, col + run_len)
+            [col..col + run_len]
             .iter_mut()
             .zip(&bytes[..run_len])
         {
@@ -359,7 +360,7 @@ impl Grid {
                 spacer.set_leading_wide_spacer(true);
                 self.write_cell_at(row, col, spacer);
             }
-            self.active_mut().row_mut(row)[col].set_wrapped(true);
+            self.active_mut().row_mut_through(row, col + 1)[col].set_wrapped(true);
             self.damage.mark(row, col, col);
             self.carriage_return();
             self.line_feed();
@@ -466,7 +467,7 @@ impl Grid {
                 hyperlink_id,
             })
         };
-        let cell = &mut self.active_mut().row_mut(row)[col];
+        let cell = &mut self.active_mut().row_mut_through(row, col + 1)[col];
         cell.metadata_id = Some(metadata_id);
         cell.set_has_combining(true);
         self.damage.mark(row, col, col);
@@ -557,16 +558,16 @@ impl Grid {
         }
 
         let cleared_neighbor = if old_width > 1 && col + 1 < self.cols() {
-            self.active_mut().row_mut(row)[col + 1].set_wide_spacer(false);
+            self.active_mut().row_mut_through(row, col + 2)[col + 1].set_wide_spacer(false);
             Some(col + 1)
         } else if old.wide_spacer() && col > 0 {
             self.clear_cell_combining(row, col - 1);
-            self.active_mut().row_mut(row)[col - 1].character = ' ';
+            self.active_mut().row_mut_through(row, col)[col - 1].character = ' ';
             Some(col - 1)
         } else {
             None
         };
-        self.active_mut().row_mut(row)[col] = cell;
+        self.active_mut().row_mut_through(row, col + 1)[col] = cell;
         if let Some(neighbor) = cleared_neighbor {
             self.damage.mark(row, neighbor, neighbor);
         }
@@ -578,7 +579,7 @@ impl Grid {
             return;
         }
         let hyperlink_id = self.cell_hyperlink_id(&cell);
-        let cell = &mut self.active_mut().row_mut(row)[col];
+        let cell = &mut self.active_mut().row_mut_through(row, col + 1)[col];
         cell.metadata_id = hyperlink_id.map(inline_hyperlink_metadata_id);
         cell.set_has_combining(false);
     }
@@ -586,14 +587,12 @@ impl Grid {
     pub(super) fn clear_leading_wide_spacer_before(&mut self, row: usize) {
         let col = self.cols().saturating_sub(1);
         let changed = if row > 0 {
-            let previous = self.active_mut().row_mut(row - 1);
+            let previous = self.active_mut().row_mut_through(row - 1, col + 1);
             previous[col].take_leading_wide_spacer()
         } else if !self.alternate_active {
-            self.history.back_mut().is_some_and(|previous| {
-                previous
-                    .get_mut(col)
-                    .is_some_and(Cell::take_leading_wide_spacer)
-            })
+            self.history
+                .back_mut()
+                .is_some_and(|previous| previous.take_leading_wide_spacer(col))
         } else {
             false
         };
@@ -810,8 +809,10 @@ impl Grid {
                         self.shift_rows_up(0, rows - 1, positions, true);
                     }
                     let reset_rows = rows.saturating_sub(positions);
-                    for row in self.primary.cells.iter_mut().take(reset_rows) {
-                        row.fill(blank);
+                    for target in 0..reset_rows {
+                        self.primary.cells[target].fill(blank);
+                        self.primary.row_extents[target] =
+                            if blank == DEFAULT_CELL { 0 } else { cols };
                     }
                     self.primary.wrap_pending = wrap_pending;
                 }
@@ -984,21 +985,33 @@ impl Grid {
         let alternate = self.alternate_active;
         let history_before = self.history.len();
         let blank = self.pen().blank();
-        self.active_mut().cells[top..=bottom].rotate_left(count);
+        {
+            let screen = self.active_mut();
+            screen.cells[top..=bottom].rotate_left(count);
+            screen.row_extents[top..=bottom].rotate_left(count);
+        }
         for target in bottom + 1 - count..=bottom {
-            let removed = std::mem::take(&mut self.active_mut().cells[target]);
-            let mut recycled = if record_history {
-                self.push_history(removed).unwrap_or_default()
-            } else {
-                removed
+            let (removed, extent) = {
+                let screen = self.active_mut();
+                (
+                    std::mem::take(&mut screen.cells[target]),
+                    screen.row_extent(target),
+                )
             };
-            if recycled.is_empty() {
-                recycled.resize(cols, blank);
+            let (mut recycled, clear_len) = if record_history {
+                self.push_history(removed, extent)
             } else {
-                recycled.resize(cols, blank);
+                (removed, extent)
+            };
+            recycled.resize(cols, blank);
+            if blank == DEFAULT_CELL && clear_len < cols {
+                recycled[..clear_len].fill(blank);
+            } else {
                 recycled.fill(blank);
             }
-            self.active_mut().cells[target] = recycled;
+            let screen = self.active_mut();
+            screen.cells[target] = recycled;
+            screen.row_extents[target] = if blank == DEFAULT_CELL { 0 } else { cols };
         }
         let history_after = self.history.len();
         self.effects.push_back(GridEffect::ScrollUp {
@@ -1027,9 +1040,14 @@ impl Grid {
         let alternate = self.alternate_active;
         let history_size = self.history.len();
         let blank = self.pen().blank();
-        self.active_mut().cells[top..=bottom].rotate_right(count);
-        for target in top..top + count {
-            self.active_mut().cells[target].fill(blank);
+        {
+            let screen = self.active_mut();
+            screen.cells[top..=bottom].rotate_right(count);
+            screen.row_extents[top..=bottom].rotate_right(count);
+            for target in top..top + count {
+                screen.cells[target].fill(blank);
+                screen.row_extents[target] = if blank == DEFAULT_CELL { 0 } else { cols };
+            }
         }
         self.effects.push_back(GridEffect::ScrollDown {
             alternate,
@@ -1045,21 +1063,69 @@ impl Grid {
         }
     }
 
-    pub(super) fn push_history(&mut self, mut row: Vec<Cell>) -> Option<Vec<Cell>> {
+    pub(super) fn push_history(&mut self, mut row: Vec<Cell>, extent: usize) -> (Vec<Cell>, usize) {
+        let extent = extent.min(self.primary.cols);
         if self.history_limit == 0 {
-            return Some(row);
+            return (row, extent);
         }
-        row.resize(self.primary.cols, Cell::default());
+        row.resize(self.primary.cols, DEFAULT_CELL);
         row.truncate(self.primary.cols);
-        self.history.push_back(row);
+        let stored_len = HistoryRow::stored_len_for(&row, extent);
+        debug_assert_eq!(
+            stored_len,
+            HistoryRow::stored_len_for(&row, self.primary.cols),
+            "live row extent must include every non-default cell"
+        );
+
+        let mut compact_storage = None;
+        while self.history.len() >= self.history_limit {
+            compact_storage = Some(
+                self.pop_history_front()
+                    .expect("a full history contains a row to evict")
+                    .into_storage(),
+            );
+        }
+        self.history.push_back(HistoryRow::copy_from_dense(
+            &row,
+            self.primary.cols,
+            stored_len,
+            compact_storage,
+        ));
         if self.display_offset > 0 {
             self.display_offset = self.display_offset.saturating_add(1);
         }
-        let mut recycled = None;
-        while self.history.len() > self.history_limit {
-            recycled = self.history.pop_front();
-        }
         self.display_offset = self.display_offset.min(self.history.len());
-        recycled
+        (row, stored_len)
+    }
+
+    pub(super) fn pop_history_front(&mut self) -> Option<HistoryRow> {
+        let row = self.history.pop_front()?;
+        self.remove_history_row_extras(&row);
+        Some(row)
+    }
+
+    pub(super) fn remove_history_row_extras(&mut self, row: &HistoryRow) {
+        if !row.has_pooled_extras() {
+            return;
+        }
+        for id in row
+            .iter()
+            .filter_map(|cell| cell.metadata_id.filter(|id| is_pooled_extra_id(*id)))
+        {
+            self.extras.remove(&id);
+        }
+    }
+
+    pub(super) fn release_unused_metadata(&mut self) {
+        self.prune_extras();
+        self.prune_hyperlinks();
+        self.extras.shrink_to_fit();
+        self.hyperlinks.shrink_to_fit();
+        self.hyperlink_identities.shrink_to_fit();
+        self.next_hyperlink_prune_len = self
+            .hyperlinks
+            .len()
+            .saturating_add(HYPERLINK_PRUNE_INTERVAL)
+            .max(HYPERLINK_PRUNE_MIN_LEN);
     }
 }

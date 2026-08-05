@@ -13,6 +13,182 @@ fn cells_remain_compact_with_sparse_combining_storage() {
 }
 
 #[test]
+fn compact_history_rows_round_trip_dense_cells() {
+    let mut short = vec![Cell::default(); 12];
+    for (cell, character) in short.iter_mut().zip("short".chars()) {
+        cell.character = character;
+    }
+    let full = vec![
+        Cell {
+            character: 'x',
+            ..Cell::default()
+        };
+        17
+    ];
+    let mut maximum = vec![Cell::default(); usize::from(MAX_GRID_DIMENSION)];
+    maximum[0].character = 'a';
+    let last = maximum.len() - 1;
+    maximum[last].character = 'z';
+
+    for dense in [
+        vec![Cell::default(); 8],
+        short,
+        full,
+        vec![Cell {
+            character: '1',
+            ..Cell::default()
+        }],
+        maximum,
+    ] {
+        let history = HistoryRow::from_dense(dense.clone());
+        assert_eq!(history.len(), dense.len());
+        assert_eq!(history.iter().collect::<Vec<_>>(), dense);
+        assert_eq!(history.into_dense(), dense);
+    }
+}
+
+#[test]
+fn compact_history_rows_preserve_every_cell_field_and_state() {
+    let underline_styles = [
+        UnderlineStyle::Single,
+        UnderlineStyle::Double,
+        UnderlineStyle::Curly,
+        UnderlineStyle::Dotted,
+        UnderlineStyle::Dashed,
+    ];
+    let mut dense = vec![Cell::default(); underline_styles.len() + 3];
+    for (index, style) in underline_styles.into_iter().enumerate() {
+        dense[index] = Cell {
+            character: char::from(b'a' + index as u8),
+            foreground: if index % 2 == 0 {
+                Color::Indexed(17 + index as u8)
+            } else {
+                Color::Rgb {
+                    r: index as u8,
+                    g: 100 + index as u8,
+                    b: 200 + index as u8,
+                }
+            },
+            background: if index % 2 == 0 {
+                Color::Rgb {
+                    r: 200 + index as u8,
+                    g: 100 + index as u8,
+                    b: index as u8,
+                }
+            } else {
+                Color::Indexed(37 + index as u8)
+            },
+            attributes: Attributes::default()
+                .with_bold(true)
+                .with_dim(true)
+                .with_italic(true)
+                .with_underline_style(style)
+                .with_inverse(true)
+                .with_hidden(true)
+                .with_strikethrough(true),
+            underline_color: Some(if index % 2 == 0 {
+                Color::Indexed(57 + index as u8)
+            } else {
+                Color::Rgb {
+                    r: 10 + index as u8,
+                    g: 20 + index as u8,
+                    b: 30 + index as u8,
+                }
+            }),
+            state: CellState(
+                CellState::PROTECTED
+                    | CellState::WIDE_SPACER
+                    | CellState::LEADING_WIDE_SPACER
+                    | CellState::WRAPPED
+                    | CellState::HAS_HYPERLINK
+                    | CellState::HAS_COMBINING,
+            ),
+            metadata_id: NonZeroU32::new(POOLED_EXTRA_TAG | (index as u32 + 1)),
+        };
+    }
+    dense[underline_styles.len()] = Cell {
+        underline_color: Some(Color::Default),
+        ..Cell::default()
+    };
+    dense[underline_styles.len() + 1].set_protected(true);
+
+    let history = HistoryRow::from_dense(dense.clone());
+    assert_eq!(history.stored_len(), dense.len() - 1);
+    assert_eq!(history.into_dense(), dense);
+}
+
+#[test]
+fn compact_history_rows_trim_only_exact_default_tails() {
+    let styled_blank = Cell {
+        background: Color::Indexed(4),
+        ..Cell::default()
+    };
+    let mut protected_blank = Cell::default();
+    protected_blank.set_protected(true);
+    let mut linked_blank = Cell::default();
+    linked_blank.set_has_hyperlink(true);
+    linked_blank.metadata_id = NonZeroU32::new(INLINE_HYPERLINK_TAG | 1);
+    let mut combining_blank = Cell::default();
+    combining_blank.set_has_combining(true);
+    combining_blank.metadata_id = NonZeroU32::new('́' as u32 + 1);
+
+    for meaningful in [styled_blank, protected_blank, linked_blank, combining_blank] {
+        let dense = vec![Cell::default(), meaningful, Cell::default()];
+        let history = HistoryRow::from_dense(dense.clone());
+        assert_eq!(history.stored_len(), 2);
+        assert_eq!(history.into_dense(), dense);
+    }
+
+    let empty = HistoryRow::from_dense(vec![Cell::default(); 120]);
+    assert_eq!(empty.stored_len(), 0);
+    assert_eq!(empty.retained_bytes(), 0);
+}
+
+#[test]
+fn compact_history_preserves_wide_pairs_at_each_row_position() {
+    for lead in [0, 3, 6] {
+        let mut dense = vec![Cell::default(); 8];
+        dense[lead].character = '界';
+        dense[lead + 1].set_wide_spacer(true);
+
+        let decoded = HistoryRow::from_dense(dense.clone()).into_dense();
+        assert_eq!(decoded, dense, "wide lead at column {lead}");
+        assert_eq!(decoded[lead].character, '界');
+        assert!(decoded[lead + 1].wide_spacer());
+    }
+}
+
+#[test]
+fn mostly_plain_10k_history_does_not_retain_dense_cell_capacity() {
+    const COLS: usize = 120;
+    const HISTORY_ROWS: usize = 10_000;
+    const TEXT_CELLS: usize = 64;
+
+    let mut grid = Grid::new(COLS as u16, 40, HISTORY_ROWS, CursorStyle::Block);
+    let mut dense = vec![Cell::default(); COLS];
+    for row in 0..HISTORY_ROWS {
+        dense.fill(DEFAULT_CELL);
+        for (col, cell) in dense.iter_mut().take(TEXT_CELLS).enumerate() {
+            cell.character = char::from(b'a' + ((row + col) % 26) as u8);
+        }
+        dense = grid.push_history(dense, COLS).0;
+    }
+
+    let stats = grid.history_storage_stats();
+    let old_dense_payload = COLS * HISTORY_ROWS * std::mem::size_of::<Cell>();
+    assert_eq!(stats.rows, HISTORY_ROWS);
+    assert_eq!(stats.logical_cells, COLS * HISTORY_ROWS);
+    assert_eq!(stats.plain_capacity, TEXT_CELLS * HISTORY_ROWS);
+    assert_eq!(stats.metadata_capacity, 0);
+    assert_eq!(stats.dense_capacity, 0);
+    assert!(
+        stats.retained_bytes * 100 <= old_dense_payload * 60,
+        "compact rows retained {} bytes versus {old_dense_payload} dense payload bytes",
+        stats.retained_bytes
+    );
+}
+
+#[test]
 fn palette_revision_advances_only_for_visible_mutations() {
     let mut grid = grid(4, 2);
     let color = Rgb {
@@ -294,7 +470,7 @@ fn wrapping_moves_full_rows_into_bounded_history() {
     }
     assert_eq!(grid.history_size(), 3);
     assert_eq!(grid.cursor_position(), (1, 1));
-    assert_eq!(grid.line(-3).unwrap()[0].character, 'd');
+    assert_eq!(grid.line(-3).unwrap().get(0).unwrap().character, 'd');
 }
 
 #[test]
@@ -608,8 +784,10 @@ fn width_resize_keeps_wide_character_and_spacer_together() {
     grid.resize(4, 3);
 
     assert_eq!(
-        grid.line(0).unwrap()[..3]
+        grid.line(0)
+            .unwrap()
             .iter()
+            .take(3)
             .map(|cell| cell.character)
             .collect::<String>(),
         "abc"
@@ -640,8 +818,8 @@ fn scrolled_resize_to_one_column_keeps_wide_cells_and_terminates() {
     let one_column = grid
         .history
         .iter()
-        .chain(&grid.primary.cells)
-        .flatten()
+        .flat_map(HistoryRow::iter)
+        .chain(grid.primary.cells.iter().flatten().copied())
         .collect::<Vec<_>>();
     let wide = one_column
         .iter()
@@ -658,8 +836,8 @@ fn scrolled_resize_to_one_column_keeps_wide_cells_and_terminates() {
     let widened = grid
         .history
         .iter()
-        .chain(&grid.primary.cells)
-        .flatten()
+        .flat_map(HistoryRow::iter)
+        .chain(grid.primary.cells.iter().flatten().copied())
         .collect::<Vec<_>>();
     let wide = widened
         .iter()
@@ -697,6 +875,23 @@ fn wide_character_at_the_margin_styles_the_wrapped_placeholder() {
 }
 
 #[test]
+fn wide_spacer_repair_mutates_the_newest_compact_history_row() {
+    let mut grid = Grid::new(4, 2, 8, CursorStyle::Block);
+    grid.set_cursor_position(0, 3);
+    grid.put_char('界');
+    assert!(grid.line(0).unwrap()[3].leading_wide_spacer());
+    assert_eq!(grid.line(1).unwrap()[0].character, '界');
+
+    grid.set_cursor_position(1, 0);
+    grid.line_feed();
+    assert!(grid.line(-1).unwrap().get(3).unwrap().leading_wide_spacer());
+
+    grid.set_cursor_position(0, 0);
+    grid.put_char('x');
+    assert!(!grid.line(-1).unwrap().get(3).unwrap().leading_wide_spacer());
+}
+
+#[test]
 fn insert_mode_rotates_and_clears_a_displaced_wide_spacer_like_alacritty() {
     let mut grid = Grid::new(12, 2, 0, CursorStyle::Block);
     grid.set_cursor_col(9);
@@ -723,8 +918,11 @@ fn deleting_past_the_margin_clears_the_requested_tail_width() {
     grid.delete_chars(3);
 
     assert_eq!(
-        grid.line(0).unwrap()[8..12]
+        grid.line(0)
+            .unwrap()
             .iter()
+            .skip(8)
+            .take(4)
             .map(|cell| cell.character)
             .collect::<String>(),
         "a   "
@@ -783,8 +981,8 @@ fn clearing_the_primary_viewport_moves_visible_rows_into_history() {
     grid.erase_display(2, false);
 
     assert_eq!(grid.history_size(), 3);
-    assert_eq!(grid.line(-3).unwrap()[0].character, 'a');
-    assert_eq!(grid.line(-1).unwrap()[0].character, 'b');
+    assert_eq!(grid.line(-3).unwrap().get(0).unwrap().character, 'a');
+    assert_eq!(grid.line(-1).unwrap().get(0).unwrap().character, 'b');
     assert!(
         grid.line(0)
             .unwrap()
@@ -827,7 +1025,7 @@ fn clearing_history_on_the_alternate_screen_keeps_primary_scrollback() {
     grid.set_mode(true, 1049, false);
 
     assert_eq!(grid.history_size(), 1);
-    assert_eq!(grid.line(-1).unwrap()[0].character, 'a');
+    assert_eq!(grid.line(-1).unwrap().get(0).unwrap().character, 'a');
 }
 
 #[test]
@@ -884,7 +1082,7 @@ fn row_shrink_scrolls_only_enough_to_keep_the_cursor_visible() {
     grid.resize(4, 2);
 
     assert_eq!(grid.history_size(), 1);
-    assert_eq!(grid.line(-1).unwrap()[0].character, 'a');
+    assert_eq!(grid.line(-1).unwrap().get(0).unwrap().character, 'a');
     assert_eq!(grid.line(0).unwrap()[0].character, 'b');
     assert_eq!(grid.line(1).unwrap()[0].character, 'c');
     assert_eq!(grid.cursor_position(), (1, 1));
@@ -918,7 +1116,7 @@ fn deleting_lines_from_the_top_records_primary_scrollback() {
     grid.delete_lines(1);
 
     assert_eq!(grid.history_size(), 1);
-    assert_eq!(grid.line(-1).unwrap()[0].character, 'a');
+    assert_eq!(grid.line(-1).unwrap().get(0).unwrap().character, 'a');
     assert_eq!(grid.line(0).unwrap()[0].character, 'b');
 }
 
@@ -926,36 +1124,36 @@ fn deleting_lines_from_the_top_records_primary_scrollback() {
 fn multi_row_shifts_preserve_order_through_history_rollover() {
     let mut grid = Grid::new(2, 4, 3, CursorStyle::Block);
     for (row, character) in ['a', 'b', 'c', 'd'].into_iter().enumerate() {
-        grid.primary.cells[row][0].character = character;
+        grid.primary.row_mut_through(row, 1)[0].character = character;
     }
 
     grid.scroll_up(2);
     assert_eq!(grid.history_size(), 2);
-    assert_eq!(grid.line(-2).unwrap()[0].character, 'a');
-    assert_eq!(grid.line(-1).unwrap()[0].character, 'b');
+    assert_eq!(grid.line(-2).unwrap().get(0).unwrap().character, 'a');
+    assert_eq!(grid.line(-1).unwrap().get(0).unwrap().character, 'b');
     assert_eq!(grid.line(0).unwrap()[0].character, 'c');
     assert_eq!(grid.line(1).unwrap()[0].character, 'd');
 
-    grid.primary.cells[2][0].character = 'e';
-    grid.primary.cells[3][0].character = 'f';
+    grid.primary.row_mut_through(2, 1)[0].character = 'e';
+    grid.primary.row_mut_through(3, 1)[0].character = 'f';
     grid.scroll_up(2);
     assert_eq!(grid.history_size(), 3);
-    assert_eq!(grid.line(-3).unwrap()[0].character, 'b');
-    assert_eq!(grid.line(-2).unwrap()[0].character, 'c');
-    assert_eq!(grid.line(-1).unwrap()[0].character, 'd');
+    assert_eq!(grid.line(-3).unwrap().get(0).unwrap().character, 'b');
+    assert_eq!(grid.line(-2).unwrap().get(0).unwrap().character, 'c');
+    assert_eq!(grid.line(-1).unwrap().get(0).unwrap().character, 'd');
     assert_eq!(grid.line(0).unwrap()[0].character, 'e');
     assert_eq!(grid.line(1).unwrap()[0].character, 'f');
     assert!(
         grid.line(2)
             .unwrap()
             .iter()
-            .all(|cell| *cell == Cell::default())
+            .all(|cell| cell == Cell::default())
     );
     assert!(
         grid.line(3)
             .unwrap()
             .iter()
-            .all(|cell| *cell == Cell::default())
+            .all(|cell| cell == Cell::default())
     );
 }
 
@@ -1039,12 +1237,103 @@ fn pooled_metadata_and_hyperlinks_retain_live_history_roots() {
     grid.prune_extras();
     assert_eq!(grid.extras.len(), 1);
     assert!(grid.extras.contains_key(&live_metadata));
-    let history_cell = &grid.history[0][0];
-    assert_eq!(grid.cell_hyperlink_id(history_cell), Some(live_hyperlink));
+    let history_cell = grid.history[0].get(0).expect("history cell");
+    assert_eq!(grid.cell_hyperlink_id(&history_cell), Some(live_hyperlink));
 
     grid.prune_hyperlinks();
     assert!(grid.hyperlinks.contains_key(&live_hyperlink.get()));
     assert!(!grid.hyperlinks.contains_key(&METADATA_VALUE_MASK));
+}
+
+#[test]
+fn compact_history_preserves_long_combining_text_with_and_without_links() {
+    let mut grid = Grid::new(8, 2, 8, CursorStyle::Block);
+    let marks = "\u{301}\u{302}\u{303}\u{304}\u{305}";
+    grid.put_char('e');
+    for mark in marks.chars() {
+        grid.put_char(mark);
+    }
+    grid.set_hyperlink(None, Some("https://example.com/combined"));
+    grid.put_char('a');
+    for mark in marks.chars() {
+        grid.put_char(mark);
+    }
+    let hyperlink = grid.pen().hyperlink_id.expect("link is active");
+    grid.set_hyperlink(None, None);
+
+    grid.scroll_up(1);
+    let history = grid.line(-1).expect("combined cells moved into history");
+    let unlinked = history.get(0).expect("unlinked combined cell");
+    let linked = history.get(1).expect("linked combined cell");
+    assert_eq!(
+        grid.combining_text(&unlinked)
+            .map(Combining::to_owned_string),
+        Some(marks.to_string())
+    );
+    assert_eq!(grid.cell_hyperlink_id(&unlinked), None);
+    assert_eq!(
+        grid.combining_text(&linked).map(Combining::to_owned_string),
+        Some(marks.to_string())
+    );
+    assert_eq!(grid.cell_hyperlink_id(&linked), Some(hyperlink));
+}
+
+#[test]
+fn history_eviction_releases_uniquely_owned_pooled_metadata() {
+    let mut grid = Grid::new(4, 2, 1, CursorStyle::Block);
+    grid.set_hyperlink(None, Some("https://example.com/evicted"));
+    grid.put_char('e');
+    for mark in "\u{301}\u{302}\u{303}\u{304}\u{305}".chars() {
+        grid.put_char(mark);
+    }
+    grid.set_hyperlink(None, None);
+
+    grid.scroll_up(1);
+    assert_eq!(grid.history.len(), 1);
+    assert_eq!(grid.extras.len(), 1);
+
+    grid.scroll_up(1);
+    assert_eq!(grid.history.len(), 1);
+    assert!(grid.extras.is_empty());
+}
+
+#[test]
+fn shrinking_and_clearing_history_release_rows_and_rare_metadata() {
+    let mut grid = Grid::new(8, 2, 8, CursorStyle::Block);
+
+    for action in [
+        Grid::set_history_limit as fn(&mut Grid, usize),
+        |grid, _| {
+            assert!(grid.clear_history());
+        },
+    ] {
+        grid.set_history_limit(8);
+        grid.set_hyperlink(Some("release"), Some("https://example.com/release"));
+        grid.put_char('e');
+        for mark in "\u{301}\u{302}\u{303}\u{304}\u{305}".chars() {
+            grid.put_char(mark);
+        }
+        grid.set_hyperlink(None, None);
+        grid.scroll_up(1);
+        assert!(!grid.history.is_empty());
+        assert!(!grid.extras.is_empty());
+        assert!(!grid.hyperlinks.is_empty());
+
+        action(&mut grid, 0);
+        assert!(grid.history.is_empty());
+        assert_eq!(grid.history.capacity(), 0);
+        assert!(grid.extras.is_empty());
+        assert_eq!(grid.extras.capacity(), 0);
+        assert!(grid.hyperlinks.is_empty());
+        assert_eq!(grid.hyperlinks.capacity(), 0);
+        assert!(grid.hyperlink_identities.is_empty());
+        assert_eq!(grid.hyperlink_identities.capacity(), 0);
+
+        grid.set_cursor_position(0, 0);
+        grid.put_char('x');
+        assert_eq!(grid.line(0).unwrap()[0].character, 'x');
+        grid.erase_display(2, false);
+    }
 }
 
 #[test]

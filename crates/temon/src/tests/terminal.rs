@@ -52,7 +52,7 @@ fn state_snapshot_collects_engine_metadata_from_one_state() {
 }
 
 #[test]
-fn viewport_metadata_matches_the_legacy_visitor_and_cell_count() {
+fn snapshot_and_viewport_metadata_match_the_legacy_visitor() {
     let terminal = Terminal::new_display(
         Size {
             cols: 5,
@@ -95,6 +95,37 @@ fn viewport_metadata_matches_the_legacy_visitor_and_cell_count() {
         visited_cells
             .iter()
             .all(|(offset, _, _, _, _)| *offset == metadata.display_offset)
+    );
+
+    let snapshot = terminal.snapshot();
+    let expected_cells = visited_cells
+        .iter()
+        .map(|(_, _, _, cell, _)| *cell)
+        .collect::<Vec<_>>();
+    assert_eq!(snapshot.cells, expected_cells);
+    assert_eq!(snapshot.cols, metadata.cols);
+    assert_eq!(snapshot.rows, metadata.rows);
+    assert_eq!(snapshot.cursor, metadata.cursor);
+    assert_eq!(snapshot.display_offset, metadata.display_offset);
+    assert_eq!(snapshot.history_size, metadata.history_size);
+
+    terminal.feed_output(b"\x1b[?1049hALT");
+    let alternate_snapshot = terminal.snapshot();
+    let mut alternate_cells = Vec::new();
+    let alternate_metadata = terminal.visit_viewport_cells(|_, _, _, cell, _| {
+        alternate_cells.push(*cell);
+    });
+    assert_eq!(alternate_snapshot.cells, alternate_cells);
+    assert_eq!(alternate_snapshot.cols, alternate_metadata.cols);
+    assert_eq!(alternate_snapshot.rows, alternate_metadata.rows);
+    assert_eq!(alternate_snapshot.cursor, alternate_metadata.cursor);
+    assert_eq!(
+        alternate_snapshot.display_offset,
+        alternate_metadata.display_offset
+    );
+    assert_eq!(
+        alternate_snapshot.history_size,
+        alternate_metadata.history_size
     );
 }
 
@@ -188,6 +219,36 @@ fn line_range_visits_bounds_dimensions_and_cells_from_one_state() {
             .collect::<Vec<_>>(),
         vec![(-2, 'a'), (-1, 'b'), (0, 'c'), (1, 'd')]
     );
+}
+
+#[test]
+fn dense_line_callback_materializes_compact_history_for_legacy_callers() {
+    let terminal = Terminal::new_display(
+        Size {
+            cols: 6,
+            rows: 2,
+            ..Size::default()
+        },
+        Config {
+            scrollback_history: 8,
+            ..Config::default()
+        },
+    );
+    terminal.feed_output("A\u{301}B\r\nC\r\nD".as_bytes());
+    let first = terminal.line_bounds().0;
+    assert!(first < 0);
+
+    let dense = terminal
+        .with_line_cells(first, <[Cell]>::to_vec)
+        .expect("oldest history line exists");
+    let mut visited = Vec::new();
+    assert!(terminal.for_each_line_cell(first, |_, cell, _| visited.push(*cell)));
+
+    assert_eq!(dense.len(), 6);
+    assert_eq!(dense, visited);
+    assert_eq!(dense[0].character, 'A');
+    assert_eq!(dense[1].character, 'B');
+    assert!(dense[2..].iter().all(|cell| *cell == Cell::default()));
 }
 
 #[test]

@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_text_preserves_tmon_combining_characters() {
+    fn selected_text_preserves_tmon_combining_characters_in_history() {
         let size = TerminalSize {
             cols: 4,
             rows: 2,
@@ -1507,13 +1507,13 @@ mod tests {
                 tmon::Config::default(),
             ),
         });
-        terminal.hydrate_output("e\u{301}".as_bytes());
+        terminal.hydrate_output("e\u{301}\r\nmid\r\nnew".as_bytes());
 
         assert_eq!(
             selected_text_from_terminal(
                 &terminal,
-                SelectionPos { col: 0, line: 0 },
-                SelectionPos { col: 0, line: 0 },
+                SelectionPos { col: 0, line: -1 },
+                SelectionPos { col: 0, line: -1 },
             ),
             Some("e\u{301}".to_string())
         );

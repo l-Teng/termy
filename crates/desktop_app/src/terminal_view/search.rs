@@ -783,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_read_adapter_preserves_tmon_combining_characters() {
+    fn terminal_read_adapter_preserves_tmon_combining_characters_in_history() {
         let size = TerminalSize {
             cols: 4,
             rows: 2,
@@ -796,10 +796,10 @@ mod tests {
                 tmon::Config::default(),
             ),
         });
-        terminal.hydrate_output("e\u{301}".as_bytes());
+        terminal.hydrate_output("e\u{301}\r\nmid\r\nnew".as_bytes());
 
-        let lines = collect_search_line_texts(&terminal, 0, 0);
-        assert_eq!(lines.line(0), Some("e\u{301}   "));
+        let lines = collect_search_line_texts(&terminal, -1, -1);
+        assert_eq!(lines.line(-1), Some("e\u{301}   "));
     }
 
     #[test]

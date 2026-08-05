@@ -60,10 +60,11 @@ impl Grid {
             let pulled = added.min(self.history.len());
             let pulled_rows = self.history.split_off(self.history.len() - pulled);
             let mut cells = Vec::with_capacity(rows);
-            cells.extend(pulled_rows);
+            cells.extend(pulled_rows.into_iter().map(HistoryRow::into_dense));
             cells.append(&mut self.primary.cells);
             cells.resize_with(rows, || vec![Cell::default(); cols]);
             self.primary.cells = cells;
+            self.primary.rebuild_row_extents();
             self.primary.rows = rows;
             self.primary.cursor_row = self
                 .primary
@@ -95,11 +96,17 @@ impl Grid {
             .cells
             .drain(..required_scrolling)
             .collect::<Vec<_>>();
-        for row in removed {
-            let _ = self.push_history(row);
+        let removed_extents = self
+            .primary
+            .row_extents
+            .drain(..required_scrolling)
+            .collect::<Vec<_>>();
+        for (row, extent) in removed.into_iter().zip(removed_extents) {
+            let _ = self.push_history(row, extent);
         }
         let history_after = self.history.len();
         self.primary.cells.truncate(rows);
+        self.primary.row_extents.truncate(rows);
         self.primary.rows = rows;
         self.primary.cursor_row = self.primary.cursor_row.min(rows.saturating_sub(1));
         self.primary.saved_cursor_row = self.primary.saved_cursor_row.min(rows.saturating_sub(1));
@@ -138,6 +145,10 @@ impl Grid {
 
         let old_history = std::mem::take(&mut self.history);
         let history_rows = old_history.len();
+        let old_history = old_history
+            .into_iter()
+            .map(HistoryRow::into_dense)
+            .collect::<VecDeque<_>>();
         let old_physical_rows = history_rows.saturating_add(self.primary.rows);
         let all_screen_rows = std::mem::take(&mut self.primary.cells);
         let reflowed_display_offset = if display_offset == 0 {
@@ -314,9 +325,9 @@ impl Grid {
         }
         let mapped_display_offset = reflowed_display_offset;
 
-        self.history = output.drain(..split).collect();
+        self.history = output.drain(..split).map(HistoryRow::from_dense).collect();
         while self.history.len() > self.history_limit {
-            self.history.pop_front();
+            self.pop_history_front();
         }
         self.display_offset = mapped_display_offset.min(self.history.len());
         let screen_row_count = output.len().min(rows);
@@ -331,6 +342,7 @@ impl Grid {
         self.primary.cols = cols;
         self.primary.rows = rows;
         self.primary.cells = cells;
+        self.primary.rebuild_row_extents();
         self.primary.cursor_row = cursor_row.min(screen_row_count.max(1).saturating_sub(1));
         self.primary.cursor_col = mapped_cursor.1;
         self.primary.saved_cursor_row = self.primary.saved_cursor_row.min(rows.saturating_sub(1));
@@ -359,10 +371,12 @@ impl Grid {
         let history_before = self.history.len();
         self.history_limit = limit.min(MAX_SCROLLBACK_LINES);
         while self.history.len() > self.history_limit {
-            self.history.pop_front();
+            self.pop_history_front();
         }
         let dropped = history_before.saturating_sub(self.history.len());
         if dropped > 0 {
+            self.history.shrink_to_fit();
+            self.release_unused_metadata();
             self.effects
                 .push_back(GridEffect::RebaseHistory { dropped });
         }
@@ -419,9 +433,11 @@ impl Grid {
             return false;
         }
         let dropped = self.history.len();
-        self.history.clear();
+        while self.pop_history_front().is_some() {}
         self.display_offset = 0;
         if dropped > 0 {
+            self.history.shrink_to_fit();
+            self.release_unused_metadata();
             self.effects
                 .push_back(GridEffect::RebaseHistory { dropped });
         }
@@ -452,15 +468,23 @@ impl Grid {
     }
 
     pub(crate) fn snapshot(&self) -> Snapshot {
-        let mut cells = Vec::with_capacity(self.cols().saturating_mul(self.rows()));
-        let metadata = self.visit_viewport_cells(|_, _, _, cell, _| cells.push(*cell));
+        let offset = self.display_offset();
+        let rows = self.rows();
+        let cols = self.cols();
+        let mut cells = Vec::with_capacity(cols.saturating_mul(rows));
+        for row in 0..rows {
+            let term_line = row as i32 - offset as i32;
+            if let Some(line) = self.line(term_line) {
+                line.append_to(&mut cells, cols);
+            }
+        }
         Snapshot {
-            cols: metadata.cols,
-            rows: metadata.rows,
+            cols: cols as u16,
+            rows: rows as u16,
             cells,
-            cursor: metadata.cursor,
-            display_offset: metadata.display_offset,
-            history_size: metadata.history_size,
+            cursor: self.cursor_state(),
+            display_offset: offset,
+            history_size: self.history_size(),
         }
     }
 
@@ -474,9 +498,11 @@ impl Grid {
         for row in 0..rows {
             let term_line = row as i32 - offset as i32;
             if let Some(line) = self.line(term_line) {
-                for (col, cell) in line.iter().enumerate().take(cols) {
-                    visitor(offset, term_line, col, cell, self.combining_text(cell));
-                }
+                line.for_each(|col, cell| {
+                    if col < cols {
+                        visitor(offset, term_line, col, cell, self.combining_text(cell));
+                    }
+                });
             }
         }
         ViewportMetadata {
@@ -500,7 +526,7 @@ impl Grid {
         let offset = self.display_offset();
         let term_line = row as i32 - offset as i32;
         let cell = self.line(term_line)?.get(col)?;
-        Some(f(offset, term_line, cell))
+        Some(f(offset, term_line, &cell))
     }
 
     pub(crate) fn hyperlink_at(&self, row: usize, col: usize) -> Option<Hyperlink> {
@@ -509,13 +535,23 @@ impl Grid {
         }
         let line_index = row as i32 - self.display_offset() as i32;
         let line = self.line(line_index)?;
-        let id = self.cell_hyperlink_id(line.get(col)?)?;
+        let id = self.cell_hyperlink_id(&line.get(col)?)?;
         let mut start_col = col;
-        while start_col > 0 && self.cell_hyperlink_id(&line[start_col - 1]) == Some(id) {
+        while start_col > 0
+            && line
+                .get(start_col - 1)
+                .and_then(|cell| self.cell_hyperlink_id(&cell))
+                == Some(id)
+        {
             start_col -= 1;
         }
         let mut end_col = col;
-        while end_col + 1 < line.len() && self.cell_hyperlink_id(&line[end_col + 1]) == Some(id) {
+        while end_col + 1 < line.len()
+            && line
+                .get(end_col + 1)
+                .and_then(|cell| self.cell_hyperlink_id(&cell))
+                == Some(id)
+        {
             end_col += 1;
         }
         Some(Hyperlink {
@@ -541,13 +577,13 @@ impl Grid {
         let bounds = self.line_bounds();
         let hovered_cell = self.cell_at_position(hovered)?;
 
-        if let Some(hyperlink_id) = self.cell_hyperlink_id(hovered_cell) {
+        if let Some(hyperlink_id) = self.cell_hyperlink_id(&hovered_cell) {
             let target = self.hyperlinks.get(&hyperlink_id.get())?.target.clone();
             let mut start = hovered;
             while let Some(previous) = self.previous_wrapped_position(start, bounds.0, columns) {
                 if self
                     .cell_at_position(previous)
-                    .and_then(|cell| self.cell_hyperlink_id(cell))
+                    .and_then(|cell| self.cell_hyperlink_id(&cell))
                     == Some(hyperlink_id)
                 {
                     start = previous;
@@ -560,7 +596,7 @@ impl Grid {
             while let Some(next) = self.next_wrapped_position(end, bounds.1, columns) {
                 if self
                     .cell_at_position(next)
-                    .and_then(|cell| self.cell_hyperlink_id(cell))
+                    .and_then(|cell| self.cell_hyperlink_id(&cell))
                     == Some(hyperlink_id)
                 {
                     end = next;
@@ -625,7 +661,7 @@ impl Grid {
         }))
     }
 
-    pub(super) fn cell_at_position(&self, position: GridPosition) -> Option<&Cell> {
+    pub(super) fn cell_at_position(&self, position: GridPosition) -> Option<Cell> {
         self.line(position.line)?.get(position.col)
     }
 
@@ -710,7 +746,14 @@ impl Grid {
             let right = right.min(cols.saturating_sub(1));
             for col in left..=right {
                 if let Some(cell) = line.get(col) {
-                    visitor(row, offset, term_line, col, cell, self.combining_text(cell));
+                    visitor(
+                        row,
+                        offset,
+                        term_line,
+                        col,
+                        &cell,
+                        self.combining_text(&cell),
+                    );
                 }
             }
         }
@@ -728,20 +771,20 @@ impl Grid {
         }
     }
 
-    pub(crate) fn line(&self, line: i32) -> Option<&[Cell]> {
+    pub(crate) fn line(&self, line: i32) -> Option<RowView<'_>> {
         if self.alternate_active {
             let row = usize::try_from(line).ok()?;
-            return (row < self.alternate.rows).then(|| self.alternate.row(row));
+            return (row < self.alternate.rows).then(|| RowView::Dense(self.alternate.row(row)));
         }
         if line < 0 {
             let index = self.history.len() as i64 + i64::from(line);
             return usize::try_from(index)
                 .ok()
                 .and_then(|index| self.history.get(index))
-                .map(Vec::as_slice);
+                .map(RowView::History);
         }
         let row = usize::try_from(line).ok()?;
-        (row < self.primary.rows).then(|| self.primary.row(row))
+        (row < self.primary.rows).then(|| RowView::Dense(self.primary.row(row)))
     }
 
     pub(crate) fn for_each_line_cell(
@@ -752,9 +795,7 @@ impl Grid {
         let Some(cells) = self.line(line) else {
             return false;
         };
-        for (col, cell) in cells.iter().enumerate() {
-            visitor(col, cell, self.combining_text(cell));
-        }
+        cells.for_each(|col, cell| visitor(col, cell, self.combining_text(cell)));
         true
     }
 
@@ -777,9 +818,7 @@ impl Grid {
             let Some(cells) = self.line(line) else {
                 continue;
             };
-            for (col, cell) in cells.iter().enumerate() {
-                visitor(line, col, cell, self.combining_text(cell));
-            }
+            cells.for_each(|col, cell| visitor(line, col, cell, self.combining_text(cell)));
         }
     }
 

@@ -7,6 +7,7 @@ impl Grid {
         self.alternate.reset();
         self.alternate_active = false;
         self.history.clear();
+        self.history.shrink_to_fit();
         self.display_offset = 0;
         self.cursor_visible = true;
         self.cursor_style = self.default_cursor_style;
@@ -27,10 +28,13 @@ impl Grid {
         self.inactive_kitty_keyboard_stack.clear();
         self.tab_stops = default_tab_stops(self.cols());
         self.hyperlinks.clear();
+        self.hyperlinks.shrink_to_fit();
         self.hyperlink_identities.clear();
+        self.hyperlink_identities.shrink_to_fit();
         self.next_hyperlink_id = 1;
         self.next_hyperlink_prune_len = HYPERLINK_PRUNE_MIN_LEN;
         self.extras.clear();
+        self.extras.shrink_to_fit();
         self.next_extra_id = 1;
         self.effects.clear();
         self.effects.push_back(GridEffect::Reset);
@@ -460,7 +464,7 @@ impl Grid {
         );
         live.extend(self.history.iter().flat_map(|row| {
             row.iter()
-                .filter_map(|cell| cell_hyperlink_id(extras, cell))
+                .filter_map(|cell| cell_hyperlink_id(extras, &cell))
         }));
         for pen in [
             self.primary.pen,

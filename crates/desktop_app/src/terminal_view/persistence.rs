@@ -1347,7 +1347,7 @@ mod tests {
     use crate::workspace_store::{StoredPane, StoredTab, StoredWorkspace};
 
     #[test]
-    fn persisted_tmon_buffer_preserves_combining_characters() {
+    fn persisted_tmon_buffer_preserves_combining_characters_in_history() {
         let size = TerminalSize {
             cols: 4,
             rows: 2,
@@ -1360,10 +1360,10 @@ mod tests {
                 tmon::Config::default(),
             ),
         });
-        terminal.hydrate_output("e\u{301}".as_bytes());
+        terminal.hydrate_output("e\u{301}\r\nmid\r\nnew".as_bytes());
 
         assert_eq!(
-            TerminalView::extract_persisted_buffer_line(&terminal, 0),
+            TerminalView::extract_persisted_buffer_line(&terminal, -1),
             Some("e\u{301}".to_string())
         );
     }

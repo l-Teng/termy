@@ -1217,7 +1217,7 @@ impl Terminal {
             .engine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        engine.grid.line(line).map(f)
+        engine.grid.line(line).map(|line| line.with_dense(f))
     }
 
     pub fn for_each_line_cell(

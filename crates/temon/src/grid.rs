@@ -386,17 +386,19 @@ pub struct Cell {
     metadata_id: Option<NonZeroU32>,
 }
 
+static DEFAULT_CELL: Cell = Cell {
+    character: ' ',
+    foreground: Color::Default,
+    background: Color::Default,
+    attributes: Attributes(0),
+    underline_color: None,
+    state: CellState(0),
+    metadata_id: None,
+};
+
 impl Default for Cell {
     fn default() -> Self {
-        Self {
-            character: ' ',
-            foreground: Color::Default,
-            background: Color::Default,
-            attributes: Attributes::default(),
-            underline_color: None,
-            state: CellState::default(),
-            metadata_id: None,
-        }
+        DEFAULT_CELL
     }
 }
 
@@ -455,6 +457,463 @@ impl Cell {
         leading_wide_spacer
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlainHistoryCell(u32);
+
+impl PlainHistoryCell {
+    const CHARACTER_MASK: u32 = (1 << 21) - 1;
+    const STATE_SHIFT: u32 = 21;
+
+    fn from_cell(cell: Cell) -> Self {
+        Self(cell.character as u32 | (u32::from(cell.state.0) << Self::STATE_SHIFT))
+    }
+
+    fn into_cell(self) -> Cell {
+        Cell {
+            character: char::from_u32(self.0 & Self::CHARACTER_MASK)
+                .expect("packed history stores a valid Unicode scalar"),
+            state: CellState((self.0 >> Self::STATE_SHIFT) as u8),
+            ..DEFAULT_CELL
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MetadataHistoryCell {
+    character: char,
+    metadata_id: Option<NonZeroU32>,
+    state: CellState,
+}
+
+impl MetadataHistoryCell {
+    fn from_cell(cell: Cell) -> Self {
+        Self {
+            character: cell.character,
+            metadata_id: cell.metadata_id,
+            state: cell.state,
+        }
+    }
+
+    fn into_cell(self) -> Cell {
+        Cell {
+            character: self.character,
+            state: self.state,
+            metadata_id: self.metadata_id,
+            ..DEFAULT_CELL
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HistoryCells {
+    Plain(Vec<PlainHistoryCell>),
+    Metadata(Vec<MetadataHistoryCell>),
+    Dense(Vec<Cell>),
+}
+
+impl HistoryCells {
+    fn len(&self) -> usize {
+        match self {
+            Self::Plain(cells) => cells.len(),
+            Self::Metadata(cells) => cells.len(),
+            Self::Dense(cells) => cells.len(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HistoryEncoding {
+    Plain,
+    Metadata,
+    Dense,
+}
+
+/// A logical scrollback row with default style and exact-default suffixes omitted.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct HistoryRow {
+    cells: HistoryCells,
+    width: u16,
+    has_pooled_extras: bool,
+}
+
+impl HistoryRow {
+    fn from_dense(mut dense: Vec<Cell>) -> Self {
+        let width = u16::try_from(dense.len()).expect("history rows fit the bounded grid width");
+        let stored_len = Self::stored_len_for(&dense, dense.len());
+        let (encoding, has_pooled_extras) = Self::encoding(&dense[..stored_len]);
+        let cells = match encoding {
+            HistoryEncoding::Plain => {
+                let mut cells = Vec::with_capacity(stored_len);
+                cells.extend(
+                    dense[..stored_len]
+                        .iter()
+                        .copied()
+                        .map(PlainHistoryCell::from_cell),
+                );
+                HistoryCells::Plain(cells)
+            }
+            HistoryEncoding::Metadata => {
+                let mut cells = Vec::with_capacity(stored_len);
+                cells.extend(
+                    dense[..stored_len]
+                        .iter()
+                        .copied()
+                        .map(MetadataHistoryCell::from_cell),
+                );
+                HistoryCells::Metadata(cells)
+            }
+            HistoryEncoding::Dense => {
+                dense.truncate(stored_len);
+                dense.shrink_to_fit();
+                HistoryCells::Dense(dense)
+            }
+        };
+        Self {
+            cells,
+            width,
+            has_pooled_extras,
+        }
+    }
+
+    fn copy_from_dense(
+        dense: &[Cell],
+        width: usize,
+        stored_len: usize,
+        storage: Option<HistoryCells>,
+    ) -> Self {
+        let width = u16::try_from(width).expect("history rows fit the bounded grid width");
+        debug_assert_eq!(stored_len, Self::stored_len_for(dense, usize::from(width)));
+        let (encoding, has_pooled_extras) = Self::encoding(&dense[..stored_len]);
+        let cells = match encoding {
+            HistoryEncoding::Plain => {
+                let storage = match storage {
+                    Some(HistoryCells::Plain(cells)) => Some(cells),
+                    _ => None,
+                };
+                let mut cells = exact_storage(storage, stored_len);
+                cells.extend(
+                    dense[..stored_len]
+                        .iter()
+                        .copied()
+                        .map(PlainHistoryCell::from_cell),
+                );
+                HistoryCells::Plain(cells)
+            }
+            HistoryEncoding::Metadata => {
+                let storage = match storage {
+                    Some(HistoryCells::Metadata(cells)) => Some(cells),
+                    _ => None,
+                };
+                let mut cells = exact_storage(storage, stored_len);
+                cells.extend(
+                    dense[..stored_len]
+                        .iter()
+                        .copied()
+                        .map(MetadataHistoryCell::from_cell),
+                );
+                HistoryCells::Metadata(cells)
+            }
+            HistoryEncoding::Dense => {
+                let storage = match storage {
+                    Some(HistoryCells::Dense(cells)) => Some(cells),
+                    _ => None,
+                };
+                let mut cells = exact_storage(storage, stored_len);
+                cells.extend_from_slice(&dense[..stored_len]);
+                HistoryCells::Dense(cells)
+            }
+        };
+        Self {
+            cells,
+            width,
+            has_pooled_extras,
+        }
+    }
+
+    fn stored_len_for(dense: &[Cell], width: usize) -> usize {
+        dense
+            .iter()
+            .take(width)
+            .rposition(|cell| *cell != DEFAULT_CELL)
+            .map_or(0, |index| index + 1)
+    }
+
+    fn encoding(cells: &[Cell]) -> (HistoryEncoding, bool) {
+        let mut plain = true;
+        let mut dense = false;
+        let mut has_pooled_extras = false;
+        for cell in cells {
+            dense |= cell.foreground != Color::Default
+                || cell.background != Color::Default
+                || cell.attributes != Attributes(0)
+                || cell.underline_color.is_some();
+            plain &= cell.metadata_id.is_none();
+            has_pooled_extras |= cell.metadata_id.is_some_and(is_pooled_extra_id);
+        }
+        let encoding = if dense {
+            HistoryEncoding::Dense
+        } else if plain {
+            HistoryEncoding::Plain
+        } else {
+            HistoryEncoding::Metadata
+        };
+        (encoding, has_pooled_extras)
+    }
+
+    fn len(&self) -> usize {
+        usize::from(self.width)
+    }
+
+    fn get(&self, index: usize) -> Option<Cell> {
+        if index >= self.len() {
+            return None;
+        }
+        Some(match &self.cells {
+            HistoryCells::Plain(cells) => cells
+                .get(index)
+                .map_or(DEFAULT_CELL, |cell| cell.into_cell()),
+            HistoryCells::Metadata(cells) => cells
+                .get(index)
+                .map_or(DEFAULT_CELL, |cell| cell.into_cell()),
+            HistoryCells::Dense(cells) => cells.get(index).copied().unwrap_or(DEFAULT_CELL),
+        })
+    }
+
+    fn for_each(&self, mut visitor: impl FnMut(usize, &Cell)) {
+        match &self.cells {
+            HistoryCells::Plain(cells) => {
+                for (index, cell) in cells.iter().copied().enumerate() {
+                    visitor(index, &cell.into_cell());
+                }
+            }
+            HistoryCells::Metadata(cells) => {
+                for (index, cell) in cells.iter().copied().enumerate() {
+                    visitor(index, &cell.into_cell());
+                }
+            }
+            HistoryCells::Dense(cells) => {
+                for (index, cell) in cells.iter().enumerate() {
+                    visitor(index, cell);
+                }
+            }
+        }
+        for index in self.cells.len()..self.len() {
+            visitor(index, &DEFAULT_CELL);
+        }
+    }
+
+    fn iter(&self) -> RowCellIter<'_> {
+        RowView::History(self).iter()
+    }
+
+    fn append_to(&self, output: &mut Vec<Cell>, limit: usize) {
+        let len = self.len().min(limit);
+        let stored = self.cells.len().min(len);
+        match &self.cells {
+            HistoryCells::Plain(cells) => output.extend(
+                cells[..stored]
+                    .iter()
+                    .copied()
+                    .map(PlainHistoryCell::into_cell),
+            ),
+            HistoryCells::Metadata(cells) => output.extend(
+                cells[..stored]
+                    .iter()
+                    .copied()
+                    .map(MetadataHistoryCell::into_cell),
+            ),
+            HistoryCells::Dense(cells) => output.extend_from_slice(&cells[..stored]),
+        }
+        output.resize(output.len().saturating_add(len - stored), DEFAULT_CELL);
+    }
+
+    fn to_dense(&self) -> Vec<Cell> {
+        let mut dense = Vec::with_capacity(self.len());
+        self.append_to(&mut dense, self.len());
+        dense
+    }
+
+    fn into_dense(self) -> Vec<Cell> {
+        let width = self.len();
+        match self.cells {
+            HistoryCells::Plain(cells) => {
+                let mut dense = vec![DEFAULT_CELL; width];
+                for (target, cell) in dense.iter_mut().zip(cells) {
+                    *target = cell.into_cell();
+                }
+                dense
+            }
+            HistoryCells::Metadata(cells) => {
+                let mut dense = vec![DEFAULT_CELL; width];
+                for (target, cell) in dense.iter_mut().zip(cells) {
+                    *target = cell.into_cell();
+                }
+                dense
+            }
+            HistoryCells::Dense(mut cells) => {
+                cells.resize(width, DEFAULT_CELL);
+                cells
+            }
+        }
+    }
+
+    fn into_storage(self) -> HistoryCells {
+        self.cells
+    }
+
+    fn has_pooled_extras(&self) -> bool {
+        self.has_pooled_extras
+    }
+
+    fn take_leading_wide_spacer(&mut self, index: usize) -> bool {
+        let changed = match &mut self.cells {
+            HistoryCells::Plain(cells) => cells.get_mut(index).is_some_and(|cell| {
+                let changed = cell.into_cell().leading_wide_spacer();
+                cell.0 &=
+                    !(u32::from(CellState::LEADING_WIDE_SPACER) << PlainHistoryCell::STATE_SHIFT);
+                changed
+            }),
+            HistoryCells::Metadata(cells) => cells.get_mut(index).is_some_and(|cell| {
+                let changed = cell.state.contains(CellState::LEADING_WIDE_SPACER);
+                cell.state.set(CellState::LEADING_WIDE_SPACER, false);
+                changed
+            }),
+            HistoryCells::Dense(cells) => cells
+                .get_mut(index)
+                .is_some_and(Cell::take_leading_wide_spacer),
+        };
+        if changed {
+            match &mut self.cells {
+                HistoryCells::Plain(cells) => {
+                    while cells
+                        .last()
+                        .is_some_and(|cell| cell.into_cell() == DEFAULT_CELL)
+                    {
+                        cells.pop();
+                    }
+                }
+                HistoryCells::Metadata(cells) => {
+                    while cells
+                        .last()
+                        .is_some_and(|cell| cell.into_cell() == DEFAULT_CELL)
+                    {
+                        cells.pop();
+                    }
+                }
+                HistoryCells::Dense(cells) => {
+                    while cells.last() == Some(&DEFAULT_CELL) {
+                        cells.pop();
+                    }
+                }
+            }
+        }
+        changed
+    }
+}
+
+fn exact_storage<T>(storage: Option<Vec<T>>, len: usize) -> Vec<T> {
+    let mut storage = storage.unwrap_or_default();
+    if storage.capacity() != len {
+        Vec::with_capacity(len)
+    } else {
+        storage.clear();
+        storage
+    }
+}
+
+impl<'a> IntoIterator for &'a HistoryRow {
+    type Item = Cell;
+    type IntoIter = RowCellIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// A non-allocating view over either a live dense row or compact history.
+#[derive(Clone, Copy)]
+pub(crate) enum RowView<'a> {
+    Dense(&'a [Cell]),
+    History(&'a HistoryRow),
+}
+
+impl<'a> RowView<'a> {
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::Dense(cells) => cells.len(),
+            Self::History(row) => row.len(),
+        }
+    }
+
+    pub(crate) fn get(self, index: usize) -> Option<Cell> {
+        match self {
+            Self::Dense(cells) => cells.get(index).copied(),
+            Self::History(row) => row.get(index),
+        }
+    }
+
+    pub(crate) fn for_each(self, mut visitor: impl FnMut(usize, &Cell)) {
+        match self {
+            Self::Dense(cells) => {
+                for (index, cell) in cells.iter().enumerate() {
+                    visitor(index, cell);
+                }
+            }
+            Self::History(row) => row.for_each(visitor),
+        }
+    }
+
+    pub(crate) fn iter(self) -> RowCellIter<'a> {
+        RowCellIter {
+            row: self,
+            range: 0..self.len(),
+        }
+    }
+
+    fn append_to(self, output: &mut Vec<Cell>, limit: usize) {
+        match self {
+            Self::Dense(cells) => output.extend_from_slice(&cells[..cells.len().min(limit)]),
+            Self::History(row) => row.append_to(output, limit),
+        }
+    }
+
+    pub(crate) fn with_dense<R>(self, f: impl FnOnce(&[Cell]) -> R) -> R {
+        match self {
+            Self::Dense(cells) => f(cells),
+            Self::History(row) => match &row.cells {
+                HistoryCells::Dense(cells) if cells.len() == row.len() => f(cells),
+                _ => f(&row.to_dense()),
+            },
+        }
+    }
+}
+
+pub(crate) struct RowCellIter<'a> {
+    row: RowView<'a>,
+    range: std::ops::Range<usize>,
+}
+
+impl Iterator for RowCellIter<'_> {
+    type Item = Cell;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.range.next().and_then(|index| self.row.get(index))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.range.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for RowCellIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.range.next_back().and_then(|index| self.row.get(index))
+    }
+}
+
+impl ExactSizeIterator for RowCellIter<'_> {}
+impl std::iter::FusedIterator for RowCellIter<'_> {}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorStyle {
@@ -704,150 +1163,6 @@ impl Pen {
     }
 }
 
-#[derive(Clone, Debug)]
-struct Screen {
-    cols: usize,
-    rows: usize,
-    cells: Vec<Vec<Cell>>,
-    cursor_col: usize,
-    cursor_row: usize,
-    saved_cursor_col: usize,
-    saved_cursor_row: usize,
-    pen: Pen,
-    saved_pen: Pen,
-    charsets: [Charset; 4],
-    saved_charsets: [Charset; 4],
-    wrap_pending: bool,
-    saved_wrap_pending: bool,
-    scroll_top: usize,
-    scroll_bottom: usize,
-}
-
-impl Screen {
-    fn new(cols: usize, rows: usize) -> Self {
-        Self {
-            cols,
-            rows,
-            cells: (0..rows).map(|_| vec![Cell::default(); cols]).collect(),
-            cursor_col: 0,
-            cursor_row: 0,
-            saved_cursor_col: 0,
-            saved_cursor_row: 0,
-            pen: Pen::default(),
-            saved_pen: Pen::default(),
-            charsets: [Charset::Ascii; 4],
-            saved_charsets: [Charset::Ascii; 4],
-            wrap_pending: false,
-            saved_wrap_pending: false,
-            scroll_top: 0,
-            scroll_bottom: rows.saturating_sub(1),
-        }
-    }
-
-    fn row(&self, row: usize) -> &[Cell] {
-        &self.cells[row]
-    }
-
-    fn row_mut(&mut self, row: usize) -> &mut [Cell] {
-        &mut self.cells[row]
-    }
-
-    fn fill(&mut self, cell: Cell) {
-        for row in &mut self.cells {
-            row.fill(cell);
-        }
-    }
-
-    fn reset(&mut self) {
-        self.fill(Cell::default());
-        self.cursor_col = 0;
-        self.cursor_row = 0;
-        self.saved_cursor_col = 0;
-        self.saved_cursor_row = 0;
-        self.pen = Pen::default();
-        self.saved_pen = Pen::default();
-        self.charsets = [Charset::Ascii; 4];
-        self.saved_charsets = [Charset::Ascii; 4];
-        self.wrap_pending = false;
-        self.saved_wrap_pending = false;
-        self.scroll_top = 0;
-        self.scroll_bottom = self.rows.saturating_sub(1);
-    }
-
-    fn save_cursor(&mut self) {
-        self.saved_cursor_col = self.cursor_col;
-        self.saved_cursor_row = self.cursor_row;
-        self.saved_pen = self.pen;
-        self.saved_charsets = self.charsets;
-        self.saved_wrap_pending = self.wrap_pending;
-    }
-
-    fn restore_cursor(&mut self) {
-        self.cursor_col = self.saved_cursor_col.min(self.cols.saturating_sub(1));
-        self.cursor_row = self.saved_cursor_row.min(self.rows.saturating_sub(1));
-        self.pen = self.saved_pen;
-        self.charsets = self.saved_charsets;
-        self.wrap_pending = self.saved_wrap_pending;
-    }
-
-    fn resize(&mut self, cols: usize, rows: usize, bottom_anchor: bool) -> Vec<Vec<Cell>> {
-        let old_cols = self.cols;
-        let old_rows = self.rows;
-        let old_cursor_row = self.cursor_row;
-        let mut removed = Vec::new();
-
-        if bottom_anchor && rows < old_rows {
-            for row in 0..old_rows - rows {
-                removed.push(self.row(row).to_vec());
-            }
-        }
-
-        let mut cells = (0..rows)
-            .map(|_| vec![Cell::default(); cols])
-            .collect::<Vec<_>>();
-        let copy_cols = old_cols.min(cols);
-        let copy_rows = old_rows.min(rows);
-        let required_scrolling = if !bottom_anchor && rows < old_rows {
-            old_cursor_row.saturating_add(1).saturating_sub(rows)
-        } else {
-            0
-        };
-        let (source_row, target_row) = if bottom_anchor {
-            (
-                old_rows.saturating_sub(copy_rows),
-                rows.saturating_sub(copy_rows),
-            )
-        } else {
-            (required_scrolling, 0)
-        };
-
-        for offset in 0..copy_rows {
-            cells[target_row + offset][..copy_cols]
-                .copy_from_slice(&self.cells[source_row + offset][..copy_cols]);
-        }
-
-        self.cols = cols;
-        self.rows = rows;
-        self.cells = cells;
-        self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
-        self.cursor_row = if bottom_anchor {
-            if rows >= old_rows {
-                old_cursor_row.saturating_add(rows - old_rows)
-            } else {
-                old_cursor_row.saturating_sub(old_rows - rows)
-            }
-        } else {
-            old_cursor_row.min(rows.saturating_sub(1))
-        }
-        .min(rows.saturating_sub(1));
-        self.saved_cursor_col = self.saved_cursor_col.min(cols.saturating_sub(1));
-        self.saved_cursor_row = self.saved_cursor_row.min(rows.saturating_sub(1));
-        self.scroll_top = 0;
-        self.scroll_bottom = rows.saturating_sub(1);
-        removed
-    }
-}
-
 #[derive(Debug)]
 struct Damage {
     full: bool,
@@ -1017,7 +1332,7 @@ pub(crate) struct Grid {
     primary: Screen,
     alternate: Screen,
     alternate_active: bool,
-    history: VecDeque<Vec<Cell>>,
+    history: VecDeque<HistoryRow>,
     history_limit: usize,
     display_offset: usize,
     damage: Damage,
@@ -1054,11 +1369,14 @@ pub(crate) struct Grid {
 
 mod edit;
 mod modes;
+mod screen;
 mod view;
 
 #[cfg(test)]
-use view::is_pooled_extra_id;
-use view::{inline_hyperlink_metadata_id, viewport_link_from_grid_range};
+mod test_support;
+
+use screen::Screen;
+use view::{inline_hyperlink_metadata_id, is_pooled_extra_id, viewport_link_from_grid_range};
 
 #[cfg(test)]
 #[path = "grid_tests.rs"]

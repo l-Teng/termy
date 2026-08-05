@@ -112,8 +112,11 @@ fn parses_colon_form_truecolor_palette_and_underline_styles() {
 fn preserves_extended_underline_styles_and_vte_fallbacks() {
     let (grid, _) =
         parse(b"\x1b[4mA\x1b[4:2mB\x1b[4:3mC\x1b[4:4mD\x1b[4:5mE\x1b[4:0mF\x1b[4:0:1mG\x1b[24mH");
-    let styles = grid.line(0).unwrap()[..8]
+    let styles = grid
+        .line(0)
+        .unwrap()
         .iter()
+        .take(8)
         .map(|cell| cell.attributes.underline_style())
         .collect::<Vec<_>>();
     assert_eq!(
@@ -135,8 +138,11 @@ fn preserves_extended_underline_styles_and_vte_fallbacks() {
 fn preserves_extended_underline_colors_and_resets() {
     let (grid, _) =
         parse(b"\x1b[58;2;1;2;3mA\x1b[58;5;201mB\x1b[58:2::4:5:6mC\x1b[59mD\x1b[58:5:7mE\x1b[0mF");
-    let colors = grid.line(0).unwrap()[..6]
+    let colors = grid
+        .line(0)
+        .unwrap()
         .iter()
+        .take(6)
         .map(|cell| cell.underline_color)
         .collect::<Vec<_>>();
     assert_eq!(
@@ -198,8 +204,8 @@ fn encoded_c1_controls_are_ignored_without_replacing_the_last_printed_character(
     let row = grid.line(0).unwrap();
 
     assert_eq!(
-        row[..4]
-            .iter()
+        row.iter()
+            .take(4)
             .map(|cell| cell.character)
             .collect::<String>(),
         "AAAB"
@@ -221,8 +227,11 @@ fn ground_text_spans_preserve_invalid_and_split_utf8_behavior() {
     assert_eq!(replay_chunks(fixture, &every_byte), expected);
 
     let (grid, _) = parse(fixture);
-    let rendered = grid.line(0).unwrap()[..11]
+    let rendered = grid
+        .line(0)
+        .unwrap()
         .iter()
+        .take(11)
         .filter(|cell| !cell.wide_spacer())
         .map(|cell| cell.character)
         .collect::<String>();
@@ -416,8 +425,11 @@ fn kitty_apc_accepts_the_native_engines_eight_bit_introducer() {
 #[test]
 fn non_kitty_eight_bit_apc_is_forwarded_as_native_text() {
     let (grid, _) = parse(b"\x9fXpayload\x9cZ");
-    let rendered = grid.line(0).unwrap()[..9]
+    let rendered = grid
+        .line(0)
+        .unwrap()
         .iter()
+        .take(9)
         .map(|cell| cell.character)
         .collect::<String>();
 
@@ -502,7 +514,7 @@ fn malformed_random_streams_keep_grid_and_graphics_invariants() {
             for (index, cell) in line.iter().enumerate() {
                 if cell.wide_spacer() {
                     assert!(index > 0);
-                    assert!(!line[index - 1].wide_spacer());
+                    assert!(!line.get(index - 1).unwrap().wide_spacer());
                 }
             }
         }
@@ -715,8 +727,11 @@ fn answers_cursor_position_queries() {
 #[test]
 fn dec_special_graphics_render_tui_box_drawing() {
     let (grid, _) = parse(b"\x1b(0_`lqk\x1b(B");
-    let rendered = grid.line(0).unwrap()[..5]
+    let rendered = grid
+        .line(0)
+        .unwrap()
         .iter()
+        .take(5)
         .map(|cell| cell.character)
         .collect::<String>();
     assert_eq!(rendered, " ◆┌─┐");
@@ -738,7 +753,7 @@ fn supports_alignment_test_g2_g3_and_single_shift_charsets() {
     let row = grid.line(0).unwrap();
     assert_eq!(row[0].character, '£');
     assert_eq!(row[1].character, '─');
-    assert!(row[2..].iter().all(|cell| cell.character == 'E'));
+    assert!(row.iter().skip(2).all(|cell| cell.character == 'E'));
     assert!(
         grid.line(1)
             .unwrap()
@@ -762,8 +777,8 @@ fn erasures_use_the_current_background_and_keep_wide_pairs_valid() {
     let (grid, _) = parse("\x1b[44mabc\x1b[2K\x1b[49m界\x1b[2DX".as_bytes());
     let row = grid.line(0).unwrap();
     assert!(
-        row[..3]
-            .iter()
+        row.iter()
+            .take(3)
             .all(|cell| cell.background == Color::Indexed(4))
     );
     assert_eq!(row[3].character, 'X');
@@ -797,7 +812,7 @@ fn selective_erase_preserves_protected_narrow_and_wide_cells() {
         grid.line(0)
             .unwrap()
             .iter()
-            .all(|cell| *cell == crate::Cell::default())
+            .all(|cell| cell == crate::Cell::default())
     );
 }
 
@@ -1064,8 +1079,10 @@ fn standalone_c1_bytes_are_ignored_in_utf8_mode() {
     parser.advance(&mut grid, b"abc\x85x\x9b2;3H@\x84y\x8dz");
 
     assert_eq!(
-        grid.line(0).unwrap()[..11]
+        grid.line(0)
+            .unwrap()
             .iter()
+            .take(11)
             .map(|cell| cell.character)
             .collect::<String>(),
         "abcx2;3H@yz"
@@ -1083,7 +1100,7 @@ fn repeat_without_a_preceding_character_is_a_noop() {
         grid.line(0)
             .unwrap()
             .iter()
-            .all(|cell| *cell == Cell::default())
+            .all(|cell| cell == Cell::default())
     );
 }
 
@@ -1092,8 +1109,10 @@ fn repeat_uses_the_last_character_from_an_ascii_span() {
     let (grid, _) = parse(b"abc\x1b[3b");
 
     assert_eq!(
-        grid.line(0).unwrap()[..6]
+        grid.line(0)
+            .unwrap()
             .iter()
+            .take(6)
             .map(|cell| cell.character)
             .collect::<String>(),
         "abcccc"
@@ -1158,8 +1177,10 @@ fn synchronized_updates_stage_grid_events_and_replies_atomically() {
     let committed = parser.advance(&mut grid, ESU_CSI);
     assert!(!committed.synchronized_update_active);
     assert_eq!(
-        grid.line(0).unwrap()[..5]
+        grid.line(0)
+            .unwrap()
             .iter()
+            .take(5)
             .map(|cell| cell.character)
             .collect::<String>(),
         "frame"
@@ -1215,8 +1236,10 @@ fn synchronized_scanner_requires_exact_raw_end_and_retains_later_bsu() {
     let extended = parser.advance(&mut grid, b"\x1b[?2026l\x1b[?2026hC");
     assert!(extended.synchronized_update_active);
     assert_eq!(
-        grid.line(0).unwrap()[..2]
+        grid.line(0)
+            .unwrap()
             .iter()
+            .take(2)
             .map(|cell| cell.character)
             .collect::<String>(),
         "AB"
@@ -1224,8 +1247,10 @@ fn synchronized_scanner_requires_exact_raw_end_and_retains_later_bsu() {
 
     parser.advance(&mut grid, ESU_CSI);
     assert_eq!(
-        grid.line(0).unwrap()[..3]
+        grid.line(0)
+            .unwrap()
             .iter()
+            .take(3)
             .map(|cell| cell.character)
             .collect::<String>(),
         "ABC"
@@ -1265,8 +1290,8 @@ fn cancel_and_substitute_abort_incomplete_control_sequences() {
     assert_eq!(row[1].character, 'X');
     assert_eq!(row[2].character, 'Y');
     assert!(
-        row[..3]
-            .iter()
+        row.iter()
+            .take(3)
             .all(|cell| cell.foreground == Color::Default)
     );
 }
