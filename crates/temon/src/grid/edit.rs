@@ -12,7 +12,7 @@ impl Grid {
         let rows = usize::from(rows.clamp(1, MAX_GRID_DIMENSION));
         Self {
             primary: Screen::new(cols, rows),
-            alternate: Screen::new(cols, rows),
+            alternate: None,
             alternate_active: false,
             history: VecDeque::new(),
             history_limit: history_limit.min(MAX_SCROLLBACK_LINES),
@@ -52,7 +52,9 @@ impl Grid {
 
     pub(super) fn active(&self) -> &Screen {
         if self.alternate_active {
-            &self.alternate
+            self.alternate
+                .as_ref()
+                .expect("the active alternate screen is initialized")
         } else {
             &self.primary
         }
@@ -60,7 +62,9 @@ impl Grid {
 
     pub(super) fn active_mut(&mut self) -> &mut Screen {
         if self.alternate_active {
-            &mut self.alternate
+            self.alternate
+                .as_mut()
+                .expect("the active alternate screen is initialized")
         } else {
             &mut self.primary
         }
@@ -484,7 +488,7 @@ impl Grid {
                 .count()
         };
         let references = screen_references(&self.primary)
-            + screen_references(&self.alternate)
+            + self.alternate.as_ref().map_or(0, screen_references)
             + self
                 .history
                 .iter()
@@ -535,13 +539,15 @@ impl Grid {
                 .flatten()
                 .filter_map(|cell| cell.metadata_id.filter(|id| is_pooled_extra_id(*id))),
         );
-        live.extend(
-            self.alternate
-                .cells
-                .iter()
-                .flatten()
-                .filter_map(|cell| cell.metadata_id.filter(|id| is_pooled_extra_id(*id))),
-        );
+        if let Some(alternate) = &self.alternate {
+            live.extend(
+                alternate
+                    .cells
+                    .iter()
+                    .flatten()
+                    .filter_map(|cell| cell.metadata_id.filter(|id| is_pooled_extra_id(*id))),
+            );
+        }
         live.extend(self.history.iter().flat_map(|row| {
             row.iter()
                 .filter_map(|cell| cell.metadata_id.filter(|id| is_pooled_extra_id(*id)))
@@ -731,8 +737,10 @@ impl Grid {
         let origin_mode = self.origin_mode;
         self.primary.scroll_top = top;
         self.primary.scroll_bottom = bottom;
-        self.alternate.scroll_top = top;
-        self.alternate.scroll_bottom = bottom;
+        if let Some(alternate) = &mut self.alternate {
+            alternate.scroll_top = top;
+            alternate.scroll_bottom = bottom;
+        }
         let screen = self.active_mut();
         let row = if origin_mode { top } else { 0 };
         screen.cursor_row = row;
@@ -743,11 +751,12 @@ impl Grid {
     pub(crate) fn reset_scroll_region(&mut self) {
         let origin_mode = self.origin_mode;
         let primary_bottom = self.primary.rows.saturating_sub(1);
-        let alternate_bottom = self.alternate.rows.saturating_sub(1);
         self.primary.scroll_top = 0;
         self.primary.scroll_bottom = primary_bottom;
-        self.alternate.scroll_top = 0;
-        self.alternate.scroll_bottom = alternate_bottom;
+        if let Some(alternate) = &mut self.alternate {
+            alternate.scroll_top = 0;
+            alternate.scroll_bottom = alternate.rows.saturating_sub(1);
+        }
         let screen = self.active_mut();
         screen.cursor_row = if origin_mode { screen.scroll_top } else { 0 };
         screen.cursor_col = 0;

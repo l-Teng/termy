@@ -13,28 +13,32 @@ impl Grid {
             // the column reflow decides which source rows survive widening.
             self.resize_primary_rows(rows);
             self.reflow_primary(cols, rows);
-            self.alternate.resize(cols, rows, false);
+            if let Some(alternate) = &mut self.alternate {
+                alternate.resize(cols, rows, false);
+            }
             // Kitty placements stay anchored to terminal lines across a width change.
             // Rendering clips placements outside the resized viewport, matching the
             // native engine and allowing them to reappear after a later expansion.
         } else {
             self.resize_primary_rows(rows);
-            let alternate_old_rows = self.alternate.rows;
-            let alternate_cursor_row = self.alternate.cursor_row;
-            self.alternate.resize(cols, rows, false);
-            if rows < alternate_old_rows {
-                let count = alternate_cursor_row.saturating_add(1).saturating_sub(rows);
-                if count > 0 {
-                    self.effects.push_back(GridEffect::ScrollUp {
-                        alternate: true,
-                        top: 0,
-                        bottom: alternate_old_rows.saturating_sub(1),
-                        count,
-                        full_screen_region: true,
-                        recorded_history: false,
-                        history_before: 0,
-                        history_after: 0,
-                    });
+            if let Some(alternate) = &mut self.alternate {
+                let alternate_old_rows = alternate.rows;
+                let alternate_cursor_row = alternate.cursor_row;
+                alternate.resize(cols, rows, false);
+                if rows < alternate_old_rows {
+                    let count = alternate_cursor_row.saturating_add(1).saturating_sub(rows);
+                    if count > 0 {
+                        self.effects.push_back(GridEffect::ScrollUp {
+                            alternate: true,
+                            top: 0,
+                            bottom: alternate_old_rows.saturating_sub(1),
+                            count,
+                            full_screen_region: true,
+                            recorded_history: false,
+                            history_before: 0,
+                            history_after: 0,
+                        });
+                    }
                 }
             }
         }
@@ -774,7 +778,11 @@ impl Grid {
     pub(crate) fn line(&self, line: i32) -> Option<RowView<'_>> {
         if self.alternate_active {
             let row = usize::try_from(line).ok()?;
-            return (row < self.alternate.rows).then(|| RowView::Dense(self.alternate.row(row)));
+            let alternate = self
+                .alternate
+                .as_ref()
+                .expect("the active alternate screen is initialized");
+            return (row < alternate.rows).then(|| RowView::Dense(alternate.row(row)));
         }
         if line < 0 {
             let index = self.history.len() as i64 + i64::from(line);

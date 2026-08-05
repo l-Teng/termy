@@ -24,7 +24,9 @@ checks out Ghostty revision `9e30f70f23418fecbdca1088673000417527c4e4`, builds
 `libghostty-vt` with Zig 0.16.0, runs ten fresh processes per case by default,
 runs eight balanced 32 MiB throughput samples, and uploads the complete text
 report as a 30-day artifact. The job fails unless Tmon's median paired
-throughput ratio exceeds `1.000x` for every workload.
+throughput ratio exceeds `1.000x` for every workload and Tmon's median physical
+footprint is strictly below every corresponding Ghostty result, including
+Ghostty's explicit full-compression result for scrollback workloads.
 
 ## Local usage
 

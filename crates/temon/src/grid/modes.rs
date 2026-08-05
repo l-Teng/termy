@@ -4,7 +4,7 @@ use super::*;
 impl Grid {
     pub(crate) fn reset(&mut self) {
         self.primary.reset();
-        self.alternate.reset();
+        self.alternate = None;
         self.alternate_active = false;
         self.history.clear();
         self.history.shrink_to_fit();
@@ -255,14 +255,19 @@ impl Grid {
             let wrap_pending = self.primary.wrap_pending;
             let scroll_top = self.primary.scroll_top;
             let scroll_bottom = self.primary.scroll_bottom;
-            self.alternate.fill(pen.blank());
-            self.alternate.cursor_col = cursor_col.min(self.alternate.cols.saturating_sub(1));
-            self.alternate.cursor_row = cursor_row.min(self.alternate.rows.saturating_sub(1));
-            self.alternate.pen = pen;
-            self.alternate.charsets = charsets;
-            self.alternate.wrap_pending = wrap_pending;
-            self.alternate.scroll_top = scroll_top.min(self.alternate.rows.saturating_sub(1));
-            self.alternate.scroll_bottom = scroll_bottom.min(self.alternate.rows.saturating_sub(1));
+            let cols = self.primary.cols;
+            let rows = self.primary.rows;
+            let alternate = self
+                .alternate
+                .get_or_insert_with(|| Screen::new(cols, rows));
+            alternate.fill(pen.blank());
+            alternate.cursor_col = cursor_col.min(alternate.cols.saturating_sub(1));
+            alternate.cursor_row = cursor_row.min(alternate.rows.saturating_sub(1));
+            alternate.pen = pen;
+            alternate.charsets = charsets;
+            alternate.wrap_pending = wrap_pending;
+            alternate.scroll_top = scroll_top.min(alternate.rows.saturating_sub(1));
+            alternate.scroll_bottom = scroll_bottom.min(alternate.rows.saturating_sub(1));
             self.alternate_active = true;
             self.effects.push_back(GridEffect::EnteredAlternate);
         } else {
@@ -455,26 +460,29 @@ impl Grid {
                 .flatten()
                 .filter_map(|cell| cell_hyperlink_id(extras, cell)),
         );
-        live.extend(
-            self.alternate
-                .cells
-                .iter()
-                .flatten()
-                .filter_map(|cell| cell_hyperlink_id(extras, cell)),
-        );
+        if let Some(alternate) = &self.alternate {
+            live.extend(
+                alternate
+                    .cells
+                    .iter()
+                    .flatten()
+                    .filter_map(|cell| cell_hyperlink_id(extras, cell)),
+            );
+        }
         live.extend(self.history.iter().flat_map(|row| {
             row.iter()
                 .filter_map(|cell| cell_hyperlink_id(extras, &cell))
         }));
-        for pen in [
-            self.primary.pen,
-            self.primary.saved_pen,
-            self.alternate.pen,
-            self.alternate.saved_pen,
-        ] {
+        let mut retain_pen = |pen: Pen| {
             if let Some(active) = pen.hyperlink_id {
                 live.insert(active);
             }
+        };
+        retain_pen(self.primary.pen);
+        retain_pen(self.primary.saved_pen);
+        if let Some(alternate) = &self.alternate {
+            retain_pen(alternate.pen);
+            retain_pen(alternate.saved_pen);
         }
         self.hyperlinks
             .retain(|id, _| NonZeroU32::new(*id).is_some_and(|id| live.contains(&id)));

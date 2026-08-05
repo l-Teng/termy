@@ -1443,7 +1443,7 @@ impl Damage {
 #[derive(Debug)]
 pub(crate) struct Grid {
     primary: Screen,
-    alternate: Screen,
+    alternate: Option<Screen>,
     alternate_active: bool,
     history: VecDeque<HistoryRow>,
     history_limit: usize,

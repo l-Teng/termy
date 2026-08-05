@@ -9,14 +9,16 @@ baseline so host differences are not presented as engine improvements.
 
 ## Bytecode scrollback and direct Ghostty comparison
 
-The 2026-08-05 follow-up keeps both live screens dense and replaces the first
-compact-history format with one lossless bytecode `HistoryRow`. Logical width
-and stored cell count are separate, exact-default suffixes are omitted, and
-ordinary characters remain direct UTF-8. Sparse commands encode style changes,
-cell state, wide spacers, inline combining marks, and rare metadata. Colored
-and attributed rows no longer need a trimmed 24-byte-cell fallback. A logical
-row view decodes without persistent dense storage; the few mutable history
-paths materialize temporarily and re-encode immediately.
+The 2026-08-05 follow-up keeps the active screen dense, but allocates the
+alternate screen only when an application first enters it and releases it on a
+terminal reset. It also replaces the first compact-history format with one
+lossless bytecode `HistoryRow`. Logical width and stored cell count are
+separate, exact-default suffixes are omitted, and ordinary characters remain
+direct UTF-8. Sparse commands encode style changes, cell state, wide spacers,
+inline combining marks, and rare metadata. Colored and attributed rows no
+longer need a trimmed 24-byte-cell fallback. A logical row view decodes without
+persistent dense storage; the few mutable history paths materialize temporarily
+and re-encode immediately.
 
 A conservative line path handles complete default-style `CRLF` rows only while
 the cursor is at the bottom of the primary full-screen scroll region. It moves
@@ -32,18 +34,20 @@ the pinned Ghostty revision `9e30f70f23418fecbdca1088673000417527c4e4`,
 It uses `ri_phys_footprint` before semantic traversal. The prior Tmon column is
 the hosted first-format result from run `31012483654`.
 
-| Workload | Prior Tmon | Bytecode Tmon | Ghostty | Ghostty compressed | Tmon below compressed |
+| Workload | Prior Tmon | Current Tmon | Ghostty | Ghostty compressed | Tmon below compressed |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Plain | 4.77 MiB | 2.86 MiB | 11.64 MiB | 3.45 MiB | 17.1% |
-| Styled | 7.70 MiB | 2.84 MiB | 13.25 MiB | 3.88 MiB | 26.8% |
-| Unicode | 6.77 MiB | 2.85 MiB | 12.64 MiB | 3.26 MiB | 12.6% |
-| Mixed | 10.20 MiB | 3.47 MiB | 13.25 MiB | 4.18 MiB | 17.0% |
+| Plain | 4.77 MiB | 2.73 MiB | 11.66 MiB | 3.45 MiB | 20.9% |
+| Styled | 7.70 MiB | 2.70 MiB | 13.25 MiB | 3.88 MiB | 30.4% |
+| Unicode | 6.77 MiB | 2.72 MiB | 12.64 MiB | 3.27 MiB | 16.8% |
+| Mixed | 10.20 MiB | 3.33 MiB | 13.23 MiB | 4.19 MiB | 20.5% |
 
-Tmon's empty median was 1.81 MiB. Its payload deltas were 1.05, 1.03, 1.04,
-and 1.66 MiB respectively, versus compressed Ghostty's 1.73, 2.16, 1.54, and
-2.46 MiB. Every Tmon screen-only median stayed at 1.81 MiB. The complete
-report records every raw byte sample and P05/P95 range; cursor, history size,
-and sampled semantic cells matched before each result was accepted.
+Tmon's empty and screen-only medians were 1.69 MiB, below Ghostty's 1.72 MiB
+empty median and 1.73-1.77 MiB screen medians. Tmon's scrollback payload deltas
+were 1.05, 1.02, 1.03, and 1.64 MiB respectively, versus compressed Ghostty's
+1.73, 2.16, 1.55, and 2.47 MiB. The complete report records every raw byte
+sample and P05/P95 range; cursor, history size, and sampled semantic cells
+matched before each result was accepted. The benchmark now fails unless Tmon's
+median is strictly lower than every corresponding Ghostty result.
 
 The direct Tmon/Ghostty feed comparison used eight balanced samples, a 2 MiB
 warmup, 32 MiB timed per engine/sample, and identical 64 KiB calls. A fresh

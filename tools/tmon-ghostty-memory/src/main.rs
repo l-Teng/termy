@@ -549,7 +549,42 @@ fn run_parent_mode() -> Result<(), String> {
         }
     }
 
-    Ok(())
+    let mut failed = Vec::new();
+    for workload in Workload::ALL {
+        let tmon = stats(
+            results
+                .get(&(workload, Engine::Tmon))
+                .ok_or_else(|| format!("missing tmon results for {}", workload.name()))?,
+        );
+        for &engine in workload.benchmark_engines() {
+            if engine == Engine::Tmon {
+                continue;
+            }
+            let comparison = stats(results.get(&(workload, engine)).ok_or_else(|| {
+                format!("missing {} results for {}", engine.name(), workload.name())
+            })?);
+            if tmon.median >= comparison.median {
+                failed.push(format!(
+                    "{}: tmon {:.0} bytes >= {} {:.0} bytes",
+                    workload.name(),
+                    tmon.median,
+                    engine.name(),
+                    comparison.median
+                ));
+            }
+        }
+    }
+    if failed.is_empty() {
+        println!(
+            "memory_result=PASS (Tmon median footprint is lower than every Ghostty comparison)"
+        );
+        Ok(())
+    } else {
+        Err(format!(
+            "Tmon did not win every median memory comparison:\n{}",
+            failed.join("\n")
+        ))
+    }
 }
 
 fn run_child_process(

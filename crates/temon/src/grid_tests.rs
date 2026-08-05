@@ -730,6 +730,27 @@ fn full_frame_barriers_discard_pending_renderer_scrolls() {
 }
 
 #[test]
+fn alternate_screen_storage_is_lazy_and_reset_releases_it() {
+    let mut grid = Grid::new(4, 3, 8, CursorStyle::Block);
+    assert!(grid.alternate.is_none());
+
+    grid.resize(6, 4);
+    assert!(grid.alternate.is_none());
+
+    grid.set_mode(true, 1049, true);
+    let alternate = grid
+        .alternate
+        .as_ref()
+        .expect("entering the alternate screen should allocate it");
+    assert_eq!((alternate.cols, alternate.rows), (6, 4));
+
+    grid.set_mode(true, 1049, false);
+    assert!(grid.alternate.is_some());
+    grid.reset();
+    assert!(grid.alternate.is_none());
+}
+
+#[test]
 fn live_scrolling_while_viewing_history_falls_back_to_full_damage() {
     let mut grid = Grid::new(4, 3, 8, CursorStyle::Block);
     grid.set_cursor_position(2, 0);
