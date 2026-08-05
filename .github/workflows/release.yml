@@ -181,6 +181,9 @@ jobs:
       - name: Build Linux AppImage
         run: APPIMAGETOOL="$APPIMAGETOOL" ./scripts/build-linux.sh --version "$VERSION" --arch "${{ matrix.arch }}" --target "${{ matrix.target }}" --format appimage
 
+      - name: Build Linux deb
+        run: ./scripts/build-linux.sh --version "$VERSION" --arch "${{ matrix.arch }}" --target "${{ matrix.target }}" --format deb
+
       - name: Upload Linux tarball artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -193,6 +196,13 @@ jobs:
         with:
           name: termy-linux-appimage-${{ matrix.arch }}
           path: target/dist/Termy-${{ env.VERSION }}-linux-${{ matrix.arch }}.AppImage
+          if-no-files-found: error
+
+      - name: Upload Linux deb artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: termy-linux-deb-${{ matrix.arch }}
+          path: target/dist/Termy-${{ env.VERSION }}-linux-${{ matrix.arch }}.deb
           if-no-files-found: error
 
   attach-and-finalize-release:
@@ -217,7 +227,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          find . -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.tar.gz' -o -name '*.AppImage' \) -print0 \
+          find . -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.tar.gz' -o -name '*.AppImage' -o -name '*.deb' \) -print0 \
             | sort -z \
             | xargs -0 sha256sum > checksums.txt
 
@@ -230,6 +240,7 @@ jobs:
             dist/*.exe
             dist/*.tar.gz
             dist/*.AppImage
+            dist/*.deb
             dist/checksums.txt
           fail_on_unmatched_files: true
           overwrite_files: true

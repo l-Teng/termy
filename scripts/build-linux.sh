@@ -12,13 +12,15 @@ Options:
   --version VERSION   Set version (default: read from crates/desktop_app/Cargo.toml)
   --arch ARCH         Set architecture (x86_64 or aarch64)
   --target TARGET     Set target triple (x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu)
-  --format FORMAT     Output format: tarball (default) or appimage
+  --format FORMAT     Output format: tarball (default), appimage, or deb
   --help, -h          Show this help message
 
 Output:
   target/dist/Termy-<version>-linux-<arch>.tar.gz
   or
   target/dist/Termy-<version>-linux-<arch>.AppImage
+  or
+  target/dist/Termy-<version>-linux-<arch>.deb
 EOF
 }
 
@@ -131,6 +133,9 @@ BINARY_PATH="$TARGET_RELEASE_DIR/$APP_NAME_LOWER"
 APPIMAGETOOL_BIN="${APPIMAGETOOL:-appimagetool}"
 
 require_cmd cargo
+if [[ "$FORMAT" == "deb" ]]; then
+  require_cmd dpkg-deb
+fi
 if [[ "$FORMAT" == "appimage" ]]; then
   if [[ "$APPIMAGETOOL_BIN" == */* ]]; then
     [[ -x "$APPIMAGETOOL_BIN" ]] || die "AppImage tool not executable: $APPIMAGETOOL_BIN"
@@ -277,7 +282,82 @@ APP_RUN
     echo "Done: $OUTPUT_PATH"
     ;;
 
+  deb)
+    DEB_STAGING_ROOT="$REPO_ROOT/target/linux-deb-staging"
+    DEB_ROOT="$DEB_STAGING_ROOT/root"
+    DEB_NAME="${APP_NAME}-${VERSION}-${OS_NAME}-${ARCH}.deb"
+    OUTPUT_PATH="$DIST_DIR/$DEB_NAME"
+    DESKTOP_FILE_SOURCE="$REPO_ROOT/scripts/aur/${APP_NAME_LOWER}.desktop"
+    ICON_SOURCE="$REPO_ROOT/assets/${APP_NAME_LOWER}_icon.png"
+
+    # Debian version strings must start with a digit.
+    DEB_VERSION="${VERSION#v}"
+    case "$ARCH" in
+      x86_64) DEB_ARCH="amd64" ;;
+      aarch64) DEB_ARCH="arm64" ;;
+      *) die "Unsupported deb architecture: $ARCH" ;;
+    esac
+
+    [[ -f "$DESKTOP_FILE_SOURCE" ]] || die "Desktop file not found at $DESKTOP_FILE_SOURCE"
+    [[ -f "$ICON_SOURCE" ]] || die "Linux app icon not found at $ICON_SOURCE"
+
+    log "Creating deb staging directory"
+    rm -rf "$DEB_STAGING_ROOT"
+    mkdir -p \
+      "$DEB_ROOT/DEBIAN" \
+      "$DEB_ROOT/usr/bin" \
+      "$DEB_ROOT/usr/lib/$APP_NAME_LOWER" \
+      "$DEB_ROOT/usr/share/applications" \
+      "$DEB_ROOT/usr/share/pixmaps"
+
+    cp "$BINARY_PATH" "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/termy-bin"
+    cp "$CLI_BINARY_PATH" "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/termy-cli"
+    chmod 755 "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/termy-bin" "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/termy-cli"
+
+    # Keep assets as a sibling to the binary, matching the tarball layout.
+    if [[ -d "$REPO_ROOT/assets" ]]; then
+      mkdir -p "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/assets"
+      cp -r "$REPO_ROOT/assets/"* "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/assets/" 2>/dev/null || true
+    fi
+
+    cat > "$DEB_ROOT/usr/bin/$APP_NAME_LOWER" <<LAUNCHER
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec /usr/lib/$APP_NAME_LOWER/termy-bin "\$@"
+LAUNCHER
+    chmod 755 "$DEB_ROOT/usr/bin/$APP_NAME_LOWER"
+    ln -s "../lib/$APP_NAME_LOWER/termy-cli" "$DEB_ROOT/usr/bin/termy-cli"
+
+    cp "$DESKTOP_FILE_SOURCE" "$DEB_ROOT/usr/share/applications/${APP_NAME_LOWER}.desktop"
+    cp "$ICON_SOURCE" "$DEB_ROOT/usr/share/pixmaps/${APP_NAME_LOWER}.png"
+
+    INSTALLED_SIZE="$(du -sk "$DEB_ROOT/usr" | cut -f1)"
+    cat > "$DEB_ROOT/DEBIAN/control" <<EOF
+Package: $APP_NAME_LOWER
+Version: $DEB_VERSION
+Architecture: $DEB_ARCH
+Maintainer: Lasse Vestergaard <hello@lassejlv.dk>
+Installed-Size: $INSTALLED_SIZE
+Depends: bash, libc6, libgcc-s1, libglib2.0-0, libfreetype6, libfontconfig1, libxcb1, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libvulkan1
+Section: x11
+Priority: optional
+Homepage: https://github.com/lassejlv/termy
+Description: Minimal GPUI-powered terminal
+ Termy is a terminal emulator built with GPUI and alacritty_terminal.
+EOF
+
+    log "Creating deb package"
+    rm -f "$OUTPUT_PATH"
+    dpkg-deb --build --root-owner-group "$DEB_ROOT" "$OUTPUT_PATH"
+
+    [[ -f "$OUTPUT_PATH" ]] || die "Deb package was not created at $OUTPUT_PATH"
+
+    rm -rf "$DEB_STAGING_ROOT"
+    echo "Done: $OUTPUT_PATH"
+    ;;
+
   *)
-    die "Unknown format: $FORMAT (use tarball or appimage)"
+    die "Unknown format: $FORMAT (use tarball, appimage, or deb)"
     ;;
 esac
