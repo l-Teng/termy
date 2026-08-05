@@ -458,176 +458,140 @@ impl Cell {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PlainHistoryCell(u32);
+const HISTORY_TAG_SPECIAL: u8 = 0x80;
+const HISTORY_TAG_STYLE: u8 = 0x81;
+const HISTORY_TAG_DEFAULT_STYLE: u8 = 0x82;
+const HISTORY_TAG_STATE: u8 = 0x83;
+const HISTORY_TAG_WIDE_SPACER: u8 = 0x84;
+const HISTORY_TAG_INLINE_COMBINING: u8 = 0x85;
 
-impl PlainHistoryCell {
-    const CHARACTER_MASK: u32 = (1 << 21) - 1;
-    const STATE_SHIFT: u32 = 21;
-
-    fn from_cell(cell: Cell) -> Self {
-        Self(cell.character as u32 | (u32::from(cell.state.0) << Self::STATE_SHIFT))
-    }
-
-    fn into_cell(self) -> Cell {
-        Cell {
-            character: char::from_u32(self.0 & Self::CHARACTER_MASK)
-                .expect("packed history stores a valid Unicode scalar"),
-            state: CellState((self.0 >> Self::STATE_SHIFT) as u8),
-            ..DEFAULT_CELL
-        }
-    }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HistoryStyle {
+    foreground: Color,
+    background: Color,
+    attributes: Attributes,
+    underline_color: Option<Color>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct MetadataHistoryCell {
-    character: char,
-    metadata_id: Option<NonZeroU32>,
-    state: CellState,
-}
-
-impl MetadataHistoryCell {
+impl HistoryStyle {
     fn from_cell(cell: Cell) -> Self {
         Self {
-            character: cell.character,
-            metadata_id: cell.metadata_id,
-            state: cell.state,
+            foreground: cell.foreground,
+            background: cell.background,
+            attributes: cell.attributes,
+            underline_color: cell.underline_color,
         }
     }
 
-    fn into_cell(self) -> Cell {
+    fn apply(self, character: char, state: CellState, metadata_id: Option<NonZeroU32>) -> Cell {
         Cell {
-            character: self.character,
-            state: self.state,
-            metadata_id: self.metadata_id,
-            ..DEFAULT_CELL
+            character,
+            foreground: self.foreground,
+            background: self.background,
+            attributes: self.attributes,
+            underline_color: self.underline_color,
+            state,
+            metadata_id,
+        }
+    }
+
+    fn encode(self, output: &mut Vec<u8>) {
+        output.extend_from_slice(&self.attributes.0.to_le_bytes());
+        encode_history_color(Some(self.foreground), output);
+        encode_history_color(Some(self.background), output);
+        encode_history_color(self.underline_color, output);
+    }
+
+    fn decode(input: &[u8], offset: &mut usize) -> Self {
+        let attributes = Attributes(read_history_u16(input, offset));
+        Self {
+            foreground: decode_history_color(input, offset)
+                .expect("history foreground always stores a color"),
+            background: decode_history_color(input, offset)
+                .expect("history background always stores a color"),
+            attributes,
+            underline_color: decode_history_color(input, offset),
         }
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum HistoryCells {
-    Plain(Vec<PlainHistoryCell>),
-    Metadata(Vec<MetadataHistoryCell>),
-    Dense(Vec<Cell>),
-}
-
-impl HistoryCells {
-    fn len(&self) -> usize {
-        match self {
-            Self::Plain(cells) => cells.len(),
-            Self::Metadata(cells) => cells.len(),
-            Self::Dense(cells) => cells.len(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum HistoryEncoding {
-    Plain,
-    Metadata,
-    Dense,
-}
-
-/// A logical scrollback row with default style and exact-default suffixes omitted.
+/// A logical scrollback row encoded as UTF-8 text plus sparse style/state commands.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct HistoryRow {
-    cells: HistoryCells,
+    cells: Vec<u8>,
     width: u16,
+    stored: u16,
     has_pooled_extras: bool,
 }
 
 impl HistoryRow {
-    fn from_dense(mut dense: Vec<Cell>) -> Self {
-        let width = u16::try_from(dense.len()).expect("history rows fit the bounded grid width");
-        let stored_len = Self::stored_len_for(&dense, dense.len());
-        let (encoding, has_pooled_extras) = Self::encoding(&dense[..stored_len]);
-        let cells = match encoding {
-            HistoryEncoding::Plain => {
-                let mut cells = Vec::with_capacity(stored_len);
-                cells.extend(
-                    dense[..stored_len]
-                        .iter()
-                        .copied()
-                        .map(PlainHistoryCell::from_cell),
-                );
-                HistoryCells::Plain(cells)
-            }
-            HistoryEncoding::Metadata => {
-                let mut cells = Vec::with_capacity(stored_len);
-                cells.extend(
-                    dense[..stored_len]
-                        .iter()
-                        .copied()
-                        .map(MetadataHistoryCell::from_cell),
-                );
-                HistoryCells::Metadata(cells)
-            }
-            HistoryEncoding::Dense => {
-                dense.truncate(stored_len);
-                dense.shrink_to_fit();
-                HistoryCells::Dense(dense)
-            }
-        };
-        Self {
-            cells,
-            width,
-            has_pooled_extras,
-        }
+    fn from_dense(dense: Vec<Cell>) -> Self {
+        let width = dense.len();
+        let stored_len = Self::stored_len_for(&dense, width);
+        Self::copy_from_dense(&dense, width, stored_len, None)
     }
 
     fn copy_from_dense(
         dense: &[Cell],
         width: usize,
         stored_len: usize,
-        storage: Option<HistoryCells>,
+        storage: Option<Vec<u8>>,
     ) -> Self {
         let width = u16::try_from(width).expect("history rows fit the bounded grid width");
+        let stored = u16::try_from(stored_len).expect("stored history fits the bounded grid width");
         debug_assert_eq!(stored_len, Self::stored_len_for(dense, usize::from(width)));
-        let (encoding, has_pooled_extras) = Self::encoding(&dense[..stored_len]);
-        let cells = match encoding {
-            HistoryEncoding::Plain => {
-                let storage = match storage {
-                    Some(HistoryCells::Plain(cells)) => Some(cells),
-                    _ => None,
-                };
-                let mut cells = exact_storage(storage, stored_len);
-                cells.extend(
-                    dense[..stored_len]
-                        .iter()
-                        .copied()
-                        .map(PlainHistoryCell::from_cell),
-                );
-                HistoryCells::Plain(cells)
+        let mut cells = storage.unwrap_or_default();
+        cells.clear();
+        let mut has_pooled_extras = false;
+        let dense = &dense[..stored_len];
+        if dense
+            .iter()
+            .all(|cell| HistoryStyle::from_cell(*cell) == HistoryStyle::default())
+        {
+            for cell in dense.iter().copied() {
+                has_pooled_extras |= encode_history_cell(cell, &mut cells);
             }
-            HistoryEncoding::Metadata => {
-                let storage = match storage {
-                    Some(HistoryCells::Metadata(cells)) => Some(cells),
-                    _ => None,
-                };
-                let mut cells = exact_storage(storage, stored_len);
-                cells.extend(
-                    dense[..stored_len]
-                        .iter()
-                        .copied()
-                        .map(MetadataHistoryCell::from_cell),
-                );
-                HistoryCells::Metadata(cells)
+        } else {
+            let mut style = HistoryStyle::default();
+            for cell in dense.iter().copied() {
+                let next_style = HistoryStyle::from_cell(cell);
+                if next_style != style {
+                    if next_style == HistoryStyle::default() {
+                        cells.push(HISTORY_TAG_DEFAULT_STYLE);
+                    } else {
+                        cells.push(HISTORY_TAG_STYLE);
+                        next_style.encode(&mut cells);
+                    }
+                    style = next_style;
+                }
+                has_pooled_extras |= encode_history_cell(cell, &mut cells);
             }
-            HistoryEncoding::Dense => {
-                let storage = match storage {
-                    Some(HistoryCells::Dense(cells)) => Some(cells),
-                    _ => None,
-                };
-                let mut cells = exact_storage(storage, stored_len);
-                cells.extend_from_slice(&dense[..stored_len]);
-                HistoryCells::Dense(cells)
-            }
-        };
+        }
+        if cells.capacity() > cells.len().saturating_mul(2).max(64) {
+            cells.shrink_to_fit();
+        }
         Self {
             cells,
             width,
+            stored,
             has_pooled_extras,
+        }
+    }
+
+    fn from_ascii(bytes: &[u8], width: usize, storage: Option<Vec<u8>>) -> Self {
+        debug_assert!(bytes.iter().all(|byte| (0x20..=0x7e).contains(byte)));
+        debug_assert!(bytes.len() < width);
+        let mut cells = storage.unwrap_or_default();
+        cells.clear();
+        cells.extend_from_slice(bytes);
+        if cells.capacity() > cells.len().saturating_mul(2).max(64) {
+            cells.shrink_to_fit();
+        }
+        Self {
+            cells,
+            width: u16::try_from(width).expect("history rows fit the bounded grid width"),
+            stored: u16::try_from(bytes.len()).expect("ASCII history fits the bounded grid width"),
+            has_pooled_extras: false,
         }
     }
 
@@ -639,28 +603,6 @@ impl HistoryRow {
             .map_or(0, |index| index + 1)
     }
 
-    fn encoding(cells: &[Cell]) -> (HistoryEncoding, bool) {
-        let mut plain = true;
-        let mut dense = false;
-        let mut has_pooled_extras = false;
-        for cell in cells {
-            dense |= cell.foreground != Color::Default
-                || cell.background != Color::Default
-                || cell.attributes != Attributes(0)
-                || cell.underline_color.is_some();
-            plain &= cell.metadata_id.is_none();
-            has_pooled_extras |= cell.metadata_id.is_some_and(is_pooled_extra_id);
-        }
-        let encoding = if dense {
-            HistoryEncoding::Dense
-        } else if plain {
-            HistoryEncoding::Plain
-        } else {
-            HistoryEncoding::Metadata
-        };
-        (encoding, has_pooled_extras)
-    }
-
     fn len(&self) -> usize {
         usize::from(self.width)
     }
@@ -669,36 +611,17 @@ impl HistoryRow {
         if index >= self.len() {
             return None;
         }
-        Some(match &self.cells {
-            HistoryCells::Plain(cells) => cells
-                .get(index)
-                .map_or(DEFAULT_CELL, |cell| cell.into_cell()),
-            HistoryCells::Metadata(cells) => cells
-                .get(index)
-                .map_or(DEFAULT_CELL, |cell| cell.into_cell()),
-            HistoryCells::Dense(cells) => cells.get(index).copied().unwrap_or(DEFAULT_CELL),
-        })
+        if index >= usize::from(self.stored) {
+            return Some(DEFAULT_CELL);
+        }
+        HistoryDecoder::new(&self.cells).nth(index)
     }
 
     fn for_each(&self, mut visitor: impl FnMut(usize, &Cell)) {
-        match &self.cells {
-            HistoryCells::Plain(cells) => {
-                for (index, cell) in cells.iter().copied().enumerate() {
-                    visitor(index, &cell.into_cell());
-                }
-            }
-            HistoryCells::Metadata(cells) => {
-                for (index, cell) in cells.iter().copied().enumerate() {
-                    visitor(index, &cell.into_cell());
-                }
-            }
-            HistoryCells::Dense(cells) => {
-                for (index, cell) in cells.iter().enumerate() {
-                    visitor(index, cell);
-                }
-            }
+        for (index, cell) in HistoryDecoder::new(&self.cells).enumerate() {
+            visitor(index, &cell);
         }
-        for index in self.cells.len()..self.len() {
+        for index in usize::from(self.stored)..self.len() {
             visitor(index, &DEFAULT_CELL);
         }
     }
@@ -709,23 +632,13 @@ impl HistoryRow {
 
     fn append_to(&self, output: &mut Vec<Cell>, limit: usize) {
         let len = self.len().min(limit);
-        let stored = self.cells.len().min(len);
-        match &self.cells {
-            HistoryCells::Plain(cells) => output.extend(
-                cells[..stored]
-                    .iter()
-                    .copied()
-                    .map(PlainHistoryCell::into_cell),
-            ),
-            HistoryCells::Metadata(cells) => output.extend(
-                cells[..stored]
-                    .iter()
-                    .copied()
-                    .map(MetadataHistoryCell::into_cell),
-            ),
-            HistoryCells::Dense(cells) => output.extend_from_slice(&cells[..stored]),
-        }
-        output.resize(output.len().saturating_add(len - stored), DEFAULT_CELL);
+        output.extend(HistoryDecoder::new(&self.cells).take(len));
+        output.resize(
+            output
+                .len()
+                .saturating_add(len - usize::from(self.stored).min(len)),
+            DEFAULT_CELL,
+        );
     }
 
     fn to_dense(&self) -> Vec<Cell> {
@@ -735,30 +648,10 @@ impl HistoryRow {
     }
 
     fn into_dense(self) -> Vec<Cell> {
-        let width = self.len();
-        match self.cells {
-            HistoryCells::Plain(cells) => {
-                let mut dense = vec![DEFAULT_CELL; width];
-                for (target, cell) in dense.iter_mut().zip(cells) {
-                    *target = cell.into_cell();
-                }
-                dense
-            }
-            HistoryCells::Metadata(cells) => {
-                let mut dense = vec![DEFAULT_CELL; width];
-                for (target, cell) in dense.iter_mut().zip(cells) {
-                    *target = cell.into_cell();
-                }
-                dense
-            }
-            HistoryCells::Dense(mut cells) => {
-                cells.resize(width, DEFAULT_CELL);
-                cells
-            }
-        }
+        self.to_dense()
     }
 
-    fn into_storage(self) -> HistoryCells {
+    fn into_storage(self) -> Vec<u8> {
         self.cells
     }
 
@@ -767,68 +660,249 @@ impl HistoryRow {
     }
 
     fn take_leading_wide_spacer(&mut self, index: usize) -> bool {
-        let changed = match &mut self.cells {
-            HistoryCells::Plain(cells) => cells.get_mut(index).is_some_and(|cell| {
-                let changed = cell.into_cell().leading_wide_spacer();
-                cell.0 &=
-                    !(u32::from(CellState::LEADING_WIDE_SPACER) << PlainHistoryCell::STATE_SHIFT);
-                changed
-            }),
-            HistoryCells::Metadata(cells) => cells.get_mut(index).is_some_and(|cell| {
-                let changed = cell.state.contains(CellState::LEADING_WIDE_SPACER);
-                cell.state.set(CellState::LEADING_WIDE_SPACER, false);
-                changed
-            }),
-            HistoryCells::Dense(cells) => cells
-                .get_mut(index)
-                .is_some_and(Cell::take_leading_wide_spacer),
-        };
+        if index >= usize::from(self.stored) {
+            return false;
+        }
+        let mut dense = self.to_dense();
+        let changed = dense[index].take_leading_wide_spacer();
         if changed {
-            match &mut self.cells {
-                HistoryCells::Plain(cells) => {
-                    while cells
-                        .last()
-                        .is_some_and(|cell| cell.into_cell() == DEFAULT_CELL)
-                    {
-                        cells.pop();
-                    }
-                }
-                HistoryCells::Metadata(cells) => {
-                    while cells
-                        .last()
-                        .is_some_and(|cell| cell.into_cell() == DEFAULT_CELL)
-                    {
-                        cells.pop();
-                    }
-                }
-                HistoryCells::Dense(cells) => {
-                    while cells.last() == Some(&DEFAULT_CELL) {
-                        cells.pop();
-                    }
-                }
-            }
+            let width = self.len();
+            let stored_len = Self::stored_len_for(&dense, width);
+            let storage = Some(std::mem::take(&mut self.cells));
+            *self = Self::copy_from_dense(&dense, width, stored_len, storage);
         }
         changed
     }
 }
 
-fn exact_storage<T>(storage: Option<Vec<T>>, len: usize) -> Vec<T> {
-    let mut storage = storage.unwrap_or_default();
-    if storage.capacity() != len {
-        Vec::with_capacity(len)
+#[inline]
+fn encode_history_cell(cell: Cell, output: &mut Vec<u8>) -> bool {
+    if cell.state == CellState::default() && cell.metadata_id.is_none() {
+        encode_history_character(cell.character, output);
+    } else if cell.state == CellState(CellState::WIDE_SPACER)
+        && cell.metadata_id.is_none()
+        && cell.character == ' '
+    {
+        output.push(HISTORY_TAG_WIDE_SPACER);
+    } else if cell.state == CellState(CellState::HAS_COMBINING)
+        && cell
+            .metadata_id
+            .is_some_and(|id| id.get() & METADATA_TAG_MASK == 0)
+    {
+        output.push(HISTORY_TAG_INLINE_COMBINING);
+        encode_history_character(cell.character, output);
+        encode_history_character(
+            inline_combining_character(cell.metadata_id.expect("metadata was checked"))
+                .expect("untagged metadata stores an inline combining character"),
+            output,
+        );
+    } else if cell.metadata_id.is_none() {
+        output.push(HISTORY_TAG_STATE);
+        output.push(cell.state.0);
+        encode_history_character(cell.character, output);
     } else {
-        storage.clear();
-        storage
+        output.push(HISTORY_TAG_SPECIAL);
+        output.push(cell.state.0);
+        encode_history_metadata(
+            cell.metadata_id
+                .expect("special metadata cell carries an ID"),
+            output,
+        );
+        encode_history_character(cell.character, output);
+    }
+    cell.metadata_id.is_some_and(is_pooled_extra_id)
+}
+
+struct HistoryDecoder<'a> {
+    input: &'a [u8],
+    offset: usize,
+    style: HistoryStyle,
+}
+
+impl<'a> HistoryDecoder<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self {
+            input,
+            offset: 0,
+            style: HistoryStyle::default(),
+        }
     }
 }
 
-impl<'a> IntoIterator for &'a HistoryRow {
+impl Iterator for HistoryDecoder<'_> {
     type Item = Cell;
-    type IntoIter = RowCellIter<'a>;
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let byte = *self.input.get(self.offset)?;
+            match byte {
+                HISTORY_TAG_SPECIAL => {
+                    self.offset += 1;
+                    let state = CellState(read_history_u8(self.input, &mut self.offset));
+                    let metadata_id = Some(decode_history_metadata(self.input, &mut self.offset));
+                    let character = decode_history_character(self.input, &mut self.offset);
+                    return Some(self.style.apply(character, state, metadata_id));
+                }
+                HISTORY_TAG_STYLE => {
+                    self.offset += 1;
+                    self.style = HistoryStyle::decode(self.input, &mut self.offset);
+                }
+                HISTORY_TAG_DEFAULT_STYLE => {
+                    self.offset += 1;
+                    self.style = HistoryStyle::default();
+                }
+                HISTORY_TAG_STATE => {
+                    self.offset += 1;
+                    let state = CellState(read_history_u8(self.input, &mut self.offset));
+                    let character = decode_history_character(self.input, &mut self.offset);
+                    return Some(self.style.apply(character, state, None));
+                }
+                HISTORY_TAG_WIDE_SPACER => {
+                    self.offset += 1;
+                    return Some(
+                        self.style
+                            .apply(' ', CellState(CellState::WIDE_SPACER), None),
+                    );
+                }
+                HISTORY_TAG_INLINE_COMBINING => {
+                    self.offset += 1;
+                    let character = decode_history_character(self.input, &mut self.offset);
+                    let combining = decode_history_character(self.input, &mut self.offset);
+                    return Some(self.style.apply(
+                        character,
+                        CellState(CellState::HAS_COMBINING),
+                        Some(inline_combining_metadata_id(combining)),
+                    ));
+                }
+                _ => {
+                    let character = decode_history_character(self.input, &mut self.offset);
+                    return Some(self.style.apply(character, CellState::default(), None));
+                }
+            }
+        }
     }
+}
+
+#[inline]
+fn encode_history_character(character: char, output: &mut Vec<u8>) {
+    if character.is_ascii() {
+        output.push(character as u8);
+        return;
+    }
+    let mut bytes = [0; 4];
+    output.extend_from_slice(character.encode_utf8(&mut bytes).as_bytes());
+}
+
+fn decode_history_character(input: &[u8], offset: &mut usize) -> char {
+    let first = read_history_u8(input, offset);
+    if first.is_ascii() {
+        return char::from(first);
+    }
+    let len = match first {
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => unreachable!("history character starts with valid UTF-8"),
+    };
+    let start = offset.saturating_sub(1);
+    let end = start + len;
+    *offset = end;
+    std::str::from_utf8(
+        input
+            .get(start..end)
+            .expect("history character bytes are complete"),
+    )
+    .expect("history character bytes are valid UTF-8")
+    .chars()
+    .next()
+    .expect("history character is not empty")
+}
+
+fn encode_history_color(color: Option<Color>, output: &mut Vec<u8>) {
+    match color {
+        None => output.push(0),
+        Some(Color::Default) => output.push(1),
+        Some(Color::Indexed(index)) => {
+            output.push(2);
+            output.push(index);
+        }
+        Some(Color::Rgb { r, g, b }) => {
+            output.push(3);
+            output.extend_from_slice(&[r, g, b]);
+        }
+    }
+}
+
+fn decode_history_color(input: &[u8], offset: &mut usize) -> Option<Color> {
+    match read_history_u8(input, offset) {
+        0 => None,
+        1 => Some(Color::Default),
+        2 => Some(Color::Indexed(read_history_u8(input, offset))),
+        3 => Some(Color::Rgb {
+            r: read_history_u8(input, offset),
+            g: read_history_u8(input, offset),
+            b: read_history_u8(input, offset),
+        }),
+        _ => unreachable!("history color tag is valid"),
+    }
+}
+
+fn encode_history_metadata(id: NonZeroU32, output: &mut Vec<u8>) {
+    let raw = id.get();
+    let (tag, value) = match raw & METADATA_TAG_MASK {
+        0 => (0, raw),
+        INLINE_HYPERLINK_TAG => (1, raw & METADATA_VALUE_MASK),
+        POOLED_EXTRA_TAG => (2, raw & METADATA_VALUE_MASK),
+        _ => unreachable!("history metadata uses a known tag"),
+    };
+    output.push(tag);
+    encode_history_varint(value, output);
+}
+
+fn decode_history_metadata(input: &[u8], offset: &mut usize) -> NonZeroU32 {
+    let tag = read_history_u8(input, offset);
+    let value = decode_history_varint(input, offset);
+    let raw = match tag {
+        0 => value,
+        1 => INLINE_HYPERLINK_TAG | value,
+        2 => POOLED_EXTRA_TAG | value,
+        _ => unreachable!("history metadata tag is valid"),
+    };
+    NonZeroU32::new(raw).expect("history metadata IDs are nonzero")
+}
+
+fn encode_history_varint(mut value: u32, output: &mut Vec<u8>) {
+    while value >= 0x80 {
+        output.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
+}
+
+fn decode_history_varint(input: &[u8], offset: &mut usize) -> u32 {
+    let mut value = 0u32;
+    for shift in (0..35).step_by(7) {
+        let byte = read_history_u8(input, offset);
+        value |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+    }
+    unreachable!("history metadata varint fits u32")
+}
+
+fn read_history_u8(input: &[u8], offset: &mut usize) -> u8 {
+    let value = *input.get(*offset).expect("history byte exists");
+    *offset += 1;
+    value
+}
+
+fn read_history_u16(input: &[u8], offset: &mut usize) -> u16 {
+    let bytes = input
+        .get(*offset..*offset + 2)
+        .expect("history u16 bytes exist");
+    *offset += 2;
+    u16::from_le_bytes([bytes[0], bytes[1]])
 }
 
 /// A non-allocating view over either a live dense row or compact history.
@@ -865,10 +939,18 @@ impl<'a> RowView<'a> {
     }
 
     pub(crate) fn iter(self) -> RowCellIter<'a> {
-        RowCellIter {
-            row: self,
-            range: 0..self.len(),
-        }
+        let inner = match self {
+            Self::Dense(cells) => RowCellIterInner::Dense {
+                cells,
+                range: 0..cells.len(),
+            },
+            Self::History(row) => RowCellIterInner::History {
+                row,
+                decoder: HistoryDecoder::new(&row.cells),
+                range: 0..row.len(),
+            },
+        };
+        RowCellIter { inner }
     }
 
     fn append_to(self, output: &mut Vec<Cell>, limit: usize) {
@@ -881,34 +963,65 @@ impl<'a> RowView<'a> {
     pub(crate) fn with_dense<R>(self, f: impl FnOnce(&[Cell]) -> R) -> R {
         match self {
             Self::Dense(cells) => f(cells),
-            Self::History(row) => match &row.cells {
-                HistoryCells::Dense(cells) if cells.len() == row.len() => f(cells),
-                _ => f(&row.to_dense()),
-            },
+            Self::History(row) => f(&row.to_dense()),
         }
     }
 }
 
 pub(crate) struct RowCellIter<'a> {
-    row: RowView<'a>,
-    range: std::ops::Range<usize>,
+    inner: RowCellIterInner<'a>,
+}
+
+enum RowCellIterInner<'a> {
+    Dense {
+        cells: &'a [Cell],
+        range: std::ops::Range<usize>,
+    },
+    History {
+        row: &'a HistoryRow,
+        decoder: HistoryDecoder<'a>,
+        range: std::ops::Range<usize>,
+    },
 }
 
 impl Iterator for RowCellIter<'_> {
     type Item = Cell;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.range.next().and_then(|index| self.row.get(index))
+        match &mut self.inner {
+            RowCellIterInner::Dense { cells, range } => range.next().map(|index| cells[index]),
+            RowCellIterInner::History {
+                row,
+                decoder,
+                range,
+            } => {
+                let index = range.next()?;
+                if index < usize::from(row.stored) {
+                    decoder.next()
+                } else {
+                    Some(DEFAULT_CELL)
+                }
+            }
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.range.size_hint()
+        match &self.inner {
+            RowCellIterInner::Dense { range, .. } | RowCellIterInner::History { range, .. } => {
+                range.size_hint()
+            }
+        }
     }
 }
 
 impl DoubleEndedIterator for RowCellIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.range.next_back().and_then(|index| self.row.get(index))
+        match &mut self.inner {
+            RowCellIterInner::Dense { cells, range } => range.next_back().map(|index| cells[index]),
+            RowCellIterInner::History { row, range, .. } => {
+                range.next_back().and_then(|index| row.get(index))
+            }
+        }
     }
 }
 
@@ -1129,7 +1242,7 @@ pub(crate) enum GridEffect {
     Reset,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Pen {
     foreground: Color,
     background: Color,
@@ -1368,6 +1481,7 @@ pub(crate) struct Grid {
 }
 
 mod edit;
+mod fast_lines;
 mod modes;
 mod screen;
 mod view;
@@ -1376,7 +1490,10 @@ mod view;
 mod test_support;
 
 use screen::Screen;
-use view::{inline_hyperlink_metadata_id, is_pooled_extra_id, viewport_link_from_grid_range};
+use view::{
+    inline_combining_character, inline_combining_metadata_id, inline_hyperlink_metadata_id,
+    is_pooled_extra_id, viewport_link_from_grid_range,
+};
 
 #[cfg(test)]
 #[path = "grid_tests.rs"]

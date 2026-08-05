@@ -7,6 +7,8 @@ use std::{
 
 use tmon_current::{Cell, Color, Combining, Config, Size, Terminal, UnderlineStyle};
 
+mod throughput;
+
 const COLS: u16 = 120;
 const ROWS: u16 = 40;
 const SCROLLBACK_LIMIT: usize = 10_000;
@@ -385,12 +387,13 @@ fn real_main() -> Result<(), String> {
         args.next(),
         args.next(),
     ) {
+        (Some("--throughput"), None, None, None) => throughput::run(),
         (Some("--child"), Some(engine), Some(workload), None) => {
             run_child_mode(Engine::parse(&engine)?, Workload::parse(&workload)?)
         }
         (None, None, None, None) => run_parent_mode(),
         _ => Err(
-            "usage: tmon-ghostty-memory [--child <tmon|ghostty|ghostty-compressed> <workload>]"
+            "usage: tmon-ghostty-memory [--throughput | --child <tmon|ghostty|ghostty-compressed> <workload>]"
                 .to_string(),
         ),
     }

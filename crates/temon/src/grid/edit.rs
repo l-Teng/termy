@@ -488,7 +488,7 @@ impl Grid {
             + self
                 .history
                 .iter()
-                .flatten()
+                .flat_map(HistoryRow::iter)
                 .filter(|cell| cell.metadata_id == Some(id))
                 .count();
         debug_assert_eq!(

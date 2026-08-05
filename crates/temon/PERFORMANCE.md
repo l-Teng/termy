@@ -7,69 +7,64 @@ Linux numbers came from commit `03d7ca5c5420ca141afe56f725341faadb71af18`.
 All before/after percentages below use an additional same-machine macOS
 baseline so host differences are not presented as engine improvements.
 
-## Compact scrollback follow-up
+## Bytecode scrollback and direct Ghostty comparison
 
-The 2026-08-05 follow-up keeps both live screens dense and replaces dense
-scrollback rows with one lossless `HistoryRow` representation. It stores the
-logical width, drops only an exact-default suffix, packs default-style
-character/state cells into four bytes, keeps rare metadata in a compact form,
-and uses a trimmed dense fallback for colored or attributed rows. A logical row
-view serves traversal without allocation; the few mutable history paths decode
-temporarily and re-encode immediately. Live row extents and recycled row
-storage keep compaction out of the parser's critical tail scan and allocation
-paths.
+The 2026-08-05 follow-up keeps both live screens dense and replaces the first
+compact-history format with one lossless bytecode `HistoryRow`. Logical width
+and stored cell count are separate, exact-default suffixes are omitted, and
+ordinary characters remain direct UTF-8. Sparse commands encode style changes,
+cell state, wide spacers, inline combining marks, and rare metadata. Colored
+and attributed rows no longer need a trimmed 24-byte-cell fallback. A logical
+row view decodes without persistent dense storage; the few mutable history
+paths materialize temporarily and re-encode immediately.
+
+A conservative line path handles complete default-style `CRLF` rows only while
+the cursor is at the bottom of the primary full-screen scroll region. It moves
+cold rows directly into compact history and materializes only the final
+viewport. The batched form supports printable ASCII and validated UTF-8 rows
+with wide cells and one inline combining mark per cell; more complex input and
+all other modes fall back to the normal parser/grid path. The byte encoder also
+has dedicated default-style and single-byte ASCII paths.
 
 The physical-memory result below is a local macOS ARM64 run with rustc 1.96.0,
 the pinned Ghostty revision `9e30f70f23418fecbdca1088673000417527c4e4`,
 120x40 cells, a 10,000-row scrollback limit, and ten fresh processes per case.
-It uses the benchmark's unchanged `ri_phys_footprint` measurement before
-semantic traversal.
+It uses `ri_phys_footprint` before semantic traversal. The prior Tmon column is
+the hosted first-format result from run `31012483654`.
 
-| Workload | Hosted Tmon before | Tmon after | After payload | Final reduction | Payload reduction |
+| Workload | Prior Tmon | Bytecode Tmon | Ghostty | Ghostty compressed | Tmon below compressed |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Plain | 31.56 MiB | 4.73 MiB | 2.92 MiB | 85.0% | 90.2% |
-| Styled | 31.56 MiB | 8.53 MiB | 6.72 MiB | 73.0% | 77.4% |
-| Unicode | 31.56 MiB | 7.17 MiB | 5.36 MiB | 77.3% | 82.0% |
-| Mixed | 31.58 MiB | 10.98 MiB | 9.17 MiB | 65.2% | 69.1% |
+| Plain | 4.77 MiB | 2.86 MiB | 11.64 MiB | 3.45 MiB | 17.1% |
+| Styled | 7.70 MiB | 2.84 MiB | 13.25 MiB | 3.88 MiB | 26.8% |
+| Unicode | 6.77 MiB | 2.85 MiB | 12.64 MiB | 3.26 MiB | 12.6% |
+| Mixed | 10.20 MiB | 3.47 MiB | 13.25 MiB | 4.18 MiB | 17.0% |
 
-Tmon's empty median was 1.81 MiB and every screen-only median was also
-1.81 MiB. All ten raw Tmon samples within each scrollback workload were
-identical; the report also records P05/P95, Ghostty's uncompressed and
-compressed results, cursor/history checks, and sampled semantic cells. The
-required under-20-MiB final-footprint and at-least-40% payload-reduction gates
-therefore clear on every workload. Styled and mixed rows deliberately remain
-farther from Ghostty's compressed footprint because this pass preserves a
-simple per-row uncompressed fallback instead of adding speculative style tables
-or cold-page compression.
+Tmon's empty median was 1.81 MiB. Its payload deltas were 1.05, 1.03, 1.04,
+and 1.66 MiB respectively, versus compressed Ghostty's 1.73, 2.16, 1.54, and
+2.46 MiB. Every Tmon screen-only median stayed at 1.81 MiB. The complete
+report records every raw byte sample and P05/P95 range; cursor, history size,
+and sampled semantic cells matched before each result was accepted.
 
-The matching eight-sample local parser/grid run used the existing 32 MiB
-workloads and passed every correctness preflight and throughput target:
+The direct Tmon/Ghostty feed comparison used eight balanced samples, a 2 MiB
+warmup, 32 MiB timed per engine/sample, and identical 64 KiB calls. A fresh
+10,040-row preflight matched bytes, cursor, history size, and semantic digest:
 
-| Workload | Tmon | Alacritty | Median paired ratio | Target |
-| --- | ---: | ---: | ---: | ---: |
-| Plain scrollback | 230.3 MiB/s | 118.3 MiB/s | 1.953x | 1.050x |
-| Styled TUI redraw | 211.0 MiB/s | 142.9 MiB/s | 1.474x | 1.050x |
-| Unicode + wide cells | 131.8 MiB/s | 107.1 MiB/s | 1.201x | 1.000x |
-| Cursor + line edits | 6.9 MiB/s | 5.0 MiB/s | 1.381x | 1.000x |
-
-The same eight-sample command was also run from a detached checkout of the
-pre-change commit `f99e778ebd393ce400df23879bc563720de13191` on this machine.
-This isolates the compact-history throughput change from host differences:
-
-| Workload | Pre-change Tmon | Compact-history Tmon | Change |
+| Workload | Tmon | Ghostty | Median paired ratio |
 | --- | ---: | ---: | ---: |
-| Plain scrollback | 218.7 MiB/s | 230.3 MiB/s | +5.3% |
-| Styled TUI redraw | 197.3 MiB/s | 211.0 MiB/s | +6.9% |
-| Unicode + wide cells | 129.6 MiB/s | 131.8 MiB/s | +1.7% |
-| Cursor + line edits | 5.2 MiB/s | 6.9 MiB/s | +32.7% |
+| Plain scrollback | 1185.9 MiB/s | 910.6 MiB/s | 1.303x |
+| Styled scrollback | 143.8 MiB/s | 96.3 MiB/s | 1.478x |
+| Unicode scrollback | 271.1 MiB/s | 130.0 MiB/s | 2.091x |
+| Mixed scrollback | 134.8 MiB/s | 99.3 MiB/s | 1.357x |
 
-The normalized full-frame ratio was 1.097x, legacy snapshot retention was
-101.8%, and the immutable dual-revision snapshot gate passed with a 5.032x
-median ratio and 4.997x conservative lower bound. Allocation accounting still
-shows about 10,000 retained row allocations while history initially fills, but
-ordinary scrolling rows request only compact payloads and recycle evicted
-storage. These allocator counters are supporting diagnostics; the acceptance
-claim above comes from physical footprint.
+These are integrated feed results, not a raw-parser or feature-parity score.
+Ghostty's compression is an explicit post-feed operation, so it appears in the
+memory comparison rather than its normal feed-throughput path. The GitHub
+workflow runs both measurements and rejects any workload whose median paired
+Tmon/Ghostty throughput ratio is not above `1.000x`.
+
+The repository's existing eight-sample Tmon/Alacritty parser gate also passed
+on the same machine: plain `1.110x`, styled `1.269x`, Unicode `1.051x`, and
+edits `1.327x`. Its exact full-grid preflight passed before timing.
 
 ## Result
 

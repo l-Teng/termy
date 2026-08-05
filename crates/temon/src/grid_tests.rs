@@ -43,6 +43,16 @@ fn compact_history_rows_round_trip_dense_cells() {
         let history = HistoryRow::from_dense(dense.clone());
         assert_eq!(history.len(), dense.len());
         assert_eq!(history.iter().collect::<Vec<_>>(), dense);
+        assert_eq!(
+            history.iter().rev().collect::<Vec<_>>(),
+            dense.iter().copied().rev().collect::<Vec<_>>()
+        );
+        if dense.len() >= 2 {
+            let mut interleaved = history.iter();
+            assert_eq!(interleaved.next(), dense.first().copied());
+            assert_eq!(interleaved.next_back(), dense.last().copied());
+            assert_eq!(interleaved.collect::<Vec<_>>(), dense[1..dense.len() - 1]);
+        }
         assert_eq!(history.into_dense(), dense);
     }
 }
@@ -178,11 +188,9 @@ fn mostly_plain_10k_history_does_not_retain_dense_cell_capacity() {
     let old_dense_payload = COLS * HISTORY_ROWS * std::mem::size_of::<Cell>();
     assert_eq!(stats.rows, HISTORY_ROWS);
     assert_eq!(stats.logical_cells, COLS * HISTORY_ROWS);
-    assert_eq!(stats.plain_capacity, TEXT_CELLS * HISTORY_ROWS);
-    assert_eq!(stats.metadata_capacity, 0);
-    assert_eq!(stats.dense_capacity, 0);
+    assert_eq!(stats.encoded_capacity, TEXT_CELLS * HISTORY_ROWS);
     assert!(
-        stats.retained_bytes * 100 <= old_dense_payload * 60,
+        stats.retained_bytes * 100 <= old_dense_payload * 5,
         "compact rows retained {} bytes versus {old_dense_payload} dense payload bytes",
         stats.retained_bytes
     );

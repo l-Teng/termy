@@ -416,6 +416,18 @@ impl Parser {
             }
 
             if self.state == State::Ground && !self.utf8.is_pending() {
+                if self.single_shift.is_none()
+                    && grid.charset(self.active_charset) == Charset::Ascii
+                {
+                    let (consumed, last_printed) = grid.put_default_text_lines(&bytes[offset..]);
+                    if consumed > 0 {
+                        if let Some(last_printed) = last_printed {
+                            self.last_printed = Some(last_printed);
+                        }
+                        offset += consumed;
+                        continue;
+                    }
+                }
                 let consumed = self.advance_ground_text(grid, &bytes[offset..], &mut output);
                 if consumed > 0 {
                     offset += consumed;

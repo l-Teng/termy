@@ -89,6 +89,46 @@ fn parses_text_cursor_motion_and_sgr() {
 }
 
 #[test]
+fn bulk_plain_lines_match_row_split_parsing_and_repeat_state() {
+    let mut bytes = Vec::new();
+    let mut row_splits = Vec::new();
+    for row in 0..100 {
+        if row == 96 {
+            bytes.extend_from_slice(
+                b"\x1b_Ga=T,f=32,s=1,v=1,i=77,p=3,c=1,r=1,C=1,q=1;/wAA/w==\x1b\\",
+            );
+            row_splits.push(bytes.len());
+        }
+        bytes.extend_from_slice(format!("L{row:03}\r\n").as_bytes());
+        row_splits.push(bytes.len());
+    }
+    bytes.extend_from_slice(b"\x1b[2b");
+
+    let bulk = replay_chunks(&bytes, &[]);
+    let row_split = replay_chunks(&bytes, &row_splits);
+    let mid_row_split = replay_chunks(&bytes, &[257]);
+
+    assert_eq!(bulk, row_split);
+    assert_eq!(bulk, mid_row_split);
+}
+
+#[test]
+fn complete_default_unicode_lines_match_byte_split_parsing() {
+    let mut bytes = Vec::new();
+    for row in 0..20 {
+        bytes.extend_from_slice(
+            format!("U{row:02} cafe\u{301} Ελληνικά 日本語 한글 🙂界\r\n").as_bytes(),
+        );
+    }
+    bytes.extend_from_slice("fallback e\u{301}\u{302}界\r\n\x1b[2b".as_bytes());
+
+    let one_shot = replay_chunks(&bytes, &[]);
+    let every_byte = (1..bytes.len()).collect::<Vec<_>>();
+
+    assert_eq!(one_shot, replay_chunks(&bytes, &every_byte));
+}
+
+#[test]
 fn parses_colon_form_truecolor_palette_and_underline_styles() {
     let (grid, _) = parse(b"\x1b[38:2::12:34:56;48:5:200;4:3mX");
     let cell = grid.line(0).unwrap()[0];

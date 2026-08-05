@@ -1,47 +1,16 @@
 use super::*;
 
-impl HistoryCells {
-    fn retained_bytes(&self) -> usize {
-        match self {
-            Self::Plain(cells) => cells
-                .capacity()
-                .saturating_mul(std::mem::size_of::<PlainHistoryCell>()),
-            Self::Metadata(cells) => cells
-                .capacity()
-                .saturating_mul(std::mem::size_of::<MetadataHistoryCell>()),
-            Self::Dense(cells) => cells.capacity().saturating_mul(std::mem::size_of::<Cell>()),
-        }
-    }
-}
-
 impl HistoryRow {
     pub(super) fn stored_len(&self) -> usize {
-        self.cells.len()
+        usize::from(self.stored)
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
-        self.cells.retained_bytes()
+        self.cells.capacity()
     }
 
-    fn plain_capacity(&self) -> usize {
-        match &self.cells {
-            HistoryCells::Plain(cells) => cells.capacity(),
-            _ => 0,
-        }
-    }
-
-    fn metadata_capacity(&self) -> usize {
-        match &self.cells {
-            HistoryCells::Metadata(cells) => cells.capacity(),
-            _ => 0,
-        }
-    }
-
-    fn dense_capacity(&self) -> usize {
-        match &self.cells {
-            HistoryCells::Dense(cells) => cells.capacity(),
-            _ => 0,
-        }
+    fn encoded_capacity(&self) -> usize {
+        self.cells.capacity()
     }
 }
 
@@ -50,11 +19,10 @@ impl std::ops::Index<usize> for HistoryRow {
 
     fn index(&self, index: usize) -> &Self::Output {
         assert!(index < self.len(), "history cell index is in bounds");
-        match &self.cells {
-            HistoryCells::Dense(cells) => cells.get(index).unwrap_or(&DEFAULT_CELL),
-            HistoryCells::Plain(cells) if index >= cells.len() => &DEFAULT_CELL,
-            HistoryCells::Metadata(cells) if index >= cells.len() => &DEFAULT_CELL,
-            _ => panic!("compact history cells must be read through HistoryRow::get"),
+        if index >= usize::from(self.stored) {
+            &DEFAULT_CELL
+        } else {
+            panic!("compact history cells must be read through HistoryRow::get")
         }
     }
 }
@@ -82,9 +50,7 @@ impl std::ops::Index<usize> for RowView<'_> {
 pub(super) struct HistoryStorageStats {
     pub(super) rows: usize,
     pub(super) logical_cells: usize,
-    pub(super) plain_capacity: usize,
-    pub(super) metadata_capacity: usize,
-    pub(super) dense_capacity: usize,
+    pub(super) encoded_capacity: usize,
     pub(super) retained_bytes: usize,
 }
 
@@ -93,9 +59,7 @@ impl Grid {
         HistoryStorageStats {
             rows: self.history.len(),
             logical_cells: self.history.iter().map(HistoryRow::len).sum(),
-            plain_capacity: self.history.iter().map(HistoryRow::plain_capacity).sum(),
-            metadata_capacity: self.history.iter().map(HistoryRow::metadata_capacity).sum(),
-            dense_capacity: self.history.iter().map(HistoryRow::dense_capacity).sum(),
+            encoded_capacity: self.history.iter().map(HistoryRow::encoded_capacity).sum(),
             retained_bytes: self
                 .history
                 .capacity()

@@ -1,4 +1,4 @@
-name: Tmon vs Ghostty Memory Benchmark
+name: Tmon vs Ghostty Benchmark
 
 on:
   workflow_dispatch:
@@ -7,19 +7,29 @@ on:
         description: "Fresh processes per engine/workload (2-50)"
         required: false
         default: "10"
+      throughput_samples:
+        description: "Balanced feed-throughput samples (4-24, even)"
+        required: false
+        default: "8"
+      throughput_mib:
+        description: "Timed MiB per engine/sample (1-512)"
+        required: false
+        default: "32"
 
 permissions:
   contents: read
 
 jobs:
   benchmark:
-    name: Terminal-state physical memory comparison
+    name: Terminal-state memory and feed throughput
     runs-on: macos-15
     timeout-minutes: 30
     env:
       GHOSTTY_REVISION: 9e30f70f23418fecbdca1088673000417527c4e4
       REPORT_NAME: tmon-ghostty-memory-benchmark.txt
       TMON_GHOSTTY_MEMORY_SAMPLES: ${{ inputs.samples || '10' }}
+      TMON_GHOSTTY_THROUGHPUT_SAMPLES: ${{ inputs.throughput_samples || '8' }}
+      TMON_GHOSTTY_THROUGHPUT_TARGET_MIB: ${{ inputs.throughput_mib || '32' }}
     steps:
       - name: Initialize report
         id: initialize_report
@@ -76,7 +86,7 @@ jobs:
           test -f "$prefix/include/ghostty/vt.h"
           test -f "$prefix/lib/libghostty-vt.a"
 
-      - name: Run fresh-process comparison
+      - name: Run memory and feed-throughput comparisons
         id: comparison
         shell: bash
         env:
@@ -96,6 +106,9 @@ jobs:
             echo
             cargo run --locked --quiet --release \
               --manifest-path tools/tmon-ghostty-memory/Cargo.toml
+            echo
+            cargo run --locked --quiet --release \
+              --manifest-path tools/tmon-ghostty-memory/Cargo.toml -- --throughput
           } 2>&1 | tee -a "$report"
 
       - name: Finalize report
@@ -139,7 +152,7 @@ jobs:
             echo "Benchmark report was not created." > "$report"
           fi
           {
-            echo '## Tmon vs libghostty-vt physical memory'
+            echo '## Tmon vs libghostty-vt memory and feed throughput'
             echo '```text'
             cat "$report"
             echo '```'

@@ -31,7 +31,7 @@ benchmark-tmon:
     } 2>&1 | tee -a "$report"
     exit "$gate_status"
 
-# Compare Tmon and a pinned local libghostty-vt build using fresh macOS processes.
+# Compare Tmon and a pinned local libghostty-vt build for memory and feed throughput.
 benchmark-tmon-ghostty-memory:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -63,6 +63,9 @@ benchmark-tmon-ghostty-memory:
       echo
       GHOSTTY_VT_PREFIX="$prefix" cargo run --locked --quiet --release \
         --manifest-path tools/tmon-ghostty-memory/Cargo.toml
+      echo
+      GHOSTTY_VT_PREFIX="$prefix" cargo run --locked --quiet --release \
+        --manifest-path tools/tmon-ghostty-memory/Cargo.toml -- --throughput
     } 2>&1 | tee "$report"
 
 run-cli *args:

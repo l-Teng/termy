@@ -158,20 +158,28 @@ cells retain their previous single-underline rendering behavior.
 
 Primary and alternate screens remain dense so parsing and rendering keep direct
 cell access. A row is compacted only when it enters primary-screen scrollback:
-its logical width is stored separately, an exact-default suffix is omitted,
-ordinary default-style cells pack their Unicode scalar and state into 32 bits,
-and cells carrying rare metadata use a lossless metadata form. Rows with colors
-or text attributes fall back to trimmed dense cells, preserving every public
-`Cell` field without making the common path pay for it.
+its logical width and stored cell count are kept separately, an exact-default
+suffix is omitted, and ordinary characters are stored directly as UTF-8.
+Sparse bytecode commands carry style transitions, structural cell state, wide
+spacers, inline combining marks, and rare metadata. Colored and attributed
+rows use the same lossless encoding instead of falling back to 24-byte cells.
 
 History reads use a logical row view that supplies default cells for the omitted
 suffix and can visit cells without allocating. Resize and reflow materialize
 dense storage only while rebuilding rows; cross-row wide-spacer repair updates
-the compact encoding in place. Evicted row storage is reused when its encoding
-matches, pooled combining metadata is released with its owning row, and
+the compact encoding immediately. Evicted byte storage is reused, pooled
+combining metadata is released with its owning row, and
 clearing or shrinking history releases unused compact storage. Live row extents
 avoid rescanning known-default tails when scrolling without changing the dense
 live-grid representation.
+
+For complete default-style `CRLF` batches, a guarded parser/grid path moves cold
+rows directly into compact history and rebuilds only the final viewport. It
+handles printable ASCII plus validated UTF-8 rows with wide cells and one
+inline combining mark per cell. It activates only at the bottom of a full
+primary scroll region with default modes and style; partial or more complex
+input, alternate screens, custom charsets, and every ambiguous state keep using
+the normal scalar path.
 
 The ten-sample macOS ARM64 results and tradeoffs are recorded in
 [PERFORMANCE.md](PERFORMANCE.md). The compact uncompressed representation meets
@@ -187,10 +195,11 @@ Run the headless Tmon versus Alacritty parser/grid comparison and write
 just benchmark-tmon
 ```
 
-The separate macOS physical-memory harness compares Tmon with pinned,
-statically linked `libghostty-vt` in fresh processes. Run it locally with a
-Ghostty source checkout, or manually dispatch the **Tmon vs Ghostty Memory
-Benchmark** GitHub Actions workflow:
+The separate macOS harness compares Tmon with pinned, statically linked
+`libghostty-vt`. Its memory mode uses fresh processes and its balanced feed
+mode compares identical 64 KiB input chunks after semantic preflight. Run both
+locally with a Ghostty source checkout, or manually dispatch the **Tmon vs
+Ghostty Benchmark** GitHub Actions workflow:
 
 ```sh
 GHOSTTY_DIR=../ghostty just benchmark-tmon-ghostty-memory
