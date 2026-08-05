@@ -22,9 +22,8 @@ fn visible_text(frame: &TermyFrame) -> String {
 fn clear_keeps_scrollback_hidden_while_resizing() {
     let mut terminal = Terminal::new_display(size(40, 10), None);
     for line in 0..18 {
-        terminal.feed_output(
-            format!("HISTORY-{line:02}-abcdefghijklmnopqrstuvwxyz\r\n").as_bytes(),
-        );
+        terminal
+            .feed_output(format!("HISTORY-{line:02}-abcdefghijklmnopqrstuvwxyz\r\n").as_bytes());
     }
 
     terminal.feed_output(b"\x1b[H\x1b[2J$ ");

@@ -207,11 +207,11 @@ fn open_main_window(
             } else {
                 WindowKind::Normal
             },
-            // The tab strip lives in the titlebar region. A movable NSWindow
-            // lets AppKit auto-drag the window from that whole region, stealing
-            // tab-reorder drags. We drive window moves manually instead (see
-            // maybe_start_titlebar_window_move -> start_window_move).
-            is_movable: false,
+            // Keep the NSWindow movable so macOS preserves normal zoom and
+            // Dock-overlay behavior. The macOS content-view bridge below
+            // disables AppKit-owned titlebar dragging without changing the
+            // window's native management semantics.
+            is_movable: cfg!(target_os = "macos"),
             is_resizable: true,
             window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
             ..Default::default()
