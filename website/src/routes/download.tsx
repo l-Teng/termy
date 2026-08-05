@@ -17,6 +17,7 @@ import {
   formatReleaseDate,
   groupReleaseAssets,
   type GitHubRelease,
+  type GitHubReleaseAsset,
   type PlatformAssetGroup,
 } from '@/lib/github-release';
 
@@ -477,8 +478,51 @@ function AssetPanel({
               );
             })}
           </ul>
+          {group.id === 'linux' && <LinuxInstallHints assets={group.assets} />}
         </section>
       ))}
+    </div>
+  );
+}
+
+function LinuxInstallHints({ assets }: { assets: GitHubReleaseAsset[] }) {
+  const deb = assets.find((asset) => asset.name.toLowerCase().endsWith('.deb'));
+  const rpm = assets.find((asset) => asset.name.toLowerCase().endsWith('.rpm'));
+  if (!deb && !rpm) return null;
+
+  return (
+    <div className="mt-4 flex flex-col gap-3">
+      {deb && (
+        <InstallCommand
+          label="Debian / Ubuntu"
+          command={`sudo apt install ./${deb.name}`}
+        />
+      )}
+      {rpm && (
+        <InstallCommand
+          label="Fedora / RHEL"
+          command={`sudo dnf install ./${rpm.name}`}
+        />
+      )}
+    </div>
+  );
+}
+
+function InstallCommand({ label, command }: { label: string; command: string }) {
+  return (
+    <div>
+      <p
+        className="text-[10px] text-[#565f89]"
+        style={{ fontFamily: marketingMono }}
+      >
+        {label}
+      </p>
+      <pre
+        className="mt-1 overflow-x-auto rounded-xl border border-white/[0.08] bg-[#0d0f17] px-4 py-3 text-xs leading-relaxed text-[#9ece6a]"
+        style={{ fontFamily: marketingMono }}
+      >
+        <code>{command}</code>
+      </pre>
     </div>
   );
 }
