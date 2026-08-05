@@ -12,7 +12,7 @@ Options:
   --version VERSION   Set version (default: read from crates/desktop_app/Cargo.toml)
   --arch ARCH         Set architecture (x86_64 or aarch64)
   --target TARGET     Set target triple (x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu)
-  --format FORMAT     Output format: tarball (default), appimage, or deb
+  --format FORMAT     Output format: tarball (default), appimage, deb, or rpm
   --help, -h          Show this help message
 
 Output:
@@ -21,6 +21,8 @@ Output:
   target/dist/Termy-<version>-linux-<arch>.AppImage
   or
   target/dist/Termy-<version>-linux-<arch>.deb
+  or
+  target/dist/Termy-<version>-linux-<arch>.rpm
 EOF
 }
 
@@ -136,6 +138,9 @@ require_cmd cargo
 if [[ "$FORMAT" == "deb" ]]; then
   require_cmd dpkg-deb
 fi
+if [[ "$FORMAT" == "rpm" ]]; then
+  require_cmd rpmbuild
+fi
 if [[ "$FORMAT" == "appimage" ]]; then
   if [[ "$APPIMAGETOOL_BIN" == */* ]]; then
     [[ -x "$APPIMAGETOOL_BIN" ]] || die "AppImage tool not executable: $APPIMAGETOOL_BIN"
@@ -152,6 +157,45 @@ CLI_BINARY_PATH="$TARGET_RELEASE_DIR/termy-cli"
 [[ -f "$CLI_BINARY_PATH" ]] || die "CLI binary not found at $CLI_BINARY_PATH"
 
 mkdir -p "$DIST_DIR"
+
+# Shared FHS staging for deb/rpm packages: payload in /usr/lib/termy with a
+# /usr/bin/termy launcher, so assets stay a sibling of the real binary,
+# matching the tarball and AppImage layouts.
+stage_linux_package_root() {
+  local root="$1"
+  local desktop_file_source="$REPO_ROOT/scripts/aur/${APP_NAME_LOWER}.desktop"
+  local icon_source="$REPO_ROOT/assets/${APP_NAME_LOWER}_icon.png"
+
+  [[ -f "$desktop_file_source" ]] || die "Desktop file not found at $desktop_file_source"
+  [[ -f "$icon_source" ]] || die "Linux app icon not found at $icon_source"
+
+  mkdir -p \
+    "$root/usr/bin" \
+    "$root/usr/lib/$APP_NAME_LOWER" \
+    "$root/usr/share/applications" \
+    "$root/usr/share/pixmaps"
+
+  cp "$BINARY_PATH" "$root/usr/lib/$APP_NAME_LOWER/termy-bin"
+  cp "$CLI_BINARY_PATH" "$root/usr/lib/$APP_NAME_LOWER/termy-cli"
+  chmod 755 "$root/usr/lib/$APP_NAME_LOWER/termy-bin" "$root/usr/lib/$APP_NAME_LOWER/termy-cli"
+
+  if [[ -d "$REPO_ROOT/assets" ]]; then
+    mkdir -p "$root/usr/lib/$APP_NAME_LOWER/assets"
+    cp -r "$REPO_ROOT/assets/"* "$root/usr/lib/$APP_NAME_LOWER/assets/" 2>/dev/null || true
+  fi
+
+  cat > "$root/usr/bin/$APP_NAME_LOWER" <<LAUNCHER
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec /usr/lib/$APP_NAME_LOWER/termy-bin "\$@"
+LAUNCHER
+  chmod 755 "$root/usr/bin/$APP_NAME_LOWER"
+  ln -s "../lib/$APP_NAME_LOWER/termy-cli" "$root/usr/bin/termy-cli"
+
+  cp "$desktop_file_source" "$root/usr/share/applications/${APP_NAME_LOWER}.desktop"
+  cp "$icon_source" "$root/usr/share/pixmaps/${APP_NAME_LOWER}.png"
+}
 
 case "$FORMAT" in
   tarball)
@@ -287,8 +331,6 @@ APP_RUN
     DEB_ROOT="$DEB_STAGING_ROOT/root"
     DEB_NAME="${APP_NAME}-${VERSION}-${OS_NAME}-${ARCH}.deb"
     OUTPUT_PATH="$DIST_DIR/$DEB_NAME"
-    DESKTOP_FILE_SOURCE="$REPO_ROOT/scripts/aur/${APP_NAME_LOWER}.desktop"
-    ICON_SOURCE="$REPO_ROOT/assets/${APP_NAME_LOWER}_icon.png"
 
     # Debian version strings must start with a digit.
     DEB_VERSION="${VERSION#v}"
@@ -298,39 +340,10 @@ APP_RUN
       *) die "Unsupported deb architecture: $ARCH" ;;
     esac
 
-    [[ -f "$DESKTOP_FILE_SOURCE" ]] || die "Desktop file not found at $DESKTOP_FILE_SOURCE"
-    [[ -f "$ICON_SOURCE" ]] || die "Linux app icon not found at $ICON_SOURCE"
-
     log "Creating deb staging directory"
     rm -rf "$DEB_STAGING_ROOT"
-    mkdir -p \
-      "$DEB_ROOT/DEBIAN" \
-      "$DEB_ROOT/usr/bin" \
-      "$DEB_ROOT/usr/lib/$APP_NAME_LOWER" \
-      "$DEB_ROOT/usr/share/applications" \
-      "$DEB_ROOT/usr/share/pixmaps"
-
-    cp "$BINARY_PATH" "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/termy-bin"
-    cp "$CLI_BINARY_PATH" "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/termy-cli"
-    chmod 755 "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/termy-bin" "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/termy-cli"
-
-    # Keep assets as a sibling to the binary, matching the tarball layout.
-    if [[ -d "$REPO_ROOT/assets" ]]; then
-      mkdir -p "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/assets"
-      cp -r "$REPO_ROOT/assets/"* "$DEB_ROOT/usr/lib/$APP_NAME_LOWER/assets/" 2>/dev/null || true
-    fi
-
-    cat > "$DEB_ROOT/usr/bin/$APP_NAME_LOWER" <<LAUNCHER
-#!/usr/bin/env bash
-set -euo pipefail
-
-exec /usr/lib/$APP_NAME_LOWER/termy-bin "\$@"
-LAUNCHER
-    chmod 755 "$DEB_ROOT/usr/bin/$APP_NAME_LOWER"
-    ln -s "../lib/$APP_NAME_LOWER/termy-cli" "$DEB_ROOT/usr/bin/termy-cli"
-
-    cp "$DESKTOP_FILE_SOURCE" "$DEB_ROOT/usr/share/applications/${APP_NAME_LOWER}.desktop"
-    cp "$ICON_SOURCE" "$DEB_ROOT/usr/share/pixmaps/${APP_NAME_LOWER}.png"
+    mkdir -p "$DEB_ROOT/DEBIAN"
+    stage_linux_package_root "$DEB_ROOT"
 
     INSTALLED_SIZE="$(du -sk "$DEB_ROOT/usr" | cut -f1)"
     cat > "$DEB_ROOT/DEBIAN/control" <<EOF
@@ -357,7 +370,68 @@ EOF
     echo "Done: $OUTPUT_PATH"
     ;;
 
+  rpm)
+    RPM_STAGING_ROOT="$REPO_ROOT/target/linux-rpm-staging"
+    RPM_ROOT="$RPM_STAGING_ROOT/root"
+    RPM_TOPDIR="$RPM_STAGING_ROOT/rpmbuild"
+    RPM_NAME="${APP_NAME}-${VERSION}-${OS_NAME}-${ARCH}.rpm"
+    OUTPUT_PATH="$DIST_DIR/$RPM_NAME"
+
+    # RPM version strings must not contain dashes or a leading 'v'.
+    RPM_VERSION="${VERSION#v}"
+    [[ "$RPM_VERSION" != *-* ]] || die "RPM version must not contain dashes: $RPM_VERSION"
+
+    log "Creating rpm staging directory"
+    rm -rf "$RPM_STAGING_ROOT"
+    mkdir -p "$RPM_TOPDIR"/{BUILD,BUILDROOT,RPMS,SPECS,SOURCES,SRPMS}
+    stage_linux_package_root "$RPM_ROOT"
+
+    # AutoReqProv is disabled because this packages a pre-built binary; letting
+    # rpmbuild derive shared-library requirements would tie the package to the
+    # builder distro's exact soname provides.
+    cat > "$RPM_TOPDIR/SPECS/$APP_NAME_LOWER.spec" <<EOF
+%global __os_install_post %{nil}
+%global debug_package %{nil}
+
+Name: $APP_NAME_LOWER
+Version: $RPM_VERSION
+Release: 1
+Summary: Minimal GPUI-powered terminal
+License: MIT
+URL: https://github.com/lassejlv/termy
+AutoReqProv: no
+
+%description
+Termy is a terminal emulator built with GPUI and alacritty_terminal.
+
+%install
+cp -a "$RPM_ROOT/." "%{buildroot}/"
+
+%files
+/usr/bin/$APP_NAME_LOWER
+/usr/bin/termy-cli
+/usr/lib/$APP_NAME_LOWER
+/usr/share/applications/$APP_NAME_LOWER.desktop
+/usr/share/pixmaps/$APP_NAME_LOWER.png
+EOF
+
+    log "Creating rpm package"
+    rpmbuild -bb \
+      --define "_topdir $RPM_TOPDIR" \
+      --target "$ARCH" \
+      "$RPM_TOPDIR/SPECS/$APP_NAME_LOWER.spec"
+
+    BUILT_RPM="$RPM_TOPDIR/RPMS/$ARCH/$APP_NAME_LOWER-$RPM_VERSION-1.$ARCH.rpm"
+    [[ -f "$BUILT_RPM" ]] || die "RPM was not created at $BUILT_RPM"
+
+    rm -f "$OUTPUT_PATH"
+    cp "$BUILT_RPM" "$OUTPUT_PATH"
+
+    rm -rf "$RPM_STAGING_ROOT"
+    echo "Done: $OUTPUT_PATH"
+    ;;
+
   *)
-    die "Unknown format: $FORMAT (use tarball, appimage, or deb)"
+    die "Unknown format: $FORMAT (use tarball, appimage, deb, or rpm)"
     ;;
 esac

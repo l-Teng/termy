@@ -152,7 +152,8 @@ jobs:
             libssl-dev \
             libzstd-dev \
             libasound2-dev \
-            libvulkan1
+            libvulkan1 \
+            rpm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -184,6 +185,9 @@ jobs:
       - name: Build Linux deb
         run: ./scripts/build-linux.sh --version "$VERSION" --arch "${{ matrix.arch }}" --target "${{ matrix.target }}" --format deb
 
+      - name: Build Linux rpm
+        run: ./scripts/build-linux.sh --version "$VERSION" --arch "${{ matrix.arch }}" --target "${{ matrix.target }}" --format rpm
+
       - name: Upload Linux tarball artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -203,6 +207,13 @@ jobs:
         with:
           name: termy-linux-deb-${{ matrix.arch }}
           path: target/dist/Termy-${{ env.VERSION }}-linux-${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+      - name: Upload Linux rpm artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: termy-linux-rpm-${{ matrix.arch }}
+          path: target/dist/Termy-${{ env.VERSION }}-linux-${{ matrix.arch }}.rpm
           if-no-files-found: error
 
   attach-and-finalize-release:
@@ -227,7 +238,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          find . -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.tar.gz' -o -name '*.AppImage' -o -name '*.deb' \) -print0 \
+          find . -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.tar.gz' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -print0 \
             | sort -z \
             | xargs -0 sha256sum > checksums.txt
 
@@ -241,6 +252,7 @@ jobs:
             dist/*.tar.gz
             dist/*.AppImage
             dist/*.deb
+            dist/*.rpm
             dist/checksums.txt
           fail_on_unmatched_files: true
           overwrite_files: true
