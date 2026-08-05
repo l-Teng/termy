@@ -1,0 +1,13 @@
+[package]
+name = "tmon-ghostty-memory"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+tmon_current = { package = "tmon", path = "../../crates/temon" }
+
+[build-dependencies]
+cc = "1"

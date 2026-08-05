@@ -163,6 +163,15 @@ Run the headless Tmon versus Alacritty parser/grid comparison and write
 just benchmark-tmon
 ```
 
+The separate macOS physical-memory harness compares Tmon with pinned,
+statically linked `libghostty-vt` in fresh processes. Run it locally with a
+Ghostty source checkout, or manually dispatch the **Tmon vs Ghostty Memory
+Benchmark** GitHub Actions workflow:
+
+```sh
+GHOSTTY_DIR=../ghostty just benchmark-tmon-ghostty-memory
+```
+
 The `Tmon vs Alacritty Benchmark` GitHub Actions workflow runs on every push and
 can also be started manually with configurable workload sizes. When the runner
 remains available, the report is uploaded as a 30-day artifact and included in

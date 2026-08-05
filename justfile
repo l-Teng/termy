@@ -31,6 +31,40 @@ benchmark-tmon:
     } 2>&1 | tee -a "$report"
     exit "$gate_status"
 
+# Compare Tmon and a pinned local libghostty-vt build using fresh macOS processes.
+benchmark-tmon-ghostty-memory:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="$PWD"
+    ghostty_dir="$(cd "${GHOSTTY_DIR:?set GHOSTTY_DIR to a Ghostty source checkout}" && pwd)"
+    prefix="${GHOSTTY_VT_PREFIX:-$root/target/ghostty-vt-benchmark}"
+    report="${TMON_GHOSTTY_MEMORY_OUTPUT:-tmon-ghostty-memory-benchmark.txt}"
+    expected_ghostty_revision="9e30f70f23418fecbdca1088673000417527c4e4"
+    ghostty_revision="$(git -C "$ghostty_dir" rev-parse HEAD)"
+    if [[ "$ghostty_revision" != "$expected_ghostty_revision" ]]; then
+      echo "Ghostty checkout must be at $expected_ghostty_revision, got $ghostty_revision" >&2
+      exit 1
+    fi
+    (
+      cd "$ghostty_dir"
+      zig build \
+        -Dapp-runtime=none \
+        -Demit-lib-vt=true \
+        -Demit-xcframework=false \
+        -Doptimize=ReleaseFast \
+        -Dcpu=baseline \
+        --prefix "$prefix"
+    )
+    {
+      rustc --version
+      zig version
+      echo "Termy commit: $(git rev-parse HEAD)"
+      echo "Ghostty commit: $ghostty_revision"
+      echo
+      GHOSTTY_VT_PREFIX="$prefix" cargo run --locked --quiet --release \
+        --manifest-path tools/tmon-ghostty-memory/Cargo.toml
+    } 2>&1 | tee "$report"
+
 run-cli *args:
     cargo run --bin termy-cli --release {{ args }}
 
