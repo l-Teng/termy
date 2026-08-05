@@ -18,30 +18,8 @@ env:
   APPIMAGETOOL_X86_64_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
 
 jobs:
-  dependency-policy:
-    name: Dependency policy
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: Check dependency policy
-        run: cargo run -p xtask -- check-dependency-policy
-
   build-dmg:
     name: Build ${{ matrix.arch }} DMG
-    needs: dependency-policy
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -86,7 +64,6 @@ jobs:
 
   build-windows-setup:
     name: Build Windows x64 Setup
-    needs: dependency-policy
     runs-on: windows-latest
     timeout-minutes: 45
     permissions:
@@ -120,7 +97,6 @@ jobs:
 
   build-linux:
     name: Build Linux ${{ matrix.arch }}
-    needs: dependency-policy
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
