@@ -60,13 +60,11 @@ pub(in crate::terminal_view) fn kitty_graphics_placement_bounds(
     let width = placement
         .display_cols
         .or_else(|| (placement.occupied_cols > 0).then_some(placement.occupied_cols))
-        .map(|cols| cols as f32 * cell_width)
-        .unwrap_or(placement.source_width as f32);
+        .map_or(placement.source_width as f32, |cols| cols as f32 * cell_width);
     let height = placement
         .display_rows
         .or_else(|| (placement.occupied_rows > 0).then_some(placement.occupied_rows))
-        .map(|rows| rows as f32 * cell_height)
-        .unwrap_or(placement.source_height as f32);
+        .map_or(placement.source_height as f32, |rows| rows as f32 * cell_height);
     KittyGraphicsPlacementBounds {
         left: placement.col as f32 * cell_width + placement.x_offset as f32,
         top: placement.viewport_row as f32 * cell_height + placement.y_offset as f32,

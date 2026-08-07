@@ -177,6 +177,7 @@ impl TerminalView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn runtime_startup_from_app_config(
         config: &AppConfig,
         event_wakeup_tx: &Sender<()>,

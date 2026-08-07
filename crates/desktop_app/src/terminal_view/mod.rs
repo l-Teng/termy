@@ -1776,6 +1776,16 @@ impl TerminalView {
         }
     }
 
+    fn native_tree_contains_leaf(node: &NativePaneLayoutNode, target_pane_id: &str) -> bool {
+        match node {
+            NativePaneLayoutNode::Leaf { pane_id } => pane_id == target_pane_id,
+            NativePaneLayoutNode::Split { first, second, .. } => {
+                Self::native_tree_contains_leaf(first, target_pane_id)
+                    || Self::native_tree_contains_leaf(second, target_pane_id)
+            }
+        }
+    }
+
     fn native_axis_group_contains_leaf(
         node: &NativePaneLayoutNode,
         axis: PaneResizeAxis,
@@ -2225,6 +2235,10 @@ impl TerminalView {
         new_pane_id: &str,
         new_first: bool,
     ) -> bool {
+        if Self::native_tree_contains_leaf(node, new_pane_id) {
+            return false;
+        }
+
         match node {
             NativePaneLayoutNode::Leaf { pane_id } if pane_id == target_pane_id => {
                 let existing = NativePaneLayoutNode::Leaf {
@@ -5472,6 +5486,51 @@ mod tests {
             first: Box::new(first),
             second: Box::new(second),
         }
+    }
+
+    fn native_test_leaf_ids(node: &NativePaneLayoutNode, pane_ids: &mut Vec<String>) {
+        match node {
+            NativePaneLayoutNode::Leaf { pane_id } => pane_ids.push(pane_id.clone()),
+            NativePaneLayoutNode::Split { first, second, .. } => {
+                native_test_leaf_ids(first, pane_ids);
+                native_test_leaf_ids(second, pane_ids);
+            }
+        }
+    }
+
+    #[test]
+    fn native_split_layout_tree_preserves_unique_live_pane_ids() {
+        // This is the state produced when the first split inserts pane "b"
+        // before ensure_native_layout_tree_for_tab_id infers the layout tree.
+        let mut root = native_test_split(
+            PaneResizeAxis::Horizontal,
+            0.5,
+            native_test_leaf("a"),
+            native_test_leaf("b"),
+        );
+
+        // native_split_active_pane then applies the split operation to that
+        // already-split tree.
+        let _ = TerminalView::native_replace_leaf_with_split(
+            &mut root,
+            "a",
+            PaneResizeAxis::Horizontal,
+            "b",
+        );
+        let _ = TerminalView::native_balance_split_group_containing_leaf(
+            &mut root,
+            PaneResizeAxis::Horizontal,
+            "b",
+        );
+
+        let mut pane_ids = Vec::new();
+        native_test_leaf_ids(&root, &mut pane_ids);
+        let unique_pane_ids = pane_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+
+        assert_eq!(pane_ids.len(), 2, "one layout leaf per live pane");
+        assert_eq!(unique_pane_ids.len(), 2, "layout pane ids must be unique");
+        assert!(unique_pane_ids.contains("a"));
+        assert!(unique_pane_ids.contains("b"));
     }
 
     fn native_test_rects(

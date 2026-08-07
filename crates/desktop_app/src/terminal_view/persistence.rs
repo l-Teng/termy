@@ -977,8 +977,7 @@ impl TerminalView {
             .and_then(|tab| tab.manual_title.as_deref())
             .map(str::trim)
             .filter(|title| !title.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("Workspace {id}"));
+            .map_or_else(|| format!("Workspace {id}"), str::to_string);
         workspaces::WorkspaceEntry {
             id,
             name: if stored_name.is_empty() {

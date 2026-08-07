@@ -200,7 +200,7 @@ fn drop_position(this: &Object, dragging_info: id) -> Point<Pixels> {
     let window_position: NSPoint = unsafe { msg_send![dragging_info, draggingLocation] };
     let local_position: NSPoint =
         unsafe { msg_send![this, convertPoint: window_position fromView: nil] };
-    let bounds = unsafe { NSView::bounds(this as *const Object as id) };
+    let bounds = unsafe { NSView::bounds(std::ptr::from_ref::<Object>(this) as id) };
 
     appkit_coordinates_to_gpui(local_position.x, local_position.y, bounds.size.height)
 }

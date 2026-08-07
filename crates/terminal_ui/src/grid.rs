@@ -133,19 +133,20 @@ impl IntoElement for TerminalGrid {
 // as quads. Terminal QR renderers (e.g. Expo SDK 55 `toqr`) use this range; most
 // monospace fonts omit these codepoints and text shaping shows placeholders instead.
 //
-// NOTE: We also render Unicode box-drawing characters (U+2500..U+257F) as
-// pixel-snapped quads instead of shaped font glyphs.
+// NOTE: We also render most Unicode box-drawing characters (U+2500..U+257F) as
+// pixel-snapped geometry instead of shaped font glyphs.
 //
 // Why:
 // - Font glyphs are sized to the font's natural cell height, not the terminal's
 //   cell height. When line_height > 1.0, this leaves visible gaps between rows.
 // - Even at line_height = 1.0, built-in rendering gives crisper and more
 //   consistent results across fonts, for the same reasons as block elements.
-// - This matches Ghostty's unconditional sprite-rendering policy.
+// - This mirrors Ghostty's sprite-rendering approach for straight box lines.
 //
-// Rounded corners (U+256D-U+2570) and diagonals (U+2571-U+2573) are handled as
-// explicit stroked paths so they can render true curves/diagonals while still
-// matching the built-in box-drawing stroke width.
+// Exceptions that do not use this geometry:
+// - Rounded corners (U+256D-U+2570) render with the selected terminal font.
+// - Diagonals (U+2571-U+2573) remain explicit stroked paths so adjacent cells
+//   join without gaps.
 const BOX_DRAWING_START: u32 = 0x2500;
 const BOX_DRAWING_END: u32 = 0x257F;
 const BLOCK_ELEMENTS_START: u32 = 0x2580;
@@ -390,20 +391,6 @@ struct SextantDraw {
     fg: Hsla,
 }
 
-/// Deferred paint operation for a rounded-corner box-drawing glyph (U+256D-U+2570).
-///
-/// Unlike `BlockDraw`, these are painted as stroked cubic Bézier paths rather
-/// than axis-aligned quads, so the glyph codepoint is stored and resolved to a
-/// path at paint time.
-#[derive(Clone, Copy)]
-struct RoundedCornerDraw {
-    #[allow(dead_code)]
-    row: usize,
-    col: usize,
-    glyph: char,
-    fg: Hsla,
-}
-
 /// Deferred paint operation for a diagonal box-drawing glyph (U+2571-U+2573).
 ///
 /// Diagonals are painted as stroked straight lines with slope-dependent
@@ -422,7 +409,6 @@ enum TextDrawOp {
     Batch(TextBatch),
     Block(BlockDraw),
     Sextant(SextantDraw),
-    RoundedCorner(RoundedCornerDraw),
     Diagonal(DiagonalDraw),
 }
 
@@ -785,8 +771,8 @@ const fn box_segments(
 
 /// Looks up the four-arm style descriptor for a box-drawing codepoint.
 ///
-/// Returns `None` for rounded corners (U+256D-U+2570), diagonals
-/// (U+2571-U+2573), and anything outside U+2500..U+257F.
+/// Returns `None` for rounded corners (U+256D-U+2570, font-rendered), diagonals
+/// (U+2571-U+2573, path-rendered), and anything outside U+2500..U+257F.
 #[allow(clippy::too_many_lines)]
 fn box_draw_segments(c: char) -> Option<BoxDrawSegments> {
     use BoxLineStyle::{Double, Heavy, Light, None as Empty};
@@ -1253,7 +1239,8 @@ fn box_draw_geometry(
 /// Convenience wrapper: looks up `box_draw_segments` and, if the codepoint is a
 /// rectangular connector, converts the descriptor into cell-relative geometry.
 ///
-/// Returns `None` for rounded corners, diagonals, and non-box-drawing characters.
+/// Returns `None` for rounded corners (font-rendered), diagonals (path-rendered),
+/// and non-box-drawing characters.
 fn box_draw_geometry_for_char(
     c: char,
     cell_width: f32,
@@ -1390,29 +1377,8 @@ fn paint_sextant_mosaic(window: &mut Window, cell_bounds: Bounds<Pixels>, packed
     }
 }
 
-fn rounded_corner_char(c: char) -> bool {
-    matches!(c, '\u{256D}' | '\u{256E}' | '\u{256F}' | '\u{2570}')
-}
-
 fn diagonal_char(c: char) -> bool {
     matches!(c, '\u{2571}' | '\u{2572}' | '\u{2573}')
-}
-
-/// Resolved path geometry for a rounded-corner box-drawing glyph.
-///
-/// The path is: `start` → straight to `curve_start` → cubic Bézier
-/// (`control_a`, `control_b`) → `curve_end` → straight to `end`. This gives
-/// a short stub on each cell edge that aligns with adjacent straight box lines,
-/// connected by a quarter-circle arc in the cell interior.
-#[derive(Clone, Copy, Debug)]
-struct RoundedCornerPathSpec {
-    start: gpui::Point<Pixels>,
-    curve_start: gpui::Point<Pixels>,
-    control_a: gpui::Point<Pixels>,
-    control_b: gpui::Point<Pixels>,
-    curve_end: gpui::Point<Pixels>,
-    end: gpui::Point<Pixels>,
-    stroke_width: Pixels,
 }
 
 /// Resolved path geometry for a diagonal box-drawing glyph.
@@ -1425,107 +1391,6 @@ struct DiagonalPathSpec {
     start: gpui::Point<Pixels>,
     end: gpui::Point<Pixels>,
     stroke_width: Pixels,
-}
-
-/// Computes the midpoint of a stroke that is pixel-snapped to integer boundaries.
-///
-/// Rounds both edges of the stroke independently, then returns their average.
-/// This prevents sub-pixel shimmer on odd-width strokes across HiDPI scales.
-fn snapped_stroke_center(origin: Pixels, size: Pixels, stroke_width: Pixels) -> Pixels {
-    let origin_px: f32 = origin.into();
-    let size_px: f32 = size.into();
-    let stroke_px: f32 = stroke_width.into();
-    let center_px = origin_px + size_px / 2.0;
-    let min_px = (center_px - stroke_px / 2.0).round();
-    let max_px = (center_px + stroke_px / 2.0).round();
-    px((min_px + max_px) / 2.0)
-}
-
-// Rounded box-drawing corners use short straight stubs plus a cubic arc so
-// they meet adjacent edge-aligned box lines without visible seams.
-fn rounded_corner_path_spec(
-    cell_bounds: Bounds<Pixels>,
-    glyph: char,
-    stroke_width: Pixels,
-) -> Option<RoundedCornerPathSpec> {
-    let cell_bounds = snapped_quad_bounds(cell_bounds)?;
-    let origin = cell_bounds.origin;
-    let width = cell_bounds.size.width;
-    let height = cell_bounds.size.height;
-    let width_px: f32 = width.into();
-    let height_px: f32 = height.into();
-    let stroke_px: f32 = stroke_width.into();
-    let radius = px(((width_px.min(height_px) - stroke_px).max(0.0)) / 2.0);
-    let ctrl_offset = radius / 4.0;
-    let center_x = snapped_stroke_center(origin.x, width, stroke_width);
-    let center_y = snapped_stroke_center(origin.y, height, stroke_width);
-    let left_center = point(origin.x, center_y);
-    let right_center = point(origin.x + width, center_y);
-    let top_center = point(center_x, origin.y);
-    let bottom_center = point(center_x, origin.y + height);
-
-    match glyph {
-        '\u{256D}' => Some(RoundedCornerPathSpec {
-            start: bottom_center,
-            curve_start: point(center_x, center_y + radius),
-            control_a: point(center_x, center_y + ctrl_offset),
-            control_b: point(center_x + ctrl_offset, center_y),
-            curve_end: point(center_x + radius, center_y),
-            end: right_center,
-            stroke_width,
-        }),
-        '\u{256E}' => Some(RoundedCornerPathSpec {
-            start: bottom_center,
-            curve_start: point(center_x, center_y + radius),
-            control_a: point(center_x, center_y + ctrl_offset),
-            control_b: point(center_x - ctrl_offset, center_y),
-            curve_end: point(center_x - radius, center_y),
-            end: left_center,
-            stroke_width,
-        }),
-        '\u{256F}' => Some(RoundedCornerPathSpec {
-            start: top_center,
-            curve_start: point(center_x, center_y - radius),
-            control_a: point(center_x, center_y - ctrl_offset),
-            control_b: point(center_x - ctrl_offset, center_y),
-            curve_end: point(center_x - radius, center_y),
-            end: left_center,
-            stroke_width,
-        }),
-        '\u{2570}' => Some(RoundedCornerPathSpec {
-            start: top_center,
-            curve_start: point(center_x, center_y - radius),
-            control_a: point(center_x, center_y - ctrl_offset),
-            control_b: point(center_x + ctrl_offset, center_y),
-            curve_end: point(center_x + radius, center_y),
-            end: right_center,
-            stroke_width,
-        }),
-        _ => None,
-    }
-}
-
-fn paint_rounded_corner_path(
-    window: &mut Window,
-    cell_bounds: Bounds<Pixels>,
-    glyph: char,
-    color: Hsla,
-    font_size: Pixels,
-) {
-    let stroke_width = px((Into::<f32>::into(font_size) * 0.0675).ceil().max(1.0));
-    let Some(spec) = rounded_corner_path_spec(cell_bounds, glyph, stroke_width) else {
-        return;
-    };
-
-    let mut builder = PathBuilder::stroke(spec.stroke_width);
-    builder.move_to(spec.start);
-    builder.line_to(spec.curve_start);
-    builder.cubic_bezier_to(spec.curve_end, spec.control_a, spec.control_b);
-    builder.line_to(spec.end);
-
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, color);
-    }
 }
 
 fn diagonal_path_specs(
@@ -1748,13 +1613,6 @@ fn block_draws_match_without_row(lhs: &BlockDraw, rhs: &BlockDraw) -> bool {
     lhs.col == rhs.col && lhs.geometry == rhs.geometry && lhs.fg == rhs.fg
 }
 
-fn rounded_corner_draws_match_without_row(
-    lhs: &RoundedCornerDraw,
-    rhs: &RoundedCornerDraw,
-) -> bool {
-    lhs.col == rhs.col && lhs.glyph == rhs.glyph && lhs.fg == rhs.fg
-}
-
 fn diagonal_draws_match_without_row(lhs: &DiagonalDraw, rhs: &DiagonalDraw) -> bool {
     lhs.col == rhs.col && lhs.glyph == rhs.glyph && lhs.fg == rhs.fg
 }
@@ -1776,7 +1634,6 @@ fn draw_op_col_range(op: &TextDrawOp) -> (usize, usize) {
         }
         TextDrawOp::Block(block) => (block.col, block.col),
         TextDrawOp::Sextant(sextant) => (sextant.col, sextant.col),
-        TextDrawOp::RoundedCorner(corner) => (corner.col, corner.col),
         TextDrawOp::Diagonal(diagonal) => (diagonal.col, diagonal.col),
     }
 }
@@ -1799,9 +1656,6 @@ fn text_draw_ops_match_without_row(lhs: &TextDrawOp, rhs: &TextDrawOp) -> bool {
         (TextDrawOp::Block(lhs), TextDrawOp::Block(rhs)) => block_draws_match_without_row(lhs, rhs),
         (TextDrawOp::Sextant(lhs), TextDrawOp::Sextant(rhs)) => {
             sextant_draws_match_without_row(lhs, rhs)
-        }
-        (TextDrawOp::RoundedCorner(lhs), TextDrawOp::RoundedCorner(rhs)) => {
-            rounded_corner_draws_match_without_row(lhs, rhs)
         }
         (TextDrawOp::Diagonal(lhs), TextDrawOp::Diagonal(rhs)) => {
             diagonal_draws_match_without_row(lhs, rhs)
@@ -2060,17 +1914,6 @@ impl TerminalGrid {
             }
 
             let fg = self.cell_fg_color(row, cell, cursor_fg, highlight_fg);
-            if cell.combining.is_none() && rounded_corner_char(cell.char) {
-                Self::push_pending_text_batch(&mut current, ops);
-                ops.push(TextDrawOp::RoundedCorner(RoundedCornerDraw {
-                    row,
-                    col: cell.col,
-                    glyph: cell.char,
-                    fg,
-                }));
-                continue;
-            }
-
             if cell.combining.is_none() && diagonal_char(cell.char) {
                 Self::push_pending_text_batch(&mut current, ops);
                 ops.push(TextDrawOp::Diagonal(DiagonalDraw {
@@ -2350,20 +2193,6 @@ impl TerminalGrid {
                         size: self.cell_size,
                     };
                     paint_sextant_mosaic(window, cell_bounds, sextant.packed, sextant.fg);
-                }
-                TextDrawOp::RoundedCorner(corner) => {
-                    let x = origin.x + self.cell_size.width * corner.col as f32;
-                    let cell_bounds = Bounds {
-                        origin: point(x, origin.y),
-                        size: self.cell_size,
-                    };
-                    paint_rounded_corner_path(
-                        window,
-                        cell_bounds,
-                        corner.glyph,
-                        corner.fg,
-                        self.font_size,
-                    );
                 }
                 TextDrawOp::Diagonal(diagonal) => {
                     let x = origin.x + self.cell_size.width * diagonal.col as f32;
@@ -2908,7 +2737,6 @@ mod tests {
             .filter_map(|op| match op {
                 TextDrawOp::Batch(batch) => Some(batch),
                 TextDrawOp::Block(_) | TextDrawOp::Sextant(_) => None,
-                TextDrawOp::RoundedCorner(_) => None,
                 TextDrawOp::Diagonal(_) => None,
             })
             .collect()
@@ -2941,7 +2769,7 @@ mod tests {
         for codepoint in BOX_DRAWING_START..=BOX_DRAWING_END {
             let glyph = char::from_u32(codepoint).expect("valid box-drawing codepoint");
             assert!(
-                rounded_corner_char(glyph)
+                matches!(glyph, '\u{256D}'..='\u{2570}')
                     || diagonal_char(glyph)
                     || box_draw_geometry_for_char(glyph, 10.0, 20.0, 14.0).is_some(),
                 "unexpected box-drawing coverage for U+{codepoint:04X}"
@@ -3192,58 +3020,6 @@ mod tests {
                 .iter()
                 .all(|rect| rect.left == 0.0 && rect.right == 1.0)
         );
-    }
-
-    #[test]
-    fn rounded_top_left_corner_uses_ghostty_style_cubic_path() {
-        let bounds = Bounds {
-            origin: point(px(0.0), px(0.0)),
-            size: Size {
-                width: px(10.0),
-                height: px(20.0),
-            },
-        };
-        let spec =
-            rounded_corner_path_spec(bounds, '\u{256D}', px(1.0)).expect("expected path points");
-
-        assert_f32_eq(spec.start.x.into(), 5.5);
-        assert_f32_eq(spec.start.y.into(), 20.0);
-        assert_f32_eq(spec.curve_start.x.into(), 5.5);
-        assert_f32_eq(spec.curve_start.y.into(), 15.0);
-        assert_f32_eq(spec.control_a.x.into(), 5.5);
-        assert_f32_eq(spec.control_a.y.into(), 11.625);
-        assert_f32_eq(spec.control_b.x.into(), 6.625);
-        assert_f32_eq(spec.control_b.y.into(), 10.5);
-        assert_f32_eq(spec.curve_end.x.into(), 10.0);
-        assert_f32_eq(spec.curve_end.y.into(), 10.5);
-        assert_f32_eq(spec.end.x.into(), 10.0);
-        assert_f32_eq(spec.end.y.into(), 10.5);
-    }
-
-    #[test]
-    fn rounded_bottom_right_corner_uses_ghostty_style_cubic_path() {
-        let bounds = Bounds {
-            origin: point(px(0.0), px(0.0)),
-            size: Size {
-                width: px(20.0),
-                height: px(10.0),
-            },
-        };
-        let spec =
-            rounded_corner_path_spec(bounds, '\u{256F}', px(1.0)).expect("expected path points");
-
-        assert_f32_eq(spec.start.x.into(), 10.5);
-        assert_f32_eq(spec.start.y.into(), 0.0);
-        assert_f32_eq(spec.curve_start.x.into(), 10.5);
-        assert_f32_eq(spec.curve_start.y.into(), 1.0);
-        assert_f32_eq(spec.control_a.x.into(), 10.5);
-        assert_f32_eq(spec.control_a.y.into(), 4.375);
-        assert_f32_eq(spec.control_b.x.into(), 9.375);
-        assert_f32_eq(spec.control_b.y.into(), 5.5);
-        assert_f32_eq(spec.curve_end.x.into(), 6.0);
-        assert_f32_eq(spec.curve_end.y.into(), 5.5);
-        assert_f32_eq(spec.end.x.into(), 0.0);
-        assert_f32_eq(spec.end.y.into(), 5.5);
     }
 
     #[test]
@@ -3704,22 +3480,10 @@ mod tests {
     }
 
     #[test]
-    fn draw_ops_emit_rounded_corner_variant() {
-        let grid = test_grid(
-            vec![
-                test_cell(0, 'a'),
-                test_cell(1, '\u{256D}'),
-                test_cell(2, 'b'),
-            ],
-            None,
-        );
+    fn draw_ops_shape_rounded_corner_with_terminal_font() {
+        let grid = test_grid(vec![test_cell(0, '\u{256D}')], None);
         let ops = collect_draw_ops(&grid);
-        assert_eq!(ops.len(), 3);
-        assert!(matches!(&ops[0], TextDrawOp::Batch(batch) if batch.text == "a"));
-        assert!(
-            matches!(&ops[1], TextDrawOp::RoundedCorner(corner) if corner.col == 1 && corner.glyph == '\u{256D}')
-        );
-        assert!(matches!(&ops[2], TextDrawOp::Batch(batch) if batch.text == "b"));
+        assert!(matches!(&ops[..], [TextDrawOp::Batch(batch)] if batch.text == "\u{256D}"));
     }
 
     #[test]
@@ -3829,19 +3593,13 @@ mod tests {
         assert_eq!(ops.len(), 2);
         let text_fg = match &ops[0] {
             TextDrawOp::Batch(batch) => batch.fg,
-            TextDrawOp::Block(_)
-            | TextDrawOp::Sextant(_)
-            | TextDrawOp::RoundedCorner(_)
-            | TextDrawOp::Diagonal(_) => {
+            TextDrawOp::Block(_) | TextDrawOp::Sextant(_) | TextDrawOp::Diagonal(_) => {
                 panic!("expected text batch")
             }
         };
         let block_fg = match &ops[1] {
             TextDrawOp::Block(block) => block.fg,
-            TextDrawOp::Batch(_)
-            | TextDrawOp::Sextant(_)
-            | TextDrawOp::RoundedCorner(_)
-            | TextDrawOp::Diagonal(_) => {
+            TextDrawOp::Batch(_) | TextDrawOp::Sextant(_) | TextDrawOp::Diagonal(_) => {
                 panic!("expected block draw")
             }
         };
@@ -3857,10 +3615,7 @@ mod tests {
         let ops = collect_draw_ops(&grid);
         let block_fg = match &ops[0] {
             TextDrawOp::Block(block) => block.fg,
-            TextDrawOp::Batch(_)
-            | TextDrawOp::Sextant(_)
-            | TextDrawOp::RoundedCorner(_)
-            | TextDrawOp::Diagonal(_) => {
+            TextDrawOp::Batch(_) | TextDrawOp::Sextant(_) | TextDrawOp::Diagonal(_) => {
                 panic!("expected block draw")
             }
         };
