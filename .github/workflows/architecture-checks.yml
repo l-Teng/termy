@@ -41,6 +41,9 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      - name: Install boundary check dependencies
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Run boundary checks
         run: ./scripts/check-boundaries.sh
 
