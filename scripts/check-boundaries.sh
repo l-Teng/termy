@@ -131,10 +131,6 @@ while IFS= read -r manifest; do
   require_crate_readme_metadata "$crate_dir"
 done < <(find crates -mindepth 2 -maxdepth 2 -name Cargo.toml | sort)
 
-forbid_pattern 'macos/scripts|macos/dist' \
-  ".github/workflows/release.yml" \
-  "release workflow must use the current scripts/ packaging paths and Termy artifact names"
-
 require_pattern './scripts/build-dmg\.sh' \
   ".github/workflows/release.yml" \
   "release workflow must call scripts/build-dmg.sh"

@@ -15,10 +15,10 @@ scrollback, input protocols, shell integration, search, links, configuration,
 events, and damage-scoped frames while leaving the actual UI and GPU renderer to
 your application.
 
-The same engine powers Termy's desktop surfaces, and the native macOS Swift app
-uses the C ABI as its terminal backend. You can build another terminal app,
-embed a terminal inside a native tool, render terminal output in a custom UI, or
-feed output into a display-only terminal without creating a child process.
+The same engine powers Termy's desktop surfaces. You can build another terminal
+app, embed a terminal inside a native tool, render terminal output in a custom
+UI, or feed output into a display-only terminal without creating a child
+process.
 
 ## Choose an API
 
@@ -259,7 +259,3 @@ cargo test -p termy_core
 cargo test -p termy_ffi
 cargo build --release -p termy_ffi
 ```
-
-The native macOS implementation in
-[`macos/Sources/TermySwift/Services/LibTermyTerminal.swift`](https://github.com/lassejlv/termy/blob/main/macos/Sources/TermySwift/Services/LibTermyTerminal.swift)
-is the most complete Swift integration reference.

@@ -8,9 +8,8 @@ use termy_config_core::{
 
 mod benchmark;
 mod dependency_policy;
-mod macos;
 
-const XTASK_USAGE: &str = "usage: cargo run -p xtask -- <macos|generate-keybindings-doc|generate-config-doc|check-dependency-policy|benchmark-driver|benchmark-compare|benchmark-gate> [options]";
+const XTASK_USAGE: &str = "usage: cargo run -p xtask -- <generate-keybindings-doc|generate-config-doc|check-dependency-policy|benchmark-driver|benchmark-compare|benchmark-gate> [options]";
 
 fn main() {
     if let Err(error) = run() {
@@ -30,10 +29,6 @@ fn run() -> Result<()> {
         "benchmark-driver" | "benchmark-compare" | "benchmark-gate"
     ) {
         return benchmark::run(std::iter::once(command).chain(args));
-    }
-
-    if command == "macos" {
-        return macos::run(args);
     }
 
     if command == "check-dependency-policy" {

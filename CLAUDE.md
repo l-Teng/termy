@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Termy is a terminal emulator built with GPUI (Zed's UI framework) and `alacritty_terminal`. It is a Rust workspace plus a public-beta native macOS SwiftUI host (`macos/`) and a website (`website/`).
+Termy is a terminal emulator built with GPUI (Zed's UI framework) and `alacritty_terminal`. It is a Rust workspace plus a website (`website/`).
 
 ## Commands
 
@@ -25,8 +25,6 @@ Use the smallest validation pass that proves a change: `cargo check -p termy` fo
 
 tmux integration tests (require tmux ≥ 3.3, ignored by default): `just test-tmux-integration`.
 
-macOS Swift host: `just run-macos` (builds `crates/ffi` first, then SwiftPM app at `macos/dist/Termy.app`), `just test-macos-config` (Swift config/schema parity tests), `just test-macos-stress`, `just check-macos-launch`, `just check-macos-release`.
-
 Website (`website/`): bun + Vite + TanStack Start + fumadocs. `bun run dev`, `bun run build`, `bun run lint` (oxlint), `bun run types:check`.
 
 ## Generated files — do not edit by hand
@@ -43,7 +41,6 @@ Product surfaces:
 - `crates/desktop_app/` (`termy`): the GPUI desktop app — windows, chrome, settings, menus, command execution. The only crate that owns complete user-facing desktop workflows. `src/terminal_view/` owns the GPUI terminal experience (rendering, tabs, panes, command palette, search UI, input handling).
 - `crates/cli/` (`termy_cli`): `termy-cli` companion.
 - `crates/ffi/` (`termy_ffi`): C-compatible libtermy surface; must wrap `termy_core`, not copy desktop app behavior. Header at `crates/ffi/include/termy.h`.
-- `macos/`: public-beta native SwiftUI host consuming libtermy via FFI. Swift tests live in `macos/Tests/TermySwiftTests/`; config schema parity between Rust and Swift is tested (`SettingsSchemaParityTests`).
 
 Runtime and UI:
 - `crates/core/` (`termy_core`): headless terminal runtime/API for embedders. **Must stay free of GPUI and app UI code.**
@@ -58,7 +55,7 @@ Each crate has a local `README.md` with `Owner`, `Validation`, and `Forbidden De
 
 ## Cross-cutting change recipes
 
-Config key changes: update schema in `crates/config_core`, keep parsing/defaults/rendering in sync, regenerate config docs. The macOS Swift host mirrors the schema (`macos/Sources/TermySwift/Models/SettingsSchema.swift`) — run `just test-macos-config` for parity.
+Config key changes: update schema in `crates/config_core`, keep parsing/defaults/rendering in sync, and regenerate config docs.
 
 Command/keybind changes: update the catalog in `crates/command_core`, wire the action through `crates/desktop_app/src/`, regenerate keybinding docs if defaults or public names changed.
 

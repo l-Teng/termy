@@ -4,8 +4,8 @@ on:
   pull_request:
     paths:
       - "crates/**"
-      - "macos/**"
       - "assets/**"
+      - "scripts/check-performance-gates.sh"
       - ".github/workflows/macos-performance.yml"
   workflow_dispatch:
     inputs:
@@ -38,8 +38,8 @@ jobs:
           - idle-burst
           - echo-train
           - steady-scroll
-          # Full-screen TUI rendering stays covered by the deterministic native
-          # gate; Instruments hangs while finalizing this trace on hosted runners.
+          # Instruments hangs while finalizing full-screen TUI traces on hosted
+          # runners, so keep that scenario out of this workflow.
     env:
       DURATION_SECS: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_secs || '13' }}
     steps:
@@ -80,7 +80,7 @@ jobs:
 
       - name: Check performance gates
         run: |
-          "$GITHUB_WORKSPACE/candidate/macos/scripts/check-performance-gates.sh" \
+          "$GITHUB_WORKSPACE/candidate/scripts/check-performance-gates.sh" \
             --summary "$GITHUB_WORKSPACE/benchmark-output-${{ matrix.scenario }}/summary.json" \
             --max-idle-wakeup-delta 500 \
             --min-displayed-frames 0
@@ -97,98 +97,3 @@ jobs:
             benchmark-output-${{ matrix.scenario }}/raw/**/*-target.log
             benchmark-output-${{ matrix.scenario }}/raw/**/app/summary.json
           if-no-files-found: ignore
-
-  native-performance:
-    name: Native performance and GPUI comparison
-    runs-on: macos-26
-    timeout-minutes: 60
-    env:
-      DURATION_SECS: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_secs || '13' }}
-    steps:
-      - name: Checkout baseline
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          path: baseline
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.baseline_ref || github.event.repository.default_branch }}
-
-      - name: Checkout candidate
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          path: candidate
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-
-      - name: Select Xcode with Swift 6.2
-        run: |
-          xcode_app="$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)"
-          sudo xcode-select -s "${xcode_app}/Contents/Developer"
-          swift --version
-          xcrun xctrace version
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: |
-            baseline -> target
-            candidate -> target
-
-      - name: Build native release candidate
-        working-directory: candidate
-        run: ./macos/scripts/build-dmg.sh --arch arm64 --no-layout
-
-      - name: Run deterministic render gates and regression fixtures
-        working-directory: candidate
-        env:
-          TERMY_RENDER_REPORT_PATH: ${{ github.workspace }}/native-render-report.json
-          # Measure the optimized release candidate built above, not a fresh debug build.
-          TERMY_RENDER_BENCHMARK_BINARY: ${{ github.workspace }}/candidate/macos/.build/dmg-arm64/Termy.app/Contents/MacOS/Termy
-        run: ./macos/scripts/check-render-perf-regressions.sh
-
-      - name: Measure launch, idle CPU, and pane memory
-        working-directory: candidate
-        run: |
-          ./macos/scripts/check-launch-gate.sh \
-            --app macos/.build/dmg-arm64/Termy.app \
-            --output "$GITHUB_WORKSPACE/native-launch-report.json"
-
-      - name: Run windowed native versus GPUI comparison
-        working-directory: candidate
-        run: |
-          cargo run -p xtask --release -- benchmark-compare \
-            --baseline-root "$GITHUB_WORKSPACE/baseline" \
-            --candidate "native:$GITHUB_WORKSPACE/candidate/macos/.build/dmg-arm64/Termy.app" \
-            --output "$GITHUB_WORKSPACE/native-benchmark-output" \
-            --duration-secs "$DURATION_SECS" \
-            --scenario steady-scroll \
-            --skip-animation-trace
-
-      - name: Check calibrated native comparison gates
-        run: |
-          # Hosted macOS exports schema-only Animation Hitches tables, so the
-          # deterministic native gate above remains the strict frame budget.
-          "$GITHUB_WORKSPACE/candidate/macos/scripts/check-performance-gates.sh" \
-            --summary "$GITHUB_WORKSPACE/native-benchmark-output/summary.json" \
-            --max-cpu-delta-percent 20 \
-            --max-memory-delta-mib 90 \
-            --max-idle-wakeup-delta 500 \
-            --min-displayed-frames 0
-
-      - name: Upload native performance reports
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: macos-native-performance-report
-          path: |
-            native-render-report.json
-            native-launch-report.json
-            native-benchmark-output/report.md
-            native-benchmark-output/summary.json
-            native-benchmark-output/raw/**/driver/*.ndjson
-            native-benchmark-output/raw/**/*-target.log
-            native-benchmark-output/raw/**/app/summary.json
-          if-no-files-found: ignore
-          retention-days: 30

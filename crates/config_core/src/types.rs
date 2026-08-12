@@ -190,27 +190,6 @@ impl TabBarPosition {
     }
 }
 
-/// Where the native macOS host presents tabs: AppKit's tab bar or Termy's
-/// sidebar list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NativeTabPlacement {
-    #[default]
-    NativeTabbar,
-    Sidebar,
-}
-
-impl NativeTabPlacement {
-    pub(crate) fn from_str(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "native_tabbar" | "native-tabbar" | "native" | "tabbar" | "tab_bar" => {
-                Some(Self::NativeTabbar)
-            }
-            "sidebar" | "side_bar" | "left_sidebar" | "left-sidebar" => Some(Self::Sidebar),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabTitleConfig {
     pub mode: TabTitleMode,
@@ -369,7 +348,6 @@ pub struct AppConfig {
     pub tab_close_visibility: TabCloseVisibility,
     pub tab_width_mode: TabWidthMode,
     pub tab_bar_position: TabBarPosition,
-    pub native_tab_placement: NativeTabPlacement,
     pub tab_switch_modifier_hints: bool,
     pub auto_hide_tabbar: bool,
     pub sidebar_enabled: bool,
@@ -470,7 +448,6 @@ impl Default for AppConfig {
             tab_close_visibility: TabCloseVisibility::default(),
             tab_width_mode: TabWidthMode::default(),
             tab_bar_position: TabBarPosition::default(),
-            native_tab_placement: NativeTabPlacement::default(),
             tab_switch_modifier_hints: DEFAULT_TAB_SWITCH_MODIFIER_HINTS,
             auto_hide_tabbar: true,
             sidebar_enabled: false,

@@ -61,10 +61,10 @@ Start with [Customize Termy](https://termy.sh/docs/customize) or use the complet
 
 ## Architecture
 
-Termy is more than a window around a PTY. Its terminal emulation is powered by [Alacritty's terminal engine](https://github.com/alacritty/alacritty), wrapped in Termy's reusable runtime. The repository also contains a GPUI desktop application, CLI, native FFI, Swift/macOS host, website, and release tooling.
+Termy is more than a window around a PTY. Its terminal emulation is powered by [Alacritty's terminal engine](https://github.com/alacritty/alacritty), wrapped in Termy's reusable runtime. The repository also contains a GPUI desktop application, CLI, native FFI, website, and release tooling.
 
 ```text
-desktop / native hosts
+desktop / embedding hosts
         │
         ├── terminal UI and platform integration
         │

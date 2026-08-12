@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { createServerFn } from '@tanstack/react-start';
 import { TriangleAlert } from 'lucide-react';
-import { useRef, useState, type ReactNode } from 'react';
+import { useRef, useState } from 'react';
 import {
   MarketingPageShell,
   marketingFontLinks,
@@ -12,7 +12,6 @@ import {
   assetArch,
   assetLabel,
   fetchLatestGitHubRelease,
-  fetchLatestNativeMacosRelease,
   formatBytes,
   formatReleaseDate,
   groupReleaseAssets,
@@ -21,99 +20,40 @@ import {
   type PlatformAssetGroup,
 } from '@/lib/github-release';
 
-type DownloadChannel = 'desktop' | 'native';
-type DownloadEdition = 'desktop' | 'native-macos';
-
-type DownloadSearch = {
-  edition?: DownloadEdition;
-};
-
-function channelFromEdition(edition: DownloadEdition | undefined): DownloadChannel {
-  return edition === 'native-macos' ? 'native' : 'desktop';
-}
-
-function editionFromChannel(channel: DownloadChannel): DownloadEdition {
-  return channel === 'native' ? 'native-macos' : 'desktop';
-}
-
 const loadDownloadReleases = createServerFn({ method: 'GET' }).handler(
   async () => {
-    const [desktop, native] = await Promise.allSettled([
-      fetchLatestGitHubRelease(),
-      fetchLatestNativeMacosRelease(),
-    ]);
-
-    return {
-      desktop:
-        desktop.status === 'fulfilled'
-          ? {
-              release: desktop.value,
-              error: null as string | null,
-            }
-          : {
-              release: null as GitHubRelease | null,
-              error:
-                desktop.reason instanceof Error
-                  ? desktop.reason.message
-                  : 'Failed to load latest release',
-            },
-      native:
-        native.status === 'fulfilled'
-          ? {
-              release: native.value,
-              error: null as string | null,
-            }
-          : {
-              release: null as GitHubRelease | null,
-              error:
-                native.reason instanceof Error
-                  ? native.reason.message
-                  : 'Failed to load native beta release',
-            },
-    };
+    try {
+      return {
+        release: await fetchLatestGitHubRelease(),
+        error: null as string | null,
+      };
+    } catch (error) {
+      return {
+        release: null as GitHubRelease | null,
+        error:
+          error instanceof Error ? error.message : 'Failed to load latest release',
+      };
+    }
   },
 );
 
 export const Route = createFileRoute('/download')({
   head: () => ({ links: marketingFontLinks }),
-  validateSearch: (search: Record<string, unknown>): DownloadSearch => {
-    if (search.edition === 'native-macos' || search.edition === 'desktop') {
-      return { edition: search.edition };
-    }
-    return {};
-  },
   component: DownloadPage,
   loader: () => loadDownloadReleases(),
 });
 
 function DownloadPage() {
-  const { desktop, native } = Route.useLoaderData();
-  const { edition } = Route.useSearch();
-  const navigate = Route.useNavigate();
-  const channel = channelFromEdition(edition);
-  const showChannelTabs = edition !== undefined;
+  const { release, error } = Route.useLoaderData();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [pendingDownload, setPendingDownload] = useState<{
     name: string;
     url: string;
   } | null>(null);
 
-  const setChannel = (next: DownloadChannel) => {
-    void navigate({
-      search: (prev) => ({ ...prev, edition: editionFromChannel(next) }),
-      replace: true,
-    });
-  };
-
-  const active = channel === 'desktop' ? desktop : native;
-  const release = active.release;
-  const error = active.error;
   const groups = release ? groupReleaseAssets(release.assets) : [];
   const githubUrl =
-    release?.htmlUrl ??
-    (channel === 'native'
-      ? 'https://github.com/lassejlv/termy/releases?q=macos-native'
-      : 'https://github.com/lassejlv/termy/releases');
+    release?.htmlUrl ?? 'https://github.com/lassejlv/termy/releases';
 
   const warnBeforeMacDownload = (name: string, url: string) => {
     setPendingDownload({ name, url });
@@ -136,38 +76,6 @@ function DownloadPage() {
           Download
         </h1>
 
-        {showChannelTabs && (
-          <div
-            className="mt-8 inline-flex w-fit items-center rounded-full border border-white/[0.08] bg-[#14141c]/70 p-1 backdrop-blur-md"
-            role="tablist"
-            aria-label="Download channel"
-          >
-            <ChannelTab
-              id="desktop"
-              active={channel === 'desktop'}
-              onSelect={setChannel}
-            >
-              Desktop
-            </ChannelTab>
-            <ChannelTab
-              id="native"
-              active={channel === 'native'}
-              onSelect={setChannel}
-              badge="beta"
-            >
-              Native macOS
-            </ChannelTab>
-          </div>
-        )}
-
-        {channel === 'native' && (
-          <p className="mt-5 max-w-2xl text-sm leading-relaxed text-[#787c99]">
-            Public beta of the SwiftUI macOS host, published separately from the
-            desktop app. Unsigned builds for Apple silicon and Intel — clear
-            quarantine after installing.
-          </p>
-        )}
-
         {release && (
           <p
             className="mt-5 text-sm text-[#787c99]"
@@ -177,26 +85,14 @@ function DownloadPage() {
             {' · '}
             {formatReleaseDate(release.publishedAt)}
             {' · '}
-            {channel === 'desktop' ? (
-              <Link to="/releases" className={marketingLinkClass}>
-                release notes
-              </Link>
-            ) : (
-              <a
-                href={release.htmlUrl}
-                target="_blank"
-                rel="noreferrer"
-                className={marketingLinkClass}
-              >
-                release notes ↗
-              </a>
-            )}
+            <Link to="/releases" className={marketingLinkClass}>
+              release notes
+            </Link>
           </p>
         )}
 
         <div className="mt-12">
           <AssetPanel
-            channel={channel}
             error={error}
             release={release}
             groups={groups}
@@ -220,7 +116,7 @@ function DownloadPage() {
           >
             GitHub ↗
           </a>
-          {channel === 'desktop' && release && (
+          {release && (
             <a href={release.tarballUrl} className="hover:text-white">
               source tarball ↓
             </a>
@@ -270,9 +166,7 @@ function DownloadPage() {
               style={{ fontFamily: marketingMono }}
             >
               <code>
-                {channel === 'native'
-                  ? 'xattr -dr com.apple.quarantine /Applications/Termy.app'
-                  : 'sudo xattr -d com.apple.quarantine /Applications/Termy.app'}
+                sudo xattr -d com.apple.quarantine /Applications/Termy.app
               </code>
             </pre>
 
@@ -317,56 +211,13 @@ function DownloadPage() {
   );
 }
 
-function ChannelTab({
-  id,
-  active,
-  onSelect,
-  badge,
-  children,
-}: {
-  id: DownloadChannel;
-  active: boolean;
-  onSelect: (id: DownloadChannel) => void;
-  badge?: string;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      id={`download-tab-${id}`}
-      aria-selected={active}
-      onClick={() => onSelect(id)}
-      className={`rounded-full px-4 py-2 text-sm transition-colors active:scale-[0.97] ${
-        active
-          ? 'bg-[#24283b] text-[#e8eeff] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]'
-          : 'text-[#787c99] hover:text-[#c0caf5]'
-      }`}
-      style={{ fontFamily: marketingMono }}
-    >
-      {children}
-      {badge && (
-        <span
-          className={`ml-2 text-[10px] uppercase tracking-wide ${
-            active ? 'text-[#7aa2f7]' : 'text-[#565f89]'
-          }`}
-        >
-          {badge}
-        </span>
-      )}
-    </button>
-  );
-}
-
 function AssetPanel({
-  channel,
   error,
   release,
   groups,
   githubUrl,
   onMacDownload,
 }: {
-  channel: DownloadChannel;
   error: string | null;
   release: GitHubRelease | null;
   groups: PlatformAssetGroup[];
@@ -378,11 +229,7 @@ function AssetPanel({
       <p className="py-8 font-mono text-sm text-fd-muted-foreground">
         <span className="text-fd-error">error:</span> could not reach GitHub.{' '}
         <a
-          href={
-            channel === 'native'
-              ? 'https://github.com/lassejlv/termy/releases?q=macos-native'
-              : 'https://github.com/lassejlv/termy/releases/latest'
-          }
+          href="https://github.com/lassejlv/termy/releases/latest"
           target="_blank"
           rel="noreferrer"
           className={marketingLinkClass}
@@ -396,9 +243,7 @@ function AssetPanel({
   if (!release) {
     return (
       <p className="py-8 font-mono text-sm text-fd-muted-foreground">
-        {channel === 'native'
-          ? 'No native macOS beta release yet.'
-          : 'No release published yet.'}{' '}
+        No release published yet.{' '}
         <a
           href={githubUrl}
           target="_blank"

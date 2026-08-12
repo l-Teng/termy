@@ -24,9 +24,6 @@ Defend these; don’t reopen them casually.
 - CLI companion, website docs, AUR + AppImage
 - Crate boundaries, CI tests/fmt, `just validate`
 
-Native macOS (Swift) is a strong preview — production cutover lives in [macos/road.md](macos/road.md).
-
-
 ## Path to v1.0
 
 ### Trust
@@ -71,4 +68,3 @@ Pipeline trust (E0) is landed. Ongoing work — file budgets, `terminal_view` de
 
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Project layout](docs/architecture/project-layout.md)
-- [Native macOS production](macos/road.md)

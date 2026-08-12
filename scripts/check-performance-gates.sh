@@ -2,31 +2,28 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MACOS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$MACOS_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SUMMARY=""
 RUN_COMPARE=0
-RUN_NATIVE=0
 BASELINE_ROOT=""
 CANDIDATE_ROOT="$REPO_ROOT"
-OUTPUT_ROOT="$REPO_ROOT/target/macos-performance-gate"
+OUTPUT_ROOT="$REPO_ROOT/target/performance-gate"
 DURATION_SECS=5
 GATE_ARGS=()
 
 usage() {
   cat <<EOF
-Usage: $0 (--summary PATH | --run-compare [options] | --native-render-metrics) [gate options]
+Usage: $0 (--summary PATH | --run-compare [options]) [gate options]
 
 Validate Termy benchmark output against soft regression gates.
 
 Input options:
   --summary PATH          Existing benchmark-compare summary.json
   --run-compare           Run benchmark-compare before gating
-  --native-render-metrics Run the native Swift render metrics gate and live terminal workload
   --baseline-root PATH    Baseline Termy repo root for --run-compare
   --candidate-root PATH   Candidate Termy repo root for --run-compare (default: repo root)
-  --output PATH           Output directory for --run-compare (default: target/macos-performance-gate)
+  --output PATH           Output directory for --run-compare (default: target/performance-gate)
   --duration-secs SECS    Scenario duration for --run-compare (default: 5)
 
 Gate options are forwarded to:
@@ -53,10 +50,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --run-compare)
       RUN_COMPARE=1
-      shift
-      ;;
-    --native-render-metrics)
-      RUN_NATIVE=1
       shift
       ;;
     --baseline-root)
@@ -96,17 +89,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$RUN_NATIVE" -eq 1 ]]; then
-  echo "==> Building libtermy FFI for native render metrics gate"
-  (cd "$REPO_ROOT" && cargo build -p termy_ffi)
-  echo "==> Checking native render metrics gate"
-  (
-    cd "$REPO_ROOT"
-    TERMY_FFI_LIBRARY_PATH="$REPO_ROOT/target/debug" \
-      swift test --package-path macos --filter NativeRenderMetricsGateTests
-  )
-fi
-
 if [[ "$RUN_COMPARE" -eq 1 ]]; then
   [[ -n "$BASELINE_ROOT" ]] || {
     echo "Error: --run-compare requires --baseline-root" >&2
@@ -122,10 +104,6 @@ if [[ "$RUN_COMPARE" -eq 1 ]]; then
       --duration-secs "$DURATION_SECS"
   )
   SUMMARY="$OUTPUT_ROOT/summary.json"
-fi
-
-if [[ "$RUN_NATIVE" -eq 1 && "$RUN_COMPARE" -eq 0 && -z "$SUMMARY" ]]; then
-  exit 0
 fi
 
 [[ -n "$SUMMARY" ]] || {

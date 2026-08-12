@@ -71,7 +71,6 @@
 | E2.1 | Tmux CI reliability | macOS job: `brew install tmux`; fail if &lt; 3.3; always run `just test-tmux-integration` | G7: job fails if tests fail, not skip silently | G7 | Done |
 | E2.2 | Test pyramid doc | `docs/engineering/testing.md`: unit → integration → manual | Linked from CONTRIBUTING | — | Done |
 | E2.3 | FFI contract tests | Minimal C API round-trips in `crates/ffi` tests | Run on Linux + macOS in CI | — | Partial |
-| E2.4 | Swift config parity | Extend `test-macos-config` in PR checklist when touching config | Required path in `macos-native.yml` | G8 | Planned |
 | E2.5 | Ignore audit | Every `#[ignore]` has issue URL; quarterly cleanup | ≤10 ignored tests repo-wide | — | Partial |
 | E2.6 | Stress harness | Scripted tab storm + scrollback (product Phase 4) | Documented scenario; optional CI nightly | — | Planned |
 
@@ -97,8 +96,8 @@
 
 | ID | Initiative | Work | Exit criterion | Status |
 |----|------------|------|----------------|--------|
-| E4.1 | ADRs | `docs/architecture/adr/` for GPUI pin, dual host, tmux model | Template + 3 ADRs | Planned |
-| E4.2 | CODEOWNERS | `terminal_view/`, `config_core/`, `ffi/`, `macos/` | Auto-review requests | Planned |
+| E4.1 | ADRs | `docs/architecture/adr/` for GPUI pin, FFI boundary, tmux model | Template + 3 ADRs | Planned |
+| E4.2 | CODEOWNERS | `terminal_view/`, `config_core/`, `ffi/` | Auto-review requests | Planned |
 | E4.3 | Crate onboarding | Each crate README: owner, test command, forbidden deps | 100% workspace members | Done |
 | E4.4 | Issue taxonomy | Labels: `area/*`, `risk/*`, `quality-gate` | Used in roadmap reviews | Planned |
 
@@ -111,7 +110,6 @@
 | Desktop app | `just test` → `cargo test -p termy --release` |
 | Workspace | `just test-workspace` → `cargo test --workspace --release` |
 | Tmux integration | `just test-tmux-integration` |
-| macOS Swift | `just test-macos-config` |
 | Full local gate | `just validate` |
 
 ---

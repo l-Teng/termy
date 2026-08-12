@@ -9,7 +9,6 @@ Where tests live and which command to run for a given change.
 | **Unit** | Pure logic, parsers, catalogs | `config_core`, `command_core`, `search`, `core`, inline `#[test]` | `cargo test -p <crate>` |
 | **Integration** | Tmux client, grid, FFI | `terminal_ui/tests/`, `ffi` | `cargo test -p termy_terminal_ui` |
 | **App** | GPUI terminal view, settings, commands | `desktop_app` | `just test` |
-| **Platform** | macOS Swift config matrix | `macos/` | `just test-macos-config` |
 | **Manual** | Visual chrome, GPU paint | — | Run app; see [development.md](../development.md) render metrics |
 
 ## Ignored tests

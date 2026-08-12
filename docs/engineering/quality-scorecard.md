@@ -19,13 +19,12 @@ Baseline audit: **2026-06-01** (app version **0.3.0**).
 | G5 | Local CI parity | `just validate` matches PR CI | Met | 2026-06-01 | `justfile` |
 | G6 | Max file size | No `.rs` file &gt; 1,500 lines; no new files &gt; 800 without ADR | Partial | 2026-06-13 | `scripts/check-file-sizes.sh` (10-file allowlist; shrink over time) |
 | G7 | Tmux integration | CI installs tmux ≥ 3.3; ignored tests run on macOS | Met | 2026-06-01 | `architecture-checks.yml` (fail if tmux &lt; 3.3) |
-| G8 | macOS native parity | Swift config matrix + FFI build on path changes | Met | 2026-06-01 | `macos-native.yml` |
 | G9 | Perf regression | Benchmark gates on macOS perf workflow | Partial | 2026-06-01 | `macos-performance.yml` |
 | G10 | Crash visibility | Panic writes crash log; user-visible startup failure | Partial | 2026-06-13 | Runtime panic hook + startup alert; watch `main` before Met |
 | G11 | Contributor docs | `CLAUDE.md` + `CONTRIBUTING.md` match `crates/desktop_app` layout | Partial | 2026-06-13 | Manual review + `scripts/check-boundaries.sh` README metadata |
 | G12 | PR definition of done | Template checklist mirrors CI | Met | 2026-06-01 | `.github/PULL_REQUEST_TEMPLATE.md` |
 
-**Current score:** 9/12 met · **M0 (pipeline trust)** reached with merge of #317 · **Target for v1.0:** 10/12 met
+**Current score:** 7/11 met · **M0 (pipeline trust)** reached with merge of #317 · **Target for v1.0:** 9/11 met
 
 ---
 

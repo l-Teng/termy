@@ -74,6 +74,10 @@ function mapGitHubRelease(data: GitHubReleaseResponse): GitHubRelease {
   };
 }
 
+function isDesktopReleaseTag(tag: string): boolean {
+  return /^v\d/.test(tag);
+}
+
 export interface PlatformAssetGroup {
   id: 'macos' | 'linux' | 'windows';
   title: string;
@@ -132,20 +136,6 @@ export function groupReleaseAssets(
   }
 
   return groups.filter((group) => group.assets.length > 0);
-}
-
-export const NATIVE_MACOS_TAG_PREFIX = 'macos-native-v';
-
-export function isNativeMacosReleaseTag(tag: string): boolean {
-  return tag.startsWith(NATIVE_MACOS_TAG_PREFIX);
-}
-
-/** Newest `macos-native-v*` prerelease, or null when none exist. */
-export async function fetchLatestNativeMacosRelease(): Promise<GitHubRelease | null> {
-  const releases = await fetchGitHubReleases();
-  return (
-    releases.find((release) => isNativeMacosReleaseTag(release.tagName)) ?? null
-  );
 }
 
 export function assetArch(name: string): string | null {
@@ -245,7 +235,9 @@ export async function fetchGitHubReleases(): Promise<GitHubRelease[]> {
       throw new Error(`GitHub API ${res.status}: ${await res.text()}`);
     }
     const data = (await res.json()) as GitHubReleaseResponse[];
-    return data.map(mapGitHubRelease);
+    return data
+      .filter((release) => isDesktopReleaseTag(release.tag_name))
+      .map(mapGitHubRelease);
   })().catch((error) => {
     releasesRequest = undefined;
     throw error;
@@ -256,6 +248,8 @@ export async function fetchGitHubReleases(): Promise<GitHubRelease[]> {
 export async function fetchGitHubReleaseByTag(
   tag: string,
 ): Promise<GitHubRelease | null> {
+  if (!isDesktopReleaseTag(tag)) return null;
+
   // TanStack's prerenderer crawls the entire release archive concurrently. Reuse
   // the list response (which already contains complete bodies and assets) so a
   // production build consumes one GitHub request instead of one per release.

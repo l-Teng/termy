@@ -265,11 +265,6 @@ Platform note: the Agent Sidebar/Workspace is currently unavailable on Windows b
 - Where the tab bar is rendered: top strip or right sidebar
 - Group: `TAB STRIP`
 
-`native_tab_placement`
-- Default: `native_tabbar`
-- Show macOS tabs in the native tab bar or Termy's sidebar
-- Group: `NATIVE TABS`
-
 `tab_switch_modifier_hints`
 - Default: `true`
 - Show secondary+1..9 number badges on the first nine tabs while the secondary modifier is held

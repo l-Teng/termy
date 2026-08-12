@@ -287,7 +287,6 @@ typedef struct {
   uint32_t tab_close_visibility;
   uint32_t tab_width_mode;
   uint32_t tab_bar_position;
-  uint32_t native_tab_placement;
   bool tab_switch_modifier_hints;
   bool chrome_contrast;
   bool command_palette_show_keybinds;
