@@ -2,6 +2,14 @@ name: Tmon vs Alacritty Benchmark
 
 on:
   push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/core/**"
+      - "crates/temon/**"
+      - "tools/tmon-revision-gate/**"
+      - ".github/workflows/tmon-benchmark.yml"
   workflow_dispatch:
     inputs:
       target_mib:

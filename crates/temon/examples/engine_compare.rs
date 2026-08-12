@@ -865,9 +865,7 @@ fn run_profile_mode(target_bytes: usize) -> bool {
         .iter()
         .find(|workload| workload.id == workload_id)
         .unwrap_or_else(|| {
-            panic!(
-                "TMON_PROFILE_WORKLOAD must be plain, styled, unicode, edits, or normalized"
-            )
+            panic!("TMON_PROFILE_WORKLOAD must be plain, styled, unicode, edits, or normalized")
         });
     println!(
         "Profiling {} with {} MiB of {} output per repetition",

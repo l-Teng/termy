@@ -3869,8 +3869,10 @@ mod tests {
                 candidate,
             )],
         };
-        let mut thresholds = super::BenchmarkGateThresholds::default();
-        thresholds.min_displayed_frames = 0;
+        let thresholds = super::BenchmarkGateThresholds {
+            min_displayed_frames: 0,
+            ..super::BenchmarkGateThresholds::default()
+        };
 
         let failures = thresholds.failures(&summary);
 
@@ -3888,8 +3890,10 @@ mod tests {
                 run_result("candidate", 3.0, 10, 10 * 1024 * 1024),
             )],
         };
-        let mut thresholds = super::BenchmarkGateThresholds::default();
-        thresholds.min_displayed_frames = 0;
+        let thresholds = super::BenchmarkGateThresholds {
+            min_displayed_frames: 0,
+            ..super::BenchmarkGateThresholds::default()
+        };
 
         let failures = thresholds.failures(&summary);
 

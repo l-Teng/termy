@@ -930,7 +930,7 @@ mod tests {
 
         let mut reloaded =
             SshHostManager::open(&path, MockKeyring::default()).expect("reload manager");
-        assert_eq!(reloaded.hosts(), &[created.clone()]);
+        assert_eq!(reloaded.hosts(), std::slice::from_ref(&created));
         let mut changed = key_input("~/.ssh/id_ed25519");
         changed.hostname = "10.0.0.8".to_string();
         reloaded

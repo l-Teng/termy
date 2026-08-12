@@ -1225,38 +1225,6 @@ struct HyperlinkEntry {
     target: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GridEffect {
-    ScrollUp {
-        alternate: bool,
-        top: usize,
-        bottom: usize,
-        count: usize,
-        full_screen_region: bool,
-        recorded_history: bool,
-        history_before: usize,
-        history_after: usize,
-    },
-    ScrollDown {
-        alternate: bool,
-        top: usize,
-        bottom: usize,
-        count: usize,
-        history_size: usize,
-    },
-    EnteredAlternate,
-    ClearViewport {
-        alternate: bool,
-        history_size: usize,
-        rows: usize,
-        cols: usize,
-    },
-    RebaseHistory {
-        dropped: usize,
-    },
-    Reset,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Pen {
     foreground: Color,
@@ -1496,15 +1464,19 @@ pub(crate) struct Grid {
 }
 
 mod edit;
+mod effects;
 mod fast_lines;
 mod modes;
 mod screen;
+mod sgr;
 mod view;
 
 #[cfg(test)]
 mod test_support;
 
+pub(crate) use effects::GridEffect;
 use screen::Screen;
+use sgr::{extended_color, push_sgr_color, push_underline_sgr_color};
 use view::{
     inline_combining_character, inline_combining_metadata_id, inline_hyperlink_metadata_id,
     is_pooled_extra_id, viewport_link_from_grid_range,

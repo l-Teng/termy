@@ -834,9 +834,9 @@ fn context_menu_visible_height(
     viewport_height: Option<f32>,
     row_height: f32,
 ) -> f32 {
-    viewport_height
-        .map(|height| content_height.min((height - 16.0).max(row_height + 8.0)))
-        .unwrap_or(content_height)
+    viewport_height.map_or(content_height, |height| {
+        content_height.min((height - 16.0).max(row_height + 8.0))
+    })
 }
 
 impl Focusable for TerminalView {
@@ -1199,6 +1199,7 @@ impl TerminalView {
                 };
                 #[cfg_attr(not(debug_assertions), allow(unused_variables))]
                 let rows_cache: &mut Vec<_> = Arc::make_mut(&mut cache.cells);
+                #[cfg_attr(not(debug_assertions), allow(unused_variables))]
                 let (patched_cell_count, did_full_rebuild) =
                     if replay_viewport_scrolls(rows_cache.as_mut_slice(), &scrolls) {
                         self.patch_pane_render_cache(
