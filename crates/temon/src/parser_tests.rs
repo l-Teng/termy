@@ -840,6 +840,14 @@ fn supports_alignment_test_g2_g3_and_single_shift_charsets() {
 }
 
 #[test]
+fn full_erase_clears_alignment_test_cells() {
+    let (grid, _) = parse(b"\x1b#8\x1b[2J");
+
+    let snapshot = grid.snapshot();
+    assert!(snapshot.cells.iter().all(|cell| cell.character == ' '));
+}
+
+#[test]
 fn saved_cursor_and_alternate_screen_preserve_rendition_state() {
     let (grid, _) = parse(b"\x1b[31m\x1b7\x1b[32mG\x1b8R\x1b[?1049hA\x1b[34mB\x1b[?1049lP");
     let primary = grid.line(0).unwrap();

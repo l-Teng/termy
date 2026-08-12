@@ -40,8 +40,10 @@ const INFINITE: Dword = Dword::MAX;
 const ERROR_BROKEN_PIPE: i32 = 109;
 const ERROR_NO_DATA: i32 = 232;
 const ERROR_OPERATION_ABORTED: i32 = 995;
+const INVALID_HANDLE_VALUE: Handle = -1_isize as Handle;
 const EXTENDED_STARTUPINFO_PRESENT: Dword = 0x0008_0000;
 const CREATE_UNICODE_ENVIRONMENT: Dword = 0x0000_0400;
+const STARTF_USESTDHANDLES: Dword = 0x0000_0100;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_COMMAND_LINE_UNITS: usize = 32_767;
@@ -744,6 +746,11 @@ impl Pty {
             attribute_list: attributes.as_mut_ptr(),
         };
         startup.startup_info.cb = mem::size_of::<StartupInfoExW>() as Dword;
+        // Prevent redirected parent handles from bypassing the pseudoconsole.
+        startup.startup_info.flags = STARTF_USESTDHANDLES;
+        startup.startup_info.standard_input = INVALID_HANDLE_VALUE;
+        startup.startup_info.standard_output = INVALID_HANDLE_VALUE;
+        startup.startup_info.standard_error = INVALID_HANDLE_VALUE;
         let mut process_info = ProcessInformation::zeroed();
         let current_directory_ptr = current_directory
             .as_ref()

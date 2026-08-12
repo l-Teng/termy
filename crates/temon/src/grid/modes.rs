@@ -195,12 +195,10 @@ impl Grid {
     }
 
     pub(crate) fn alignment_test(&mut self) {
-        for row in &mut self.active_mut().cells {
-            row.fill(Cell {
-                character: 'E',
-                ..Cell::default()
-            });
-        }
+        self.active_mut().fill(Cell {
+            character: 'E',
+            ..Cell::default()
+        });
         self.damage.mark_full();
     }
 
