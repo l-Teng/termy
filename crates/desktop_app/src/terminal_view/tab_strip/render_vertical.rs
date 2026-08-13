@@ -279,6 +279,7 @@ impl TerminalView {
                     switch_hint_label,
                     is_active,
                     is_drag_source,
+                    is_pane_drop_target: self.pane_move_targets_tab(self.tabs[index].id),
                     is_renaming,
                     show_tab_close,
                     show_tab_pin,

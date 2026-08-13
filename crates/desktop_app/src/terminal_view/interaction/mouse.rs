@@ -861,6 +861,15 @@ impl TerminalView {
             return;
         }
 
+        if self.pane_move_drag.is_some() {
+            if event.dragging() {
+                self.update_pane_move_drag(event.position, window, cx);
+            } else {
+                let _ = self.finish_pane_move_drag(cx);
+            }
+            return;
+        }
+
         match Self::global_tab_drag_pointer_action(self.tab_strip.drag.is_some(), event.dragging())
         {
             GlobalTabDragPointerAction::None => {}

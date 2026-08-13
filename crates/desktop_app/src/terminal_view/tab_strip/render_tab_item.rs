@@ -14,6 +14,7 @@ pub(super) struct TabItemRenderInput {
     pub(super) switch_hint_label: Option<String>,
     pub(super) is_active: bool,
     pub(super) is_drag_source: bool,
+    pub(super) is_pane_drop_target: bool,
     pub(super) is_renaming: bool,
     pub(super) show_tab_close: bool,
     pub(super) show_tab_pin: bool,
@@ -219,6 +220,10 @@ impl TerminalView {
         if input.is_drag_source {
             tab_bg.a = (tab_bg.a + self.scaled_chrome_surface_alpha(0.06)).min(1.0);
         }
+        if input.is_pane_drop_target {
+            tab_bg = palette.hovered_tab_bg;
+            tab_bg.a = (tab_bg.a * 1.8).max(self.scaled_chrome_surface_alpha(0.12));
+        }
         tab_bg.a *= anim;
 
         let mut close_text_color = if input.is_active {
@@ -312,6 +317,12 @@ impl TerminalView {
                     cx.stop_propagation();
                 }),
             );
+
+        if input.is_pane_drop_target {
+            tab_shell = tab_shell
+                .border_1()
+                .border_color(palette.active_tab_indicator);
+        }
 
         if input.is_drag_source {
             tab_shell = tab_shell.shadow_md();
@@ -538,6 +549,7 @@ mod tests {
             switch_hint_label: None,
             is_active: true,
             is_drag_source: false,
+            is_pane_drop_target: false,
             is_renaming,
             show_tab_close: true,
             show_tab_pin: false,

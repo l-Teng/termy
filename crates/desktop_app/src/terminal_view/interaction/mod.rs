@@ -19,7 +19,9 @@ pub(super) use context_menu::{TabContextMenuState, TerminalContextMenuState};
 pub(super) use input::PendingKeyRelease;
 pub(super) use mouse::{PendingCursorMoveClick, PendingCursorMovePreview};
 pub(super) use mouse_reporting::{MouseReportTargetCell, MouseReportingState};
-pub(super) use pane_move::{PaneDropRegion, PaneMoveDragState};
+pub(super) use pane_move::{
+    PaneDropRegion, PaneMoveDragState, PaneMoveDropTarget, PaneMoveHandleDrag,
+};
 pub(super) use selection::{
     HoveredLink, kitty_graphics_placement_bounds, kitty_graphics_placement_intersects_selection,
 };

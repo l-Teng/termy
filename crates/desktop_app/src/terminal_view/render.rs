@@ -3450,6 +3450,8 @@ impl Render for TerminalView {
                     };
                     let group_name = pane.cached_element_ids.drag_handle.clone();
                     let drag_pane_id = pane.id.clone();
+                    let click_pane_id = pane.id.clone();
+                    let drag_view = cx.entity().downgrade();
                     pane_drag_handles.push(
                         div()
                             .id(pane.cached_element_ids.drag_handle.clone())
@@ -3460,6 +3462,7 @@ impl Render for TerminalView {
                             .w(px(handle_width))
                             .h(px(PANE_DRAG_HANDLE_HEIGHT))
                             .cursor(gpui::CursorStyle::OpenHand)
+                            .block_mouse_except_scroll()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -3473,16 +3476,28 @@ impl Render for TerminalView {
                                     .bg(idle_grip_color)
                                     .group_hover(group_name, move |style| style.bg(grip_color))
                             }))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
-                                    view.begin_pane_move_drag_from_handle(
-                                        drag_pane_id.clone(),
-                                        event.position,
-                                        cx,
-                                    );
-                                    cx.stop_propagation();
-                                }),
+                            .on_click(cx.listener(move |view, _event, _window, cx| {
+                                if !view.is_active_pane_id(click_pane_id.as_str()) {
+                                    let _ = view.focus_pane_target(click_pane_id.as_str(), cx);
+                                }
+                                cx.stop_propagation();
+                            }))
+                            .on_drag(
+                                PaneMoveHandleDrag {
+                                    pane_id: drag_pane_id,
+                                },
+                                move |drag, _offset, window, cx| {
+                                    let position = window.mouse_position();
+                                    let _ = drag_view.update(cx, |view, cx| {
+                                        view.begin_pane_move_drag_from_handle(
+                                            drag.pane_id.clone(),
+                                            position,
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                    cx.new(|_| gpui::Empty)
+                                },
                             )
                             .into_any_element(),
                     );
@@ -3509,15 +3524,21 @@ impl Render for TerminalView {
                                 .into_any_element(),
                         );
                     }
-                    if let Some(target) = drag
+                    if let Some((_target_pane_id, target_region)) = drag
                         .drop_target
                         .as_ref()
-                        .filter(|target| target.pane_id == pane.id)
+                        .and_then(|target| match target {
+                            PaneMoveDropTarget::Pane { pane_id, region } => {
+                                Some((pane_id, *region))
+                            }
+                            PaneMoveDropTarget::Tab { .. } => None,
+                        })
+                        .filter(|(pane_id, _)| *pane_id == &pane.id)
                     {
                         // Placement preview: the half (split) or whole pane
                         // (swap) the dragged pane would occupy on drop.
                         let (region_left, region_top, region_width, region_height) =
-                            match target.region {
+                            match target_region {
                                 PaneDropRegion::Center => (
                                     pane_frame_left,
                                     pane_frame_top,
@@ -3873,6 +3894,11 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.handle_global_mouse_move_event(event, window, cx);
             }))
+            .on_drag_move::<PaneMoveHandleDrag>(cx.listener(
+                |this, event: &DragMoveEvent<PaneMoveHandleDrag>, window, cx| {
+                    this.update_pane_move_drag(event.event.position, window, cx);
+                },
+            ))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {

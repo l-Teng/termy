@@ -13,10 +13,10 @@ use alacritty_terminal::{grid::Dimensions, term::cell::Flags};
 use flume::{Sender, bounded};
 use gpui::AppContext;
 use gpui::{
-    AnyElement, App, AsyncApp, Bounds, ClipboardItem, Context, Element, Entity, ExternalPaths,
-    FocusHandle, Focusable, Font, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
-    KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Render, ScrollWheelEvent, SharedString, Size,
+    AnyElement, App, AsyncApp, Bounds, ClipboardItem, Context, DragMoveEvent, Element, Entity,
+    ExternalPaths, FocusHandle, Focusable, Font, FontWeight, InteractiveElement, IntoElement,
+    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Render, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement, Styled, TouchPhase, WeakEntity, Window, WindowBackgroundAppearance,
     div, point, px, relative,
 };
@@ -97,9 +97,9 @@ use constants::*;
 use inline_input::{InlineInputAlignment, InlineInputState};
 use interaction::{
     HoveredLink, MouseReportTargetCell, MouseReportingState, PaneDropRegion, PaneMoveDragState,
-    PendingCursorMoveClick, PendingCursorMovePreview, PendingKeyRelease, TabContextMenuState,
-    TerminalContextMenuState, kitty_graphics_placement_bounds,
-    kitty_graphics_placement_intersects_selection,
+    PaneMoveDropTarget, PaneMoveHandleDrag, PendingCursorMoveClick, PendingCursorMovePreview,
+    PendingKeyRelease, TabContextMenuState, TerminalContextMenuState,
+    kitty_graphics_placement_bounds, kitty_graphics_placement_intersects_selection,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use macos_file_drop::{NativeDropResult, install_native_file_drop};

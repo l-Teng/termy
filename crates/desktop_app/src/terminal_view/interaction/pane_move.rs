@@ -20,9 +20,19 @@ pub(in crate::terminal_view) enum PaneDropRegion {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::terminal_view) struct PaneDropTarget {
+pub(in crate::terminal_view) enum PaneMoveDropTarget {
+    Pane {
+        pane_id: String,
+        region: PaneDropRegion,
+    },
+    Tab {
+        tab_id: TabId,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::terminal_view) struct PaneMoveHandleDrag {
     pub(in crate::terminal_view) pane_id: String,
-    pub(in crate::terminal_view) region: PaneDropRegion,
 }
 
 #[derive(Clone, Debug)]
@@ -33,7 +43,7 @@ pub(in crate::terminal_view) struct PaneMoveDragState {
     /// Set once the pointer travels past the drag threshold; the placement
     /// overlay only renders for active drags so a modifier-click stays inert.
     pub(in crate::terminal_view) active: bool,
-    pub(in crate::terminal_view) drop_target: Option<PaneDropTarget>,
+    pub(in crate::terminal_view) drop_target: Option<PaneMoveDropTarget>,
 }
 
 impl TerminalView {
@@ -82,12 +92,13 @@ impl TerminalView {
         true
     }
 
-    /// Start a pane-move drag from the pane's top-center grab handle — no
-    /// modifier required. A click without movement just focuses the pane.
+    /// Start an already-activated GPUI drag from the pane's top-center grab
+    /// handle. Clicks without movement are handled separately by the handle.
     pub(in super::super) fn begin_pane_move_drag_from_handle(
         &mut self,
         pane_id: String,
         position: gpui::Point<Pixels>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         if self.runtime_kind() != RuntimeKind::Native {
@@ -105,12 +116,13 @@ impl TerminalView {
             let _ = self.focus_pane_target(pane_id.as_str(), cx);
         }
         let (x, y) = self.terminal_content_position(position);
+        let drop_target = self.pane_move_drop_target(position, window, pane_id.as_str());
         self.pane_move_drag = Some(PaneMoveDragState {
             pane_id,
             start_x: x,
             start_y: y,
-            active: false,
-            drop_target: None,
+            active: true,
+            drop_target,
         });
         cx.notify();
     }
@@ -154,7 +166,14 @@ impl TerminalView {
         if drag.active
             && let Some(target) = drag.drop_target
         {
-            self.apply_pane_move(drag.pane_id.as_str(), &target, cx);
+            match target {
+                PaneMoveDropTarget::Pane { pane_id, region } => {
+                    self.apply_pane_move(drag.pane_id.as_str(), pane_id.as_str(), region, cx);
+                }
+                PaneMoveDropTarget::Tab { tab_id } => {
+                    self.apply_pane_move_to_tab(drag.pane_id.as_str(), tab_id, cx);
+                }
+            }
         }
         cx.notify();
         true
@@ -198,7 +217,15 @@ impl TerminalView {
         position: gpui::Point<Pixels>,
         window: &Window,
         source_pane_id: &str,
-    ) -> Option<PaneDropTarget> {
+    ) -> Option<PaneMoveDropTarget> {
+        if let Some(tab_id) = self.pane_move_tab_drop_target(position, window)
+            && self
+                .tabs
+                .get(self.active_tab)
+                .is_none_or(|tab| tab.id != tab_id)
+        {
+            return Some(PaneMoveDropTarget::Tab { tab_id });
+        }
         let (pane_id, fx, fy) = self.pane_move_hit_test(position, window)?;
         if pane_id == source_pane_id {
             return None;
@@ -207,7 +234,92 @@ impl TerminalView {
         if !self.pane_drop_region_is_splittable(pane_id.as_str(), region) {
             return None;
         }
-        Some(PaneDropTarget { pane_id, region })
+        Some(PaneMoveDropTarget::Pane { pane_id, region })
+    }
+
+    fn pane_move_tab_drop_target(
+        &self,
+        position: gpui::Point<Pixels>,
+        window: &Window,
+    ) -> Option<TabId> {
+        if !self.should_render_tab_strip_chrome() {
+            return None;
+        }
+        let x: f32 = position.x.into();
+        let y: f32 = position.y.into();
+        let index = match self.tab_strip_orientation() {
+            crate::terminal_view::tab_strip::state::TabStripOrientation::Horizontal => {
+                let geometry = self.tab_strip_geometry(window);
+                if y < TOP_STRIP_CONTENT_OFFSET_Y
+                    || y >= TOP_STRIP_CONTENT_OFFSET_Y + TABBAR_HEIGHT
+                    || !geometry.contains_tabs_viewport_x(x)
+                {
+                    return None;
+                }
+                let pointer = x - geometry.row_start_x;
+                let scroll: f32 = self.tab_strip.horizontal_scroll_handle.offset().x.into();
+                Self::pane_move_tab_index_for_axis(
+                    self.tabs.iter().map(|tab| tab.display_width),
+                    pointer,
+                    scroll,
+                    TAB_HORIZONTAL_PADDING,
+                    TAB_ITEM_GAP,
+                )?
+            }
+            crate::terminal_view::tab_strip::state::TabStripOrientation::Vertical => {
+                if self.sidebar_collapsed {
+                    return None;
+                }
+                let viewport_width: f32 = window.viewport_size().width.into();
+                if x < viewport_width - SIDEBAR_WIDTH || x >= viewport_width {
+                    return None;
+                }
+                let pointer = y - self.terminal_content_top_inset() - SIDEBAR_HEADER_HEIGHT;
+                let scroll: f32 = self.tab_strip.vertical_scroll_handle.offset().y.into();
+                Self::pane_move_tab_index_for_axis(
+                    std::iter::repeat_n(SIDEBAR_TAB_ROW_HEIGHT, self.tabs.len()),
+                    pointer,
+                    scroll,
+                    SIDEBAR_TAB_PADDING_Y,
+                    SIDEBAR_TAB_ROW_GAP,
+                )?
+            }
+        };
+        self.tabs.get(index).and_then(|tab| {
+            let active_pane = tab
+                .panes
+                .iter()
+                .find(|pane| pane.id == tab.active_pane_id)?;
+            let min_width = Self::native_pane_min_extent_for_axis(PaneResizeAxis::Horizontal);
+            (!self.native_pane_zoom_snapshots.contains_key(&tab.id)
+                && active_pane.width >= min_width.saturating_mul(2))
+            .then_some(tab.id)
+        })
+    }
+
+    fn pane_move_tab_index_for_axis(
+        extents: impl IntoIterator<Item = f32>,
+        pointer: f32,
+        scroll: f32,
+        leading_inset: f32,
+        gap: f32,
+    ) -> Option<usize> {
+        let mut start = leading_inset + scroll;
+        for (index, extent) in extents.into_iter().enumerate() {
+            let end = start + extent;
+            if pointer >= start && pointer < end {
+                return Some(index);
+            }
+            start = end + gap;
+        }
+        None
+    }
+
+    pub(in super::super) fn pane_move_targets_tab(&self, tab_id: TabId) -> bool {
+        self.pane_move_drag.as_ref().is_some_and(|drag| {
+            drag.active
+                && matches!(drag.drop_target, Some(PaneMoveDropTarget::Tab { tab_id: target }) if target == tab_id)
+        })
     }
 
     fn pane_drop_region_for_fractions(fx: f32, fy: f32) -> PaneDropRegion {
@@ -254,10 +366,11 @@ impl TerminalView {
     fn apply_pane_move(
         &mut self,
         source_pane_id: &str,
-        target: &PaneDropTarget,
+        target_pane_id: &str,
+        region: PaneDropRegion,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.runtime_kind() != RuntimeKind::Native || source_pane_id == target.pane_id {
+        if self.runtime_kind() != RuntimeKind::Native || source_pane_id == target_pane_id {
             return false;
         }
         let Some(tab) = self.tabs.get(self.active_tab) else {
@@ -265,7 +378,7 @@ impl TerminalView {
         };
         let tab_id = tab.id;
         let has_both_panes = tab.panes.iter().any(|pane| pane.id == source_pane_id)
-            && tab.panes.iter().any(|pane| pane.id == target.pane_id);
+            && tab.panes.iter().any(|pane| pane.id == target_pane_id);
         if !has_both_panes {
             return false;
         }
@@ -289,12 +402,12 @@ impl TerminalView {
             return false;
         }
 
-        let restructured = match target.region {
+        let restructured = match region {
             PaneDropRegion::Center => {
                 self.native_pane_layout_trees
                     .get_mut(&tab_id)
                     .is_some_and(|tree| {
-                        Self::native_swap_leaves(&mut tree.root, source_pane_id, &target.pane_id)
+                        Self::native_swap_leaves(&mut tree.root, source_pane_id, target_pane_id)
                     })
             }
             PaneDropRegion::Left
@@ -311,7 +424,7 @@ impl TerminalView {
                     // geometry on next use.
                     return false;
                 };
-                let (axis, source_first) = match target.region {
+                let (axis, source_first) = match region {
                     PaneDropRegion::Left => (PaneResizeAxis::Horizontal, true),
                     PaneDropRegion::Right => (PaneResizeAxis::Horizontal, false),
                     PaneDropRegion::Top => (PaneResizeAxis::Vertical, true),
@@ -320,7 +433,7 @@ impl TerminalView {
                 };
                 if !Self::native_replace_leaf_with_split_ordered(
                     &mut root,
-                    &target.pane_id,
+                    target_pane_id,
                     axis,
                     source_pane_id,
                     source_first,
@@ -349,6 +462,157 @@ impl TerminalView {
         self.schedule_persist_native_workspace(cx);
         cx.notify();
         true
+    }
+
+    fn apply_pane_move_to_tab(
+        &mut self,
+        source_pane_id: &str,
+        target_tab_id: TabId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.runtime_kind() != RuntimeKind::Native {
+            return false;
+        }
+        let source_index = self.active_tab;
+        let Some(target_index) = self.tab_index_by_id(target_tab_id) else {
+            return false;
+        };
+        if source_index == target_index
+            || self
+                .tabs
+                .get(source_index)
+                .is_none_or(|tab| tab.panes.len() <= 1)
+        {
+            return false;
+        }
+        let source_tab_id = self.tabs[source_index].id;
+        if self.native_pane_zoom_snapshots.contains_key(&target_tab_id) {
+            return false;
+        }
+        let target_pane_id = self.tabs[target_index].active_pane_id.clone();
+        let min_width = Self::native_pane_min_extent_for_axis(PaneResizeAxis::Horizontal);
+        if self.tabs[target_index]
+            .panes
+            .iter()
+            .find(|pane| pane.id == target_pane_id)
+            .is_none_or(|pane| pane.width < min_width.saturating_mul(2))
+        {
+            return false;
+        }
+        let Some(source_pane_index) = self.tabs[source_index]
+            .panes
+            .iter()
+            .position(|pane| pane.id == source_pane_id)
+        else {
+            return false;
+        };
+        let target_cols = self.tabs[target_index]
+            .panes
+            .iter()
+            .map(|pane| pane.left.saturating_add(pane.width))
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let target_rows = self.tabs[target_index]
+            .panes
+            .iter()
+            .map(|pane| pane.top.saturating_add(pane.height))
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let source_cols = self.tabs[source_index]
+            .panes
+            .iter()
+            .map(|pane| pane.left.saturating_add(pane.width))
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let source_rows = self.tabs[source_index]
+            .panes
+            .iter()
+            .map(|pane| pane.top.saturating_add(pane.height))
+            .max()
+            .unwrap_or(1)
+            .max(1);
+
+        self.native_pane_zoom_snapshots.remove(&source_tab_id);
+        if !self.ensure_native_layout_tree_for_tab_id(source_tab_id)
+            || !self.ensure_native_layout_tree_for_tab_id(target_tab_id)
+        {
+            return false;
+        }
+        let Some(source_tree) = self.native_pane_layout_trees.remove(&source_tab_id) else {
+            return false;
+        };
+        let Some(target_tree) = self.native_pane_layout_trees.remove(&target_tab_id) else {
+            self.native_pane_layout_trees
+                .insert(source_tab_id, source_tree);
+            return false;
+        };
+        let Some((source_root, target_root, next_focus_id)) = Self::move_leaf_between_tab_trees(
+            source_tree.root.clone(),
+            target_tree.root.clone(),
+            source_pane_id,
+            target_pane_id.as_str(),
+        ) else {
+            self.native_pane_layout_trees
+                .insert(source_tab_id, source_tree);
+            self.native_pane_layout_trees
+                .insert(target_tab_id, target_tree);
+            return false;
+        };
+        self.native_pane_layout_trees
+            .insert(source_tab_id, NativePaneLayoutTree { root: source_root });
+        self.native_pane_layout_trees
+            .insert(target_tab_id, NativePaneLayoutTree { root: target_root });
+        let pane = self.tabs[source_index].panes.remove(source_pane_index);
+        self.tabs[source_index].active_pane_id = next_focus_id
+            .or_else(|| {
+                self.tabs[source_index]
+                    .panes
+                    .first()
+                    .map(|pane| pane.id.clone())
+            })
+            .unwrap_or_default();
+        self.tabs[source_index].assert_active_pane_invariant();
+        self.tabs[target_index].panes.push(pane);
+        self.tabs[target_index].active_pane_id = source_pane_id.to_string();
+        self.tabs[target_index].assert_active_pane_invariant();
+        self.refresh_tab_title(source_index);
+        self.refresh_tab_title(target_index);
+
+        self.apply_native_layout_tree_to_tab(source_tab_id, source_cols, source_rows);
+        self.apply_native_layout_tree_to_tab(target_tab_id, target_cols, target_rows);
+        self.switch_tab(target_index, cx);
+        self.clear_selection();
+        self.clear_hovered_link();
+        self.clear_terminal_scrollbar_marker_cache();
+        self.evict_inactive_terminal_render_caches();
+        self.sync_native_terminal_wakeup_interest();
+        self.schedule_persist_native_workspace(cx);
+        cx.notify();
+        true
+    }
+
+    fn move_leaf_between_tab_trees(
+        source_root: NativePaneLayoutNode,
+        mut target_root: NativePaneLayoutNode,
+        source_pane_id: &str,
+        target_pane_id: &str,
+    ) -> Option<(NativePaneLayoutNode, NativePaneLayoutNode, Option<String>)> {
+        let (source_root, next_focus_id, removed) =
+            Self::native_remove_leaf_from_tree(source_root, source_pane_id);
+        let source_root = source_root.filter(|_| removed)?;
+        if !Self::native_replace_leaf_with_split_ordered(
+            &mut target_root,
+            target_pane_id,
+            PaneResizeAxis::Horizontal,
+            source_pane_id,
+            false,
+        ) {
+            return None;
+        }
+        Some((source_root, target_root, next_focus_id))
     }
 }
 
@@ -398,6 +662,56 @@ mod tests {
             TerminalView::pane_drop_region_for_fractions(0.2, 0.02),
             PaneDropRegion::Top
         );
+    }
+
+    #[test]
+    fn pane_move_tab_hit_test_ignores_gaps() {
+        let extents = [100.0, 80.0];
+        assert_eq!(
+            TerminalView::pane_move_tab_index_for_axis(extents, 55.0, 0.0, 6.0, 4.0),
+            Some(0)
+        );
+        assert_eq!(
+            TerminalView::pane_move_tab_index_for_axis(extents, 107.0, 0.0, 6.0, 4.0),
+            None
+        );
+        assert_eq!(
+            TerminalView::pane_move_tab_index_for_axis(extents, 120.0, 0.0, 6.0, 4.0),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn moving_leaf_between_tabs_removes_source_and_splits_target() {
+        let source = NativePaneLayoutNode::Split {
+            axis: PaneResizeAxis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(NativePaneLayoutNode::Leaf {
+                pane_id: "source".to_string(),
+            }),
+            second: Box::new(NativePaneLayoutNode::Leaf {
+                pane_id: "remaining".to_string(),
+            }),
+        };
+        let target = NativePaneLayoutNode::Leaf {
+            pane_id: "target".to_string(),
+        };
+
+        let (source, target, next_focus) =
+            TerminalView::move_leaf_between_tab_trees(source, target, "source", "target")
+                .expect("pane should move between valid tab trees");
+
+        assert!(matches!(
+            source,
+            NativePaneLayoutNode::Leaf { pane_id } if pane_id == "remaining"
+        ));
+        assert_eq!(next_focus.as_deref(), Some("remaining"));
+        assert!(matches!(
+            target,
+            NativePaneLayoutNode::Split { first, second, .. }
+                if matches!(*first, NativePaneLayoutNode::Leaf { ref pane_id } if pane_id == "target")
+                    && matches!(*second, NativePaneLayoutNode::Leaf { ref pane_id } if pane_id == "source")
+        ));
     }
 
     #[test]
