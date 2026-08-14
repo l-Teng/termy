@@ -250,8 +250,8 @@ impl TerminalView {
         let index = match self.tab_strip_orientation() {
             crate::terminal_view::tab_strip::state::TabStripOrientation::Horizontal => {
                 let geometry = self.tab_strip_geometry(window);
-                if y < TOP_STRIP_CONTENT_OFFSET_Y
-                    || y >= TOP_STRIP_CONTENT_OFFSET_Y + TABBAR_HEIGHT
+                if !(TOP_STRIP_CONTENT_OFFSET_Y..TOP_STRIP_CONTENT_OFFSET_Y + TABBAR_HEIGHT)
+                    .contains(&y)
                     || !geometry.contains_tabs_viewport_x(x)
                 {
                     return None;

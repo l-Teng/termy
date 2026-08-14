@@ -16,6 +16,7 @@ fn init_add_and_dev_sync_a_managed_local_copy() {
 
     let initialized = Command::new(cli)
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("APPDATA", &config_home)
         .args(["plugin", "init"])
         .arg(&source)
         .output()
@@ -38,6 +39,7 @@ fn init_add_and_dev_sync_a_managed_local_copy() {
 
     let installed = Command::new(cli)
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("APPDATA", &config_home)
         .args(["plugin", "add"])
         .arg(&source)
         .output()
@@ -59,6 +61,7 @@ fn init_add_and_dev_sync_a_managed_local_copy() {
 
     let mut development = Command::new(cli)
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("APPDATA", &config_home)
         .args(["plugin", "dev"])
         .arg(&source)
         .stdout(Stdio::piped())

@@ -326,7 +326,7 @@ fn enum_keys_parse_table_driven() {
     }
     assert_eq!(
         parse("working_dir_fallback = invalid\n").working_dir_fallback,
-        WorkingDirFallback::Home
+        WorkingDirFallback::default()
     );
 
     let windows_shell_cases = [
