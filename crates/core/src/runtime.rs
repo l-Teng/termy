@@ -381,6 +381,7 @@ struct KittyGraphicsTrackingHandler<'a, T> {
     term: &'a mut Term<T>,
     tracker: &'a mut KittyGraphicsCursorTracker,
     effects: &'a mut KittyGraphicsTextEffects,
+    resize_anchor_state: Option<&'a crate::resize_anchor::ResizeAnchorState>,
     track_scrolls: bool,
 }
 
@@ -471,6 +472,12 @@ impl<T: EventListener> KittyGraphicsTrackingHandler<'_, T> {
             (KittyGraphicsScreen::Alternate, false) => (),
         }
     }
+
+    fn observe_live_output(&self) {
+        if let Some(state) = self.resize_anchor_state {
+            state.observe_live_output(self.term);
+        }
+    }
 }
 
 macro_rules! forward_kitty_graphics_handler_methods {
@@ -493,6 +500,7 @@ impl<T: EventListener> Handler for KittyGraphicsTrackingHandler<'_, T> {
         let observation = self.observe_scroll(physical_lines);
         Handler::input(&mut *self.term, c);
         self.finish_scroll(observation);
+        self.observe_live_output();
     }
 
     fn put_tab(&mut self, count: u16) {
@@ -507,6 +515,7 @@ impl<T: EventListener> Handler for KittyGraphicsTrackingHandler<'_, T> {
         let observation = self.observe_scroll(physical_lines);
         Handler::put_tab(&mut *self.term, count);
         self.finish_scroll(observation);
+        self.observe_live_output();
     }
 
     fn linefeed(&mut self) {
@@ -518,6 +527,7 @@ impl<T: EventListener> Handler for KittyGraphicsTrackingHandler<'_, T> {
         let observation = self.observe_scroll(physical_lines);
         Handler::linefeed(&mut *self.term);
         self.finish_scroll(observation);
+        self.observe_live_output();
     }
 
     fn newline(&mut self) {
@@ -529,6 +539,7 @@ impl<T: EventListener> Handler for KittyGraphicsTrackingHandler<'_, T> {
         let observation = self.observe_scroll(physical_lines);
         Handler::newline(&mut *self.term);
         self.finish_scroll(observation);
+        self.observe_live_output();
     }
 
     fn scroll_up(&mut self, lines: usize) {
@@ -544,6 +555,9 @@ impl<T: EventListener> Handler for KittyGraphicsTrackingHandler<'_, T> {
 
     fn reset_state(&mut self) {
         self.tracker.reset_scroll_region();
+        if let Some(state) = self.resize_anchor_state {
+            state.reset();
+        }
         self.effects.push(KittyGraphicsTextEffect::TerminalReset);
         Handler::reset_state(&mut *self.term);
     }
@@ -576,6 +590,9 @@ impl<T: EventListener> Handler for KittyGraphicsTrackingHandler<'_, T> {
     }
 
     fn clear_screen(&mut self, mode: ansi::ClearMode) {
+        if let Some(state) = self.resize_anchor_state {
+            state.clear_screen(self.term, &mode);
+        }
         let clear_viewport = if self.track_scrolls && matches!(mode, ansi::ClearMode::All) {
             Some(KittyGraphicsTextEffect::ClearViewport {
                 screen: KittyGraphicsScreen::from_alternate_screen(
@@ -672,12 +689,24 @@ pub fn advance_kitty_graphics_text<T: EventListener>(
     bytes: &[u8],
     track_scrolls: bool,
 ) -> KittyGraphicsTextEffects {
+    advance_terminal_text(tracker, parser, term, bytes, track_scrolls, None)
+}
+
+fn advance_terminal_text<T: EventListener>(
+    tracker: &mut KittyGraphicsCursorTracker,
+    parser: &mut ansi::Processor,
+    term: &mut Term<T>,
+    bytes: &[u8],
+    track_scrolls: bool,
+    resize_anchor_state: Option<&crate::resize_anchor::ResizeAnchorState>,
+) -> KittyGraphicsTextEffects {
     let mut effects = KittyGraphicsTextEffects::default();
     {
         let mut handler = KittyGraphicsTrackingHandler {
             term,
             tracker,
             effects: &mut effects,
+            resize_anchor_state,
             track_scrolls,
         };
         parser.advance(&mut handler, bytes);
@@ -1707,6 +1736,7 @@ struct NativeEventLoop {
     terminal: Arc<FairMutex<Term<JsonEventListener>>>,
     kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
     kitty_graphics_revision: Arc<AtomicU64>,
+    resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
     terminal_size: Arc<FairMutex<TerminalSize>>,
     event_proxy: JsonEventListener,
     drain_on_exit: bool,
@@ -1717,6 +1747,7 @@ impl NativeEventLoop {
         terminal: Arc<FairMutex<Term<JsonEventListener>>>,
         kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
         kitty_graphics_revision: Arc<AtomicU64>,
+        resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
         terminal_size: Arc<FairMutex<TerminalSize>>,
         event_proxy: JsonEventListener,
         pty: tty::Pty,
@@ -1731,6 +1762,7 @@ impl NativeEventLoop {
             terminal,
             kitty_graphics,
             kitty_graphics_revision,
+            resize_anchor_state,
             terminal_size,
             event_proxy,
             drain_on_exit,
@@ -1819,12 +1851,13 @@ impl NativeEventLoop {
                     KittyGraphicsItem::Text(text) => {
                         parsed = parsed.saturating_add(text.len());
                         let track_scrolls = self.kitty_graphics.lock().has_placements();
-                        let effects = advance_kitty_graphics_text(
+                        let effects = advance_terminal_text(
                             &mut state.kitty_graphics_cursor_tracker,
                             &mut state.parser,
                             &mut **terminal,
                             &text,
                             track_scrolls,
+                            Some(&self.resize_anchor_state),
                         );
                         if !effects.is_empty() {
                             graphics_changed |= effects.apply_to(&mut self.kitty_graphics.lock());
@@ -2099,6 +2132,7 @@ pub struct Terminal {
     kitty_graphics_cursor_tracker: FairMutex<KittyGraphicsCursorTracker>,
     kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
     kitty_graphics_revision: Arc<AtomicU64>,
+    resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
     graphics_size: Arc<FairMutex<TerminalSize>>,
     /// Channel to send input to the PTY. `None` for display-only terminals
     /// (e.g. tmux control-mode panes) that are fed via `feed_output` and have
@@ -2201,6 +2235,7 @@ impl Terminal {
         let term = Arc::new(FairMutex::new(term));
         let kitty_graphics = Arc::new(FairMutex::new(KittyGraphicsState::default()));
         let kitty_graphics_revision = Arc::new(AtomicU64::new(0));
+        let resize_anchor_state = Arc::new(crate::resize_anchor::ResizeAnchorState::default());
         let graphics_size = Arc::new(FairMutex::new(size));
 
         let window_id = 0;
@@ -2214,6 +2249,7 @@ impl Terminal {
             term.clone(),
             kitty_graphics.clone(),
             kitty_graphics_revision.clone(),
+            resize_anchor_state.clone(),
             graphics_size.clone(),
             listener.clone(),
             pty,
@@ -2233,6 +2269,7 @@ impl Terminal {
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics,
             kitty_graphics_revision,
+            resize_anchor_state,
             graphics_size,
             pty_tx: Some(pty_tx),
             events_rx,
@@ -2257,6 +2294,7 @@ impl Terminal {
         let term = Arc::new(FairMutex::new(term));
         let kitty_graphics = Arc::new(FairMutex::new(KittyGraphicsState::default()));
         let kitty_graphics_revision = Arc::new(AtomicU64::new(0));
+        let resize_anchor_state = Arc::new(crate::resize_anchor::ResizeAnchorState::default());
 
         Self {
             term,
@@ -2266,6 +2304,7 @@ impl Terminal {
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics,
             kitty_graphics_revision,
+            resize_anchor_state,
             graphics_size: Arc::new(FairMutex::new(size)),
             pty_tx: None,
             events_rx,
@@ -2331,12 +2370,13 @@ impl Terminal {
             match item {
                 KittyGraphicsItem::Text(text) => {
                     let track_scrolls = self.kitty_graphics.lock().has_placements();
-                    let effects = advance_kitty_graphics_text(
+                    let effects = advance_terminal_text(
                         &mut cursor_tracker,
                         &mut parser,
                         &mut term,
                         &text,
                         track_scrolls,
+                        Some(&self.resize_anchor_state),
                     );
                     if !effects.is_empty() {
                         graphics_changed |= effects.apply_to(&mut self.kitty_graphics.lock());
@@ -2408,7 +2448,9 @@ impl Terminal {
         // Keep content bottom-anchored like Ghostty/Kitty: reflow can strand
         // the prompt mid-screen above blank rows while the start of the
         // output sits in scrollback — pull it back in.
-        crate::resize_anchor::restore_bottom_anchor(&mut term, new_size);
+        if self.resize_anchor_state.allows_restore() {
+            crate::resize_anchor::restore_bottom_anchor(&mut term, new_size);
+        }
     }
 
     /// Re-send the current size to the PTY without touching the term grid.
@@ -2802,11 +2844,12 @@ mod tests {
         TerminalDamageSnapshot, TerminalEvent, TerminalLaunch, TerminalOptions,
         TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
         WorkingDirFallback, advance_kitty_graphics_cursor, advance_kitty_graphics_text,
-        apply_term_config, cursor_position_from_term, cursor_state_from_term, drain_runtime_events,
-        normalize_working_directory_candidate, resolve_launch_working_directory,
-        resolve_shell_path, resolve_terminal_launch, search_term_buffer, should_drop_event,
-        take_term_damage_snapshot, terminal_environment_overrides, terminal_event_from_osc,
-        termmode_to_terminal_mouse_mode, user_home_dir,
+        advance_terminal_text, apply_term_config, cursor_position_from_term,
+        cursor_state_from_term, drain_runtime_events, normalize_working_directory_candidate,
+        resolve_launch_working_directory, resolve_shell_path, resolve_terminal_launch,
+        search_term_buffer, should_drop_event, take_term_damage_snapshot,
+        terminal_environment_overrides, terminal_event_from_osc, termmode_to_terminal_mouse_mode,
+        user_home_dir,
     };
     #[cfg(target_os = "windows")]
     use super::{
@@ -2817,6 +2860,7 @@ mod tests {
         Keystroke, Modifiers, TerminalKeyEventKind, TerminalKeyboardMode, keystroke_to_input,
     };
     use crate::protocol::{TerminalClipboardTarget, TerminalQueryColors, TerminalReplyHost};
+    use crate::resize_anchor::ResizeAnchorState;
     use crate::search::TermySearchOptions;
     use alacritty_terminal::{
         event::{Event as AlacEvent, EventListener, VoidListener, WindowSize},
@@ -3054,6 +3098,102 @@ mod tests {
             false,
         );
         assert!(tracker.region_covers_full_screen(4));
+    }
+
+    #[test]
+    fn primary_ed2_suppresses_resize_anchor_until_live_output_reaches_bottom() {
+        let size = test_terminal_size();
+        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut parser = ansi::Processor::new();
+        let mut tracker = KittyGraphicsCursorTracker::default();
+        let state = ResizeAnchorState::default();
+
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1b[2Jx",
+            false,
+            Some(&state),
+        );
+        assert!(!state.allows_restore());
+
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\r\n1\r\n2\r\n3",
+            false,
+            Some(&state),
+        );
+        assert!(state.allows_restore());
+    }
+
+    #[test]
+    fn alternate_ed2_does_not_suppress_primary_resize_anchor() {
+        let size = test_terminal_size();
+        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut parser = ansi::Processor::new();
+        let mut tracker = KittyGraphicsCursorTracker::default();
+        let state = ResizeAnchorState::default();
+
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1b[?1049h\x1b[2J",
+            false,
+            Some(&state),
+        );
+
+        assert!(state.allows_restore());
+    }
+
+    #[test]
+    fn history_clear_and_terminal_reset_release_resize_anchor_suppression() {
+        let size = test_terminal_size();
+        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut parser = ansi::Processor::new();
+        let mut tracker = KittyGraphicsCursorTracker::default();
+        let state = ResizeAnchorState::default();
+
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1b[2J",
+            false,
+            Some(&state),
+        );
+        assert!(!state.allows_restore());
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1b[3J",
+            false,
+            Some(&state),
+        );
+        assert!(state.allows_restore());
+
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1b[2J",
+            false,
+            Some(&state),
+        );
+        assert!(!state.allows_restore());
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1bc",
+            false,
+            Some(&state),
+        );
+        assert!(state.allows_restore());
     }
 
     #[test]

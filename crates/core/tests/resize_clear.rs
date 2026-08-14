@@ -55,3 +55,19 @@ fn clear_keeps_scrollback_hidden_while_resizing() {
         "scrolling up should reveal preserved history"
     );
 }
+
+#[test]
+fn ordinary_output_still_uses_bottom_anchored_resize() {
+    let mut terminal = Terminal::new_display(size(20, 10), None);
+    terminal.feed_output(b"AAAAAAAAAAAAAAAAAA\r\nBBBBBBBBBBBBBBBBBB\r\nCCCCCCCCCCCCCCCCCC\r\n$ ");
+
+    terminal.resize(size(10, 10));
+
+    let resized = terminal.snapshot();
+    assert_eq!(resized.history_size, 0);
+    let text = visible_text(&resized);
+    assert!(text.contains("AAAAAAAAAA"));
+    assert!(text.contains("BBBBBBBBBB"));
+    assert!(text.contains("CCCCCCCCCC"));
+    assert!(text.contains("$ "));
+}

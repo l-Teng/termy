@@ -18,8 +18,54 @@ use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Line;
 use alacritty_terminal::term::{Term, TermMode};
+use alacritty_terminal::vte::ansi;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::runtime::TerminalSize;
+
+/// Tracks when a primary-screen clear made trailing blank rows intentional.
+///
+/// ED2 preserves scrollback, so bottom anchoring must stay disabled until new
+/// output reaches the bottom of the viewport. Otherwise a resize mistakes the
+/// cleared rows for spare layout space and pulls old history back on-screen.
+#[derive(Debug, Default)]
+pub(crate) struct ResizeAnchorState {
+    suppressed_after_clear: AtomicBool,
+}
+
+impl ResizeAnchorState {
+    pub(crate) fn clear_screen<T: EventListener>(&self, term: &Term<T>, mode: &ansi::ClearMode) {
+        match mode {
+            ansi::ClearMode::All if !term.mode().contains(TermMode::ALT_SCREEN) => {
+                self.suppressed_after_clear.store(true, Ordering::Release);
+            }
+            ansi::ClearMode::Saved => self.reset(),
+            _ => (),
+        }
+    }
+
+    pub(crate) fn observe_live_output<T: EventListener>(&self, term: &Term<T>) {
+        if !self.suppressed_after_clear.load(Ordering::Acquire)
+            || term.mode().contains(TermMode::ALT_SCREEN)
+        {
+            return;
+        }
+
+        let screen_lines = term.grid().screen_lines();
+        let cursor_line = term.grid().cursor.point.line.0.max(0) as usize;
+        if screen_lines > 0 && cursor_line.saturating_add(1) >= screen_lines {
+            self.reset();
+        }
+    }
+
+    pub(crate) fn reset(&self) {
+        self.suppressed_after_clear.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn allows_restore(&self) -> bool {
+        !self.suppressed_after_clear.load(Ordering::Acquire)
+    }
+}
 
 /// Pulls history lines back into blank rows trailing below the cursor.
 /// Call after `Term::resize`; no-op on the alternate screen, when history is
