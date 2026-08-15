@@ -11,13 +11,11 @@ use termy_core::{
     KittyGraphicsState,
 };
 
-use crate::keyboard::TerminalKeyboardMode;
-use crate::mouse_protocol::TerminalMouseMode;
-use crate::runtime::{
-    KittyGraphicsCursorTracker, TerminalCursorState, TerminalDamageSnapshot, TerminalOptions,
-    TerminalSize, advance_kitty_graphics_cursor, advance_kitty_graphics_text,
-    cursor_position_from_term, cursor_state_from_term, take_term_damage_snapshot,
-    termmode_to_terminal_mouse_mode,
+use termy_core::{
+    KittyGraphicsCursorTracker, TerminalCursorState, TerminalDamageSnapshot, TerminalKeyboardMode,
+    TerminalMouseMode, TerminalOptions, TerminalSize, advance_kitty_graphics_cursor,
+    advance_kitty_graphics_text, cursor_position_from_term, cursor_state_from_term,
+    take_term_damage_snapshot, termmode_to_terminal_mouse_mode,
 };
 
 struct PaneTerminalInner {
@@ -282,8 +280,8 @@ impl Dimensions for PaneTerminal {
 #[cfg(test)]
 mod tests {
     use super::PaneTerminal;
-    use crate::runtime::{TerminalOptions, TerminalSize};
     use alacritty_terminal::grid::Dimensions;
+    use termy_core::{TerminalOptions, TerminalSize};
 
     fn test_term_options(scrollback_history: usize) -> TerminalOptions {
         TerminalOptions {

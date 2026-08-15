@@ -528,7 +528,7 @@ impl TerminalView {
         position: gpui::Point<Pixels>,
         clamp: bool,
     ) -> Option<(String, CellPos)> {
-        let tab = self.tabs.get(self.active_tab)?;
+        let tab = self.session.tabs.get(self.session.active_tab)?;
         let (padding_x, padding_y) = self.effective_terminal_padding();
         let layout_cell_size = self.layout_cell_size();
         let (pane_content_padding_x, pane_content_padding_y) = self.native_split_content_padding();
@@ -554,7 +554,7 @@ impl TerminalView {
         allow_negative_z_over_foreground: bool,
     ) -> Option<KittyImageSelection> {
         let (pane_id, cell) = self.position_to_pane_cell(position, false)?;
-        let tab = self.tabs.get(self.active_tab)?;
+        let tab = self.session.tabs.get(self.session.active_tab)?;
         let pane = tab.panes.iter().find(|pane| pane.id == pane_id)?;
         let terminal = pane.terminal();
         let size = terminal.size();
@@ -613,7 +613,7 @@ impl TerminalView {
         position: gpui::Point<Pixels>,
         clamp: bool,
     ) -> Option<CellPos> {
-        let tab = self.tabs.get(self.active_tab)?;
+        let tab = self.session.tabs.get(self.session.active_tab)?;
         let pane = tab.panes.iter().find(|pane| pane.id == pane_id)?;
         let (padding_x, padding_y) = self.effective_terminal_padding();
         let layout_cell_size = self.layout_cell_size();
@@ -671,7 +671,7 @@ impl TerminalView {
         pane_id: &str,
         cell: CellPos,
     ) -> Option<SelectionPos> {
-        let tab = self.tabs.get(self.active_tab)?;
+        let tab = self.session.tabs.get(self.session.active_tab)?;
         let pane = tab.panes.iter().find(|pane| pane.id == pane_id)?;
         let (display_offset, _) = pane.terminal().scroll_state();
         Self::selection_pos_for_cell_with_display_offset(cell, display_offset)
@@ -682,7 +682,7 @@ impl TerminalView {
         pane_id: &str,
         cell: CellPos,
     ) -> bool {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.session.tabs.get(self.session.active_tab) else {
             return false;
         };
         let Some(pane) = tab.panes.iter().find(|pane| pane.id == pane_id) else {
@@ -973,7 +973,7 @@ fn is_safe_url_for_system_opener(url: &str) -> bool {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use termy_terminal_ui::TerminalSize;
+    use termy_core::TerminalSize;
 
     #[test]
     fn hovered_link_contains_each_cell_in_wrapped_span() {

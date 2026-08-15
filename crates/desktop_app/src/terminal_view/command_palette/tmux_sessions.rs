@@ -187,7 +187,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         if !enabled {
-            termy_toast::info(Self::command_palette_disabled_tmux_session_message(
+            crate::ui::toast::info(Self::command_palette_disabled_tmux_session_message(
                 status_hint,
             ));
             self.notify_overlay(cx);
@@ -196,7 +196,7 @@ impl TerminalView {
 
         let session_name = session_name.trim();
         if session_name.is_empty() {
-            termy_toast::error("tmux session name cannot be empty");
+            crate::ui::toast::error("tmux session name cannot be empty");
             self.notify_overlay(cx);
             return;
         }
@@ -207,7 +207,7 @@ impl TerminalView {
         };
         if self.attach_tmux_runtime(launch, cx) {
             self.close_command_palette(cx);
-            termy_toast::success(format!("Attached tmux session \"{session_name}\""));
+            crate::ui::toast::success(format!("Attached tmux session \"{session_name}\""));
             self.notify_overlay(cx);
         }
     }
@@ -244,7 +244,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         if !enabled {
-            termy_toast::info(Self::command_palette_disabled_tmux_session_message(
+            crate::ui::toast::info(Self::command_palette_disabled_tmux_session_message(
                 status_hint,
             ));
             self.notify_overlay(cx);
@@ -266,7 +266,7 @@ impl TerminalView {
                 Vec::new(),
                 self.tmux_primary_socket_target_for_session_palette(),
             );
-            termy_toast::error(format!("Failed to list tmux sessions: {error}"));
+            crate::ui::toast::error(format!("Failed to list tmux sessions: {error}"));
         }
         self.refresh_command_palette_matches(false, cx);
         self.notify_overlay(cx);
@@ -282,7 +282,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         if !enabled {
-            termy_toast::info(Self::command_palette_disabled_tmux_session_message(
+            crate::ui::toast::info(Self::command_palette_disabled_tmux_session_message(
                 status_hint,
             ));
             self.notify_overlay(cx);
@@ -292,7 +292,7 @@ impl TerminalView {
         let (command_prefix, binary) = match self.tmux_invocation_for_session_palette() {
             Ok(invocation) => invocation,
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 self.notify_overlay(cx);
                 return;
             }
@@ -305,7 +305,7 @@ impl TerminalView {
             current_session_name,
             next_session_name,
         ) {
-            termy_toast::error(format!("Failed to rename tmux session: {error}"));
+            crate::ui::toast::error(format!("Failed to rename tmux session: {error}"));
             self.notify_overlay(cx);
             return;
         }
@@ -313,7 +313,7 @@ impl TerminalView {
         self.command_palette
             .set_tmux_session_intent(TmuxSessionIntent::RenameSelect);
         self.command_palette.input_mut().clear();
-        termy_toast::success(format!(
+        crate::ui::toast::success(format!(
             "Renamed tmux session \"{}\" to \"{}\"",
             current_session_name,
             next_session_name.trim()
@@ -330,7 +330,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         if !enabled {
-            termy_toast::info(Self::command_palette_disabled_tmux_session_message(
+            crate::ui::toast::info(Self::command_palette_disabled_tmux_session_message(
                 status_hint,
             ));
             self.notify_overlay(cx);
@@ -339,7 +339,7 @@ impl TerminalView {
 
         let session_name = session_name.trim().to_string();
         if session_name.is_empty() {
-            termy_toast::error("tmux session name cannot be empty");
+            crate::ui::toast::error("tmux session name cannot be empty");
             self.notify_overlay(cx);
             return;
         }
@@ -362,7 +362,7 @@ impl TerminalView {
                     {
                         Ok(invocation) => invocation,
                         Err(error) => {
-                            termy_toast::error(error);
+                            crate::ui::toast::error(error);
                             view.notify_overlay(cx);
                             return;
                         }
@@ -374,12 +374,12 @@ impl TerminalView {
                         socket_target,
                         session_name.as_str(),
                     ) {
-                        termy_toast::error(format!("Failed to kill tmux session: {error}"));
+                        crate::ui::toast::error(format!("Failed to kill tmux session: {error}"));
                         view.notify_overlay(cx);
                         return;
                     }
 
-                    termy_toast::success(format!("Killed tmux session \"{session_name}\""));
+                    crate::ui::toast::success(format!("Killed tmux session \"{session_name}\""));
                     view.refresh_tmux_session_palette_after_lifecycle_action(cx);
                 })
             });

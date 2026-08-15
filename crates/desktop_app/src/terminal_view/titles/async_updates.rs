@@ -2,11 +2,11 @@ use super::super::*;
 
 impl TerminalView {
     pub(super) fn cancel_pending_command_title(&mut self, index: usize) {
-        if index >= self.tabs.len() {
+        if index >= self.session.tabs.len() {
             return;
         }
 
-        let tab = &mut self.tabs[index];
+        let tab = &mut self.session.tabs[index];
         tab.pending_command_token = tab.pending_command_token.wrapping_add(1);
         tab.pending_command_title = None;
     }
@@ -17,20 +17,20 @@ impl TerminalView {
     /// Receiving a real shell-integration event that sets the same string as the
     /// prediction is still a confirmation—the title is no longer speculative.
     pub(super) fn set_explicit_title(&mut self, index: usize, explicit_title: String) -> bool {
-        if index >= self.tabs.len() {
+        if index >= self.session.tabs.len() {
             return false;
         }
 
         let explicit_title =
             Self::truncate_tab_title(&Self::shorten_shell_tab_title(&explicit_title));
-        if self.tabs[index].explicit_title.as_deref() == Some(explicit_title.as_str()) {
-            let was_prediction = self.tabs[index].explicit_title_is_prediction;
-            self.tabs[index].explicit_title_is_prediction = false;
+        if self.session.tabs[index].explicit_title.as_deref() == Some(explicit_title.as_str()) {
+            let was_prediction = self.session.tabs[index].explicit_title_is_prediction;
+            self.session.tabs[index].explicit_title_is_prediction = false;
             return was_prediction && self.refresh_tab_title(index);
         }
 
-        self.tabs[index].explicit_title = Some(explicit_title);
-        self.tabs[index].explicit_title_is_prediction = false;
+        self.session.tabs[index].explicit_title = Some(explicit_title);
+        self.session.tabs[index].explicit_title_is_prediction = false;
         self.refresh_tab_title(index)
     }
 
@@ -45,7 +45,7 @@ impl TerminalView {
             return;
         };
 
-        let tab = &mut self.tabs[index];
+        let tab = &mut self.session.tabs[index];
         tab.pending_command_token = tab.pending_command_token.wrapping_add(1);
         tab.pending_command_title = Some(Self::truncate_tab_title(&Self::shorten_shell_tab_title(
             &command_title,
@@ -66,7 +66,7 @@ impl TerminalView {
     }
 
     fn index_for_tab_id(&self, tab_id: TabId) -> Option<usize> {
-        Self::tab_index_for_id_in_order(self.tabs.iter().map(|tab| tab.id), tab_id)
+        Self::tab_index_for_id_in_order(self.session.tabs.iter().map(|tab| tab.id), tab_id)
     }
 
     fn tab_index_for_id_in_order<I>(ids: I, tab_id: TabId) -> Option<usize>
@@ -85,11 +85,11 @@ impl TerminalView {
     }
 
     fn activate_pending_command_title(&mut self, index: usize, token: u64) -> bool {
-        if index >= self.tabs.len() {
+        if index >= self.session.tabs.len() {
             return false;
         }
 
-        let tab = &mut self.tabs[index];
+        let tab = &mut self.session.tabs[index];
         if tab.pending_command_token != token {
             return false;
         }

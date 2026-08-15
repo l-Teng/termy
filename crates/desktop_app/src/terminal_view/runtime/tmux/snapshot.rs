@@ -123,6 +123,7 @@ impl TerminalView {
             .flat_map(|window| window.panes.iter().map(|pane| pane.id.as_str()))
             .collect::<std::collections::HashSet<_>>();
         let removed_pane_ids = self
+            .session
             .tabs
             .iter()
             .flat_map(|tab| tab.panes.iter().map(|pane| pane.id.clone()))
@@ -131,24 +132,30 @@ impl TerminalView {
         let _ = self.release_forwarded_mouse_presses_for_panes(&removed_pane_ids);
 
         let previous_active_window_id = self
+            .session
             .tabs
-            .get(self.active_tab)
+            .get(self.session.active_tab)
             .map(|tab| tab.window_id.clone());
-        let previous_renaming_window_id = self
-            .renaming_tab
-            .and_then(|index| self.tabs.get(index).map(|tab| tab.window_id.clone()));
+        let previous_renaming_window_id = self.renaming_tab.and_then(|index| {
+            self.session
+                .tabs
+                .get(index)
+                .map(|tab| tab.window_id.clone())
+        });
         let previous_ids = self
+            .session
             .tabs
             .iter()
             .map(|tab| (tab.window_id.clone(), tab.id))
             .collect::<std::collections::HashMap<_, _>>();
         let previous_pins = self
+            .session
             .tabs
             .iter()
             .map(|tab| (tab.window_id.clone(), tab.pinned))
             .collect::<std::collections::HashMap<_, _>>();
         let mut existing_terminals = std::collections::HashMap::<String, Terminal>::new();
-        let old_tabs = std::mem::take(&mut self.tabs);
+        let old_tabs = std::mem::take(&mut self.session.tabs);
         if reuse_existing_terminals {
             for mut tab in old_tabs {
                 for pane in tab.panes.drain(..) {
@@ -235,18 +242,19 @@ impl TerminalView {
         }
 
         new_tabs.sort_by_key(|tab| tab.window_index);
-        self.tabs = new_tabs;
+        self.session.tabs = new_tabs;
         let tab_window_order = self
+            .session
             .tabs
             .iter()
             .map(|tab| tab.window_id.as_str())
             .collect::<Vec<_>>();
 
         let mut next_id = 1;
-        for tab in &self.tabs {
+        for tab in &self.session.tabs {
             next_id = next_id.max(tab.id.saturating_add(1));
         }
-        self.next_tab_id = next_id;
+        self.session.next_tab_id = next_id;
 
         let active_index_by_window = snapshot
             .windows
@@ -256,19 +264,19 @@ impl TerminalView {
             .and_then(|window_id| window_order_index(&tab_window_order, Some(window_id)));
         let previous_index =
             window_order_index(&tab_window_order, previous_active_window_id.as_deref());
-        self.active_tab = active_index_by_window
+        self.session.active_tab = active_index_by_window
             .or(previous_index)
             .unwrap_or(0)
-            .min(self.tabs.len().saturating_sub(1));
+            .min(self.session.tabs.len().saturating_sub(1));
 
-        if self.tabs.is_empty() {
-            self.active_tab = 0;
+        if self.session.tabs.is_empty() {
+            self.session.active_tab = 0;
         }
         // Rename state tracks the original window identity, not stale index
         // positions that can drift when tmux reorders/closes windows.
         self.renaming_tab =
             window_order_index(&tab_window_order, previous_renaming_window_id.as_deref());
-        for index in 0..self.tabs.len() {
+        for index in 0..self.session.tabs.len() {
             self.refresh_tab_title(index);
         }
         let inactive_history = self
@@ -277,8 +285,8 @@ impl TerminalView {
         let active_options = self.terminal_runtime.term_options();
         let inactive_options = (inactive_history != active_options.scrollback_history)
             .then(|| active_options.with_scrollback_history(inactive_history));
-        for (tab_index, tab) in self.tabs.iter().enumerate() {
-            let options = if tab_index == self.active_tab {
+        for (tab_index, tab) in self.session.tabs.iter().enumerate() {
+            let options = if tab_index == self.session.active_tab {
                 active_options
             } else {
                 inactive_options.unwrap_or(active_options)
@@ -291,7 +299,7 @@ impl TerminalView {
         self.sync_tab_strip_for_active_tab();
 
         if let Some(message) = tmux_hydration_warning_message(&hydration_failures) {
-            termy_toast::warning(message);
+            crate::ui::toast::warning(message);
         }
     }
 
@@ -306,7 +314,7 @@ impl TerminalView {
                 true
             }
             Err(error) => {
-                termy_toast::error(format!("tmux sync failed: {error}"));
+                crate::ui::toast::error(format!("tmux sync failed: {error}"));
                 false
             }
         }

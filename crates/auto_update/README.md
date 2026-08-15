@@ -16,6 +16,5 @@ cargo test -p termy_auto_update
 
 ## Forbidden Dependencies
 
-- `termy_auto_update_ui`
 - `termy_terminal_ui`
 - `termy` / `crates/desktop_app`

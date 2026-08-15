@@ -701,7 +701,7 @@ impl TerminalView {
                     .and_then(|selection| self.current_kitty_image_placement(selection))
                 {
                     cx.write_to_clipboard(kitty_png_clipboard_item(image.png.as_ref()));
-                    termy_toast::success("Copied image");
+                    crate::ui::toast::success("Copied image");
                     self.notify_overlay(cx);
                     return true;
                 }
@@ -725,7 +725,7 @@ impl TerminalView {
                         }
                         Ok(None) => self.write_paste_fallback_input(cx),
                         Err(error) => {
-                            termy_toast::error(format!(
+                            crate::ui::toast::error(format!(
                                 "Failed to prepare clipboard image for paste: {error}"
                             ));
                         }
@@ -882,7 +882,7 @@ impl TerminalView {
                 self.write_dropped_paths_at_position(&drop.paths, drop.position, cx);
             }
             Err(error) => {
-                termy_toast::error(error.to_string());
+                crate::ui::toast::error(error.to_string());
             }
         }
     }
@@ -1090,7 +1090,7 @@ mod tests {
         let events = modifier_transition_events(previous, current);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0.key, "shift");
-        assert_eq!(events[0].1, termy_terminal_ui::TerminalKeyEventKind::Press);
+        assert_eq!(events[0].1, termy_core::TerminalKeyEventKind::Press);
         assert!(events[0].0.modifiers.platform);
         assert!(events[0].0.modifiers.shift);
     }

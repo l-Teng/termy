@@ -141,8 +141,8 @@ pub fn show_parse_diagnostics_toast(diagnostics: &[ConfigDiagnostic]) {
         Some("Fix".to_string())
     };
 
-    let toast_id = termy_toast::enqueue_actionable_toast_with_id(
-        termy_toast::ToastKind::Warning,
+    let toast_id = crate::ui::toast::enqueue_actionable_toast_with_id(
+        crate::ui::toast::ToastKind::Warning,
         summary,
         Some(Duration::from_secs(10)),
         action_label,
@@ -197,7 +197,7 @@ pub fn report_config_error_once(
     }
 
     log::error!("{error_context}: {error_message}");
-    termy_toast::error(error_message.clone());
+    crate::ui::toast::error(error_message.clone());
     *previous_error = Some(error_message);
 }
 

@@ -229,19 +229,27 @@ impl TerminalView {
     ) -> PluginContext {
         let working_directory = self.preferred_working_dir_for_new_session(None, cx);
         let (selected_text, selected_text_truncated) = plugin_selected_text(self.selected_text());
-        let active_tab = self.tabs.get(self.active_tab).map(|tab| PluginTabContext {
-            index: self.active_tab,
-            title: tab.title.clone(),
-            pane_count: tab.panes.len(),
-        });
-        let active_pane = self.tabs.get(self.active_tab).and_then(|tab| {
-            let index = tab.active_pane_index()?;
-            tab.panes.get(index)?;
-            Some(PluginPaneContext {
-                index,
-                kind: PluginPaneKind::Terminal,
-            })
-        });
+        let active_tab =
+            self.session
+                .tabs
+                .get(self.session.active_tab)
+                .map(|tab| PluginTabContext {
+                    index: self.session.active_tab,
+                    title: tab.title.clone(),
+                    pane_count: tab.panes.len(),
+                });
+        let active_pane = self
+            .session
+            .tabs
+            .get(self.session.active_tab)
+            .and_then(|tab| {
+                let index = tab.active_pane_index()?;
+                tab.panes.get(index)?;
+                Some(PluginPaneContext {
+                    index,
+                    kind: PluginPaneKind::Terminal,
+                })
+            });
         PluginContext {
             working_directory,
             active_command: self.active_current_command().map(str::to_string),
@@ -261,10 +269,10 @@ impl TerminalView {
     }
 
     fn plugin_lifecycle_snapshot(&self) -> PluginLifecycleSnapshot {
-        let active_tab = self.tabs.get(self.active_tab);
+        let active_tab = self.session.tabs.get(self.session.active_tab);
         PluginLifecycleSnapshot {
             active_tab_id: active_tab.map(|tab| tab.id),
-            active_tab_index: active_tab.map(|_| self.active_tab),
+            active_tab_index: active_tab.map(|_| self.session.active_tab),
             working_directory: active_tab.and_then(|tab| tab.last_prompt_cwd.clone()),
             active_command: self.active_current_command().map(str::to_string),
         }
@@ -316,7 +324,7 @@ impl TerminalView {
             if !self.plugin_lifecycle.overflow_warned {
                 self.plugin_lifecycle.overflow_warned = true;
                 log::warn!("Plugin lifecycle event queue is full; dropping events");
-                termy_toast::warning("Plugin events are falling behind");
+                crate::ui::toast::warning("Plugin events are falling behind");
                 self.notify_overlay(cx);
             }
             return;
@@ -365,11 +373,11 @@ impl TerminalView {
         if !dispatch.errors.is_empty() {
             let message = dispatch.errors.join("; ");
             log::error!("Plugin event failed: {message}");
-            termy_toast::error(format!("Plugin event failed: {message}"));
+            crate::ui::toast::error(format!("Plugin event failed: {message}"));
         }
         if let Err(error) = self.apply_plugin_actions(dispatch.actions, window, cx) {
             log::error!("Plugin event action failed: {error}");
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
         }
         self.notify_overlay(cx);
     }
@@ -397,7 +405,7 @@ impl TerminalView {
         }
         if let Some(error) = error_message.as_deref() {
             log::error!("Plugin refresh failed: {error}");
-            termy_toast::error(format!("Plugin error: {error}"));
+            crate::ui::toast::error(format!("Plugin error: {error}"));
             self.notify_overlay(cx);
         }
         self.plugin_last_error = error_message;
@@ -655,14 +663,14 @@ impl TerminalView {
             .plugin_runtime
             .command_with_revision(plugin_id, command_id)
         else {
-            termy_toast::error(format!(
+            crate::ui::toast::error(format!(
                 "Plugin command {plugin_id}.{command_id} is unavailable"
             ));
             self.notify_overlay(cx);
             return;
         };
         if let Some(reason) = command.disabled_reason.as_deref() {
-            termy_toast::info(reason);
+            crate::ui::toast::info(reason);
             self.notify_overlay(cx);
             return;
         }
@@ -696,7 +704,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         let Some(window_handle) = window.window_handle().downcast::<Self>() else {
-            termy_toast::error("Plugin keybinding lost its Termy window");
+            crate::ui::toast::error("Plugin keybinding lost its Termy window");
             self.notify_overlay(cx);
             return;
         };
@@ -743,12 +751,12 @@ impl TerminalView {
             {
                 let text = value.as_str().unwrap_or_default();
                 if *required && text.trim().is_empty() {
-                    termy_toast::info(format!("{} is required", input.label()));
+                    crate::ui::toast::info(format!("{} is required", input.label()));
                     self.notify_overlay(cx);
                     return;
                 }
                 if text.chars().count() > *max_length {
-                    termy_toast::info(format!(
+                    crate::ui::toast::info(format!(
                         "{} must be at most {max_length} characters",
                         input.label()
                     ));
@@ -823,11 +831,11 @@ impl TerminalView {
         let command_id = command.id.clone();
         let title = command.title;
         let Some(window_handle) = window.window_handle().downcast::<Self>() else {
-            termy_toast::error("Plugin command lost its Termy window");
+            crate::ui::toast::error("Plugin command lost its Termy window");
             self.notify_overlay(cx);
             return;
         };
-        let loading_id = termy_toast::loading(format!("Running {title}…"));
+        let loading_id = crate::ui::toast::loading(format!("Running {title}…"));
         self.close_command_palette(cx);
         self.notify_overlay(cx);
 
@@ -846,18 +854,18 @@ impl TerminalView {
             })
             .await;
             cx.update(|cx| {
-                termy_toast::dismiss_toast(loading_id);
+                crate::ui::toast::dismiss_toast(loading_id);
                 let _ = window_handle.update(cx, |view, window, cx| {
                     match result {
                         Ok(actions) => {
                             if let Err(error) = view.apply_plugin_actions(actions, window, cx) {
                                 log::error!("Plugin action failed: {error}");
-                                termy_toast::error(error);
+                                crate::ui::toast::error(error);
                             }
                         }
                         Err(error) => {
                             log::error!("Plugin command failed: {error}");
-                            termy_toast::error(error);
+                            crate::ui::toast::error(error);
                         }
                     }
                     view.notify_overlay(cx);
@@ -897,8 +905,9 @@ impl TerminalView {
                         );
                     }
                     let terminal = self
+                        .session
                         .tabs
-                        .get(self.active_tab)
+                        .get(self.session.active_tab)
                         .and_then(TerminalTab::active_terminal)
                         .ok_or_else(|| {
                             "Plugin command stopped because the new terminal is unavailable"
@@ -920,10 +929,10 @@ impl TerminalView {
                         .map_err(|error| format!("Failed to open plugin URL: {error}"))?;
                 }
                 PluginAction::Toast { level, message } => match level {
-                    PluginToastLevel::Info => termy_toast::info(message),
-                    PluginToastLevel::Success => termy_toast::success(message),
-                    PluginToastLevel::Warning => termy_toast::warning(message),
-                    PluginToastLevel::Error => termy_toast::error(message),
+                    PluginToastLevel::Info => crate::ui::toast::info(message),
+                    PluginToastLevel::Success => crate::ui::toast::success(message),
+                    PluginToastLevel::Warning => crate::ui::toast::warning(message),
+                    PluginToastLevel::Error => crate::ui::toast::error(message),
                 },
                 PluginAction::ViewOpen {
                     view,

@@ -100,13 +100,13 @@ impl SettingsWindow {
 
     pub(super) fn reset_keybinds_to_defaults(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = config::set_keybind_lines(&[]) {
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
             return;
         }
 
         self.config.keybind_lines.clear();
         self.capturing_action = None;
-        termy_toast::success("Saved");
+        crate::ui::toast::success("Saved");
         cx.notify();
     }
 
@@ -114,11 +114,11 @@ impl SettingsWindow {
         let mut bindings = self.effective_action_bindings();
         bindings.remove(&action);
         if let Err(error) = self.persist_action_bindings(&bindings, None) {
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
             return;
         }
         self.capturing_action = None;
-        termy_toast::success("Saved");
+        crate::ui::toast::success("Saved");
         cx.notify();
     }
 
@@ -127,12 +127,12 @@ impl SettingsWindow {
         Self::apply_assignment_with_conflict_resolution(&mut bindings, action, trigger);
 
         if let Err(error) = self.persist_action_bindings(&bindings, Some(trigger)) {
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
             return;
         }
 
         self.capturing_action = None;
-        termy_toast::success("Saved");
+        crate::ui::toast::success("Saved");
         cx.notify();
     }
 
@@ -325,7 +325,7 @@ impl SettingsWindow {
         match Self::canonicalize_captured_trigger(key, event.keystroke.modifiers) {
             Ok(Some(trigger)) => self.assign_action_binding(action, &trigger, cx),
             Ok(None) => {}
-            Err(error) => termy_toast::error(format!("Invalid key combo: {error}")),
+            Err(error) => crate::ui::toast::error(format!("Invalid key combo: {error}")),
         }
     }
 

@@ -13,7 +13,7 @@ alacritty_terminal = { workspace = true }
 flume = { workspace = true }
 gpui = { workspace = true }
 termy_core = { path = "../core" }
-tmux_control_core = { path = "../tmux_control_core" }
+termy_tmux_control_core = { path = "../tmux_control_core" }
 
 [target.'cfg(unix)'.dependencies]
 rustix-openpty = "0.2"

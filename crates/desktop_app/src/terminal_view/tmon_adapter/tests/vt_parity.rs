@@ -51,7 +51,7 @@ fn common_vt_fixtures_match_the_alacritty_engine() {
 #[test]
 fn alternate_screen_round_trip_preserves_scrolled_primary_viewport() {
     let terminal_size = test_size(4, 2);
-    let native = termy_terminal_ui::Terminal::new_display(terminal_size, None);
+    let native = termy_core::Terminal::new_display(terminal_size, None);
     let tmon = tmon::Terminal::new_display(size(terminal_size), tmon::Config::default());
 
     native.feed_output(b"a\r\nb\r\nc");
@@ -73,7 +73,7 @@ fn bounded_scrollback_eviction_preserves_scrolled_viewport_anchor() {
         scrollback_history: 2,
         ..TerminalRuntimeConfig::default()
     };
-    let native = termy_terminal_ui::Terminal::new_display(terminal_size, Some(&runtime_config));
+    let native = termy_core::Terminal::new_display(terminal_size, Some(&runtime_config));
     let tmon = tmon::Terminal::new_display(
         size(terminal_size),
         tmon::Config {
@@ -97,7 +97,7 @@ fn bounded_scrollback_eviction_preserves_scrolled_viewport_anchor() {
 #[test]
 fn alternate_row_resize_preserves_pending_wrap() {
     let initial = test_size(4, 2);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
 
     native.feed_output(b"\x1b[?1049habcd");
@@ -303,7 +303,7 @@ fn extended_vt_fixtures_match_the_alacritty_engine() {
 #[test]
 fn extended_underline_styles_match_the_alacritty_engine() {
     let terminal_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(terminal_size, None);
+    let native = termy_core::Terminal::new_display(terminal_size, None);
     let tmon = tmon::Terminal::new_display(size(terminal_size), tmon::Config::default());
     let bytes = b"\x1b[4mA\x1b[4:2mB\x1b[4:3mC\x1b[4:4mD\x1b[4:5mE\x1b[4:0mF\x1b[4:0:1mG\x1b[24mH";
     native.feed_output(bytes);
@@ -327,7 +327,7 @@ fn extended_underline_styles_match_the_alacritty_engine() {
 #[test]
 fn compact_underline_metadata_survives_reflow_scrollback_and_screen_swaps() {
     let initial = test_size(10, 3);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let combining = "\u{301}\u{302}\u{303}\u{304}\u{305}\u{306}\u{307}\u{308}\u{309}";
     let primary = format!(
@@ -380,7 +380,7 @@ fn compact_underline_metadata_survives_reflow_scrollback_and_screen_swaps() {
 #[test]
 fn reflow_ignores_trailing_spaces_with_only_link_and_underline_color_metadata() {
     let initial = test_size(8, 2);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let bytes = b"A\x1b]8;;https://example.com/trailing\x1b\\\x1b[58;2;1;2;3m   \x1b]8;;\x1b\\";
     native.feed_output(bytes);
@@ -407,7 +407,7 @@ fn deterministic_common_vt_traces_match_the_alacritty_engine() {
     let mut random = 0x4d59_5df4_d0f3_3173_u64;
 
     for trace in 0..32 {
-        let native = termy_terminal_ui::Terminal::new_display(terminal_size, None);
+        let native = termy_core::Terminal::new_display(terminal_size, None);
         let tmon = tmon::Terminal::new_display(size(terminal_size), tmon::Config::default());
         let mut stream = Vec::new();
 

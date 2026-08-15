@@ -7,8 +7,10 @@ Termy is a single repository with several product surfaces. Keep changes in the 
 - `crates/desktop_app/` owns the desktop app shell: GPUI windows, app chrome, settings, onboarding, menus, and app-only interaction behavior.
 - `crates/desktop_app/src/terminal_view/` owns the GPUI terminal experience: rendering, tabs, panes, command palette, search UI, mouse/input handling, and app runtime coordination.
 - `crates/core/` owns the reusable headless libtermy runtime/API used by embedders. It must stay independent of GPUI and app UI code.
+- `crates/tmon/` owns the experimental renderer-neutral terminal engine and native PTY/ConPTY runtime.
 - `crates/plugin_runtime/` owns plugin discovery, descriptor/action validation, and the on-demand Bun host with one Worker per plugin. It must stay independent of GPUI and desktop command execution.
-- `crates/terminal_ui/` owns the GPUI-facing terminal grid/runtime adapter, native pane model, and tmux support used by the desktop app.
+- `crates/terminal_ui/` owns the GPUI terminal grid and keystroke adapters plus tmux pane display/client support used by the desktop app. Shared headless terminal types are imported directly from `termy_core`.
+- `crates/tmux_control_core/` owns the UI-agnostic tmux control-mode protocol and transport shared by terminal UI and FFI.
 - `crates/ui/` owns Termy's design system in GPUI: theme-derived color tokens, layout metrics, and stateless chrome components. It must stay free of config, command, plugin, and SSH domain crates.
 - `crates/config_core/`, `crates/command_core/`, `crates/theme_core/`, and `crates/search/` own pure domain logic shared by the app, CLI, docs generation, and embedding surfaces.
 - `crates/ssh_core/` owns saved SSH host validation, non-secret persistence, exact OpenSSH arguments, and system-keychain credential lifecycle.
@@ -22,13 +24,15 @@ Termy is a single repository with several product surfaces. Keep changes in the 
 
 - `termy` (`crates/desktop_app/`) is the product app and the only crate that should own complete user-facing desktop workflows.
 - `termy_core` (`crates/core/`) is the headless runtime/API for embedders.
+- `tmon` (`crates/tmon/`) is the experimental standalone terminal engine.
 - `termy_plugin_runtime` (`crates/plugin_runtime/`) is the GPUI-free TypeScript plugin runtime consumed by the desktop app.
 - `termy_terminal_ui` (`crates/terminal_ui/`) is the GPUI-facing terminal adapter used by the desktop app.
+- `termy_tmux_control_core` (`crates/tmux_control_core/`) is the shared headless tmux control-mode layer.
 - `termy_ui` (`crates/ui/`) is the GPUI design system: tokens, metrics, and chrome components shared by settings-style surfaces.
 - `termy_command_core`, `termy_config_core`, `termy_theme_core`, `termy_search`, `termy_ssh_core`, and `termy_themes` are pure domain crates.
 - `termy_ffi` and `termy_native_sdk` are embedding/native-integration surfaces.
-- `termy_cli`, `termy_cli_install_core`, `termy_release_core`, `termy_auto_update`, and `termy_auto_update_ui` own command-line, install, release, and update support.
-- `termy_toast` owns tiny notification primitives.
+- `termy_cli`, `termy_cli_install_core`, `termy_release_core`, and `termy_auto_update` own command-line, install, release, and update support.
+- Desktop update presentation and toast state live under `crates/desktop_app/src/ui/` because they have no non-desktop consumers.
 - `xtask` owns repository automation such as generated docs.
 
 Each crate should have a local `README.md` with `Owner`, `Validation`, and `Forbidden Dependencies` sections.

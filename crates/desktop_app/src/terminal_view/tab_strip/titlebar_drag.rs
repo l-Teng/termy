@@ -88,7 +88,7 @@ impl TerminalView {
                     y,
                     self.should_render_tab_strip_chrome(),
                     geometry,
-                    self.tabs.iter().map(|tab| tab.display_width),
+                    self.session.tabs.iter().map(|tab| tab.display_width),
                     scroll_offset_x,
                 ) {
                     HorizontalTitlebarPointerTarget::NativeCaptionButtons => {

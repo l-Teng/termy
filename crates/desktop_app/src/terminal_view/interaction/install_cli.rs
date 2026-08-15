@@ -17,7 +17,7 @@ impl TerminalView {
 
     pub(in super::super) fn install_cli_action(&mut self, cx: &mut Context<Self>) {
         if !self.install_cli_available() {
-            termy_toast::info("CLI is already installed");
+            crate::ui::toast::info("CLI is already installed");
             self.notify_overlay(cx);
             return;
         }
@@ -33,13 +33,13 @@ impl TerminalView {
                         cx,
                     );
                     if shell_setup.profile_updated {
-                        termy_toast::success(format!(
+                        crate::ui::toast::success(format!(
                             "CLI installed to {}. Updated {} and activated PATH in this shell.",
                             path_str,
                             shell_setup.profile_path.display()
                         ));
                     } else {
-                        termy_toast::success(format!(
+                        crate::ui::toast::success(format!(
                             "CLI installed to {}. {} already configures Termy PATH; activated PATH in this shell.",
                             path_str,
                             shell_setup.profile_path.display()
@@ -49,19 +49,19 @@ impl TerminalView {
                     #[cfg(target_os = "windows")]
                     {
                         if let Some(parent) = install_path.parent() {
-                            termy_toast::success(format!(
+                            crate::ui::toast::success(format!(
                                 "CLI installed to {}. Add {} to PATH: setx PATH \"%PATH%;{}\"",
                                 path_str,
                                 parent.display(),
                                 parent.display()
                             ));
                         } else {
-                            termy_toast::success(format!("CLI installed to {}", path_str));
+                            crate::ui::toast::success(format!("CLI installed to {}", path_str));
                         }
                     }
                     #[cfg(not(target_os = "windows"))]
                     {
-                        termy_toast::success(format!("CLI installed to {path_str}"));
+                        crate::ui::toast::success(format!("CLI installed to {path_str}"));
                     }
                 }
 
@@ -76,7 +76,7 @@ impl TerminalView {
                 cx.notify();
             }
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 self.notify_overlay(cx);
             }
         }

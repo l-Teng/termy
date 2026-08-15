@@ -185,7 +185,11 @@ impl TerminalView {
         cols: u16,
         rows: u16,
     ) -> bool {
-        if self.native_pane_zoom_snapshots.contains_key(&tab_id) {
+        if self
+            .session
+            .native_pane_zoom_snapshots
+            .contains_key(&tab_id)
+        {
             return false;
         }
         if self.ensure_native_layout_tree_for_tab_id(tab_id)
@@ -197,7 +201,7 @@ impl TerminalView {
         let Some(tab_index) = self.tab_index_by_id(tab_id) else {
             return false;
         };
-        let Some(tab) = self.tabs.get_mut(tab_index) else {
+        let Some(tab) = self.session.tabs.get_mut(tab_index) else {
             return false;
         };
         Self::sync_native_tab_pane_geometry_fallback(tab, cols, rows)

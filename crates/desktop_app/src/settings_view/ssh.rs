@@ -141,7 +141,7 @@ impl SettingsWindow {
             .find(|host| host.id == host_id)
             .cloned()
         else {
-            termy_toast::error("That saved SSH host no longer exists");
+            crate::ui::toast::error("That saved SSH host no longer exists");
             return;
         };
         let secret_saved = match crate::ssh::manager(self.config_path.as_deref())
@@ -149,7 +149,7 @@ impl SettingsWindow {
         {
             Ok(saved) => saved,
             Err(error) => {
-                termy_toast::warning(format!(
+                crate::ui::toast::warning(format!(
                     "Could not inspect this host's Keychain credential; non-secret settings can still be edited: {error}"
                 ));
                 false
@@ -207,7 +207,7 @@ impl SettingsWindow {
         let port = match form.port.trim().parse::<u16>() {
             Ok(port) if port > 0 => port,
             _ => {
-                termy_toast::error("Port must be between 1 and 65535");
+                crate::ui::toast::error("Port must be between 1 and 65535");
                 return;
             }
         };
@@ -225,7 +225,7 @@ impl SettingsWindow {
             authentication,
         };
         if let Err(error) = input.validate() {
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
             return;
         }
         let secret_update = if !form.secret.is_empty() {
@@ -239,7 +239,7 @@ impl SettingsWindow {
         let mut manager = match crate::ssh::manager(self.config_path.as_deref()) {
             Ok(manager) => manager,
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 return;
             }
         };
@@ -257,10 +257,10 @@ impl SettingsWindow {
                 self.ssh_hosts_error = None;
                 self.ssh_input = None;
                 self.ssh_form = None;
-                termy_toast::success(message);
+                crate::ui::toast::success(message);
                 cx.notify();
             }
-            Err(error) => termy_toast::error(error),
+            Err(error) => crate::ui::toast::error(error),
         }
     }
 
@@ -289,7 +289,7 @@ impl SettingsWindow {
         let mut manager = match crate::ssh::manager(self.config_path.as_deref()) {
             Ok(manager) => manager,
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 return;
             }
         };
@@ -306,10 +306,10 @@ impl SettingsWindow {
                     self.ssh_form = None;
                     self.ssh_input = None;
                 }
-                termy_toast::success("SSH host deleted");
+                crate::ui::toast::success("SSH host deleted");
                 cx.notify();
             }
-            Err(error) => termy_toast::error(error),
+            Err(error) => crate::ui::toast::error(error),
         }
     }
 

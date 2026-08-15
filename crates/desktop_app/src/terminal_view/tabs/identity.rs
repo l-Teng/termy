@@ -2,8 +2,12 @@ use super::*;
 
 impl TerminalView {
     pub(crate) fn allocate_tab_id(&mut self) -> TabId {
-        let id = self.next_tab_id;
-        self.next_tab_id = self.next_tab_id.checked_add(1).expect("tab id overflow");
+        let id = self.session.next_tab_id;
+        self.session.next_tab_id = self
+            .session
+            .next_tab_id
+            .checked_add(1)
+            .expect("tab id overflow");
         id
     }
 

@@ -83,7 +83,7 @@ impl TerminalView {
         if action == CommandAction::ManageTmuxSessions || action.to_command_id().is_tmux_only() {
             // Defensive guard: custom keybinds can still target tmux actions even when
             // Windows UI entries are hidden.
-            termy_toast::info("tmux integration is unsupported on Windows");
+            crate::ui::toast::info("tmux integration is unsupported on Windows");
             self.notify_overlay(cx);
             return;
         }
@@ -94,12 +94,12 @@ impl TerminalView {
         if !availability.enabled {
             match availability.reason {
                 Some(CommandUnavailableReason::RequiresTmuxRuntime) => {
-                    termy_toast::info("Attach a tmux session to use this command");
+                    crate::ui::toast::info("Attach a tmux session to use this command");
                     self.notify_overlay(cx);
                     return;
                 }
                 Some(CommandUnavailableReason::InstallCliAlreadyInstalled) => {
-                    termy_toast::info("CLI is already installed");
+                    crate::ui::toast::info("CLI is already installed");
                     self.notify_overlay(cx);
                     return;
                 }
@@ -109,7 +109,7 @@ impl TerminalView {
                         action,
                         availability.reason
                     );
-                    termy_toast::info("Command unavailable");
+                    crate::ui::toast::info("Command unavailable");
                     self.notify_overlay(cx);
                     return;
                 }
@@ -370,7 +370,7 @@ impl TerminalView {
             .find(|task| task.name == action.task_name)
             .cloned()
         else {
-            termy_toast::error(format!("Task \"{}\" no longer exists", action.task_name));
+            crate::ui::toast::error(format!("Task \"{}\" no longer exists", action.task_name));
             self.notify_overlay(cx);
             return;
         };
@@ -381,7 +381,7 @@ impl TerminalView {
                 .as_deref()
                 .is_some_and(|current| current.eq_ignore_ascii_case(layout_name))
         {
-            termy_toast::info(format!(
+            crate::ui::toast::info(format!(
                 "Load saved layout \"{layout_name}\" before running task \"{}\"",
                 task.name
             ));

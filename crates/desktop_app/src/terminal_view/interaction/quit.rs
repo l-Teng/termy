@@ -13,14 +13,14 @@ impl TerminalView {
         match target {
             CloseRequestTarget::TabClose { tab_id } => self
                 .tab_index_by_id(tab_id)
-                .and_then(|index| self.tabs.get(index))
+                .and_then(|index| self.session.tabs.get(index))
                 .is_some_and(|tab| tab.pinned),
             CloseRequestTarget::Application | CloseRequestTarget::WindowClose => false,
         }
     }
 
     fn notify_pinned_tab_close_blocked(&mut self, cx: &mut Context<Self>) {
-        termy_toast::info("Pinned tabs must be unpinned before closing");
+        crate::ui::toast::info("Pinned tabs must be unpinned before closing");
         self.notify_overlay(cx);
     }
 
@@ -73,7 +73,7 @@ impl TerminalView {
                         cx.quit();
                     }
                     Err(error) => {
-                        termy_toast::error(format!("Restart failed: {error}"));
+                        crate::ui::toast::error(format!("Restart failed: {error}"));
                         self.notify_overlay(cx);
                     }
                 }
@@ -148,6 +148,7 @@ impl TerminalView {
         match target {
             CloseRequestTarget::Application | CloseRequestTarget::WindowClose => {
                 let mut titles = self
+                    .session
                     .tabs
                     .iter()
                     .enumerate()
@@ -158,6 +159,7 @@ impl TerminalView {
                 titles
             }
             CloseRequestTarget::TabClose { tab_id } => self
+                .session
                 .tabs
                 .iter()
                 .enumerate()
@@ -375,10 +377,10 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab >= self.tabs.len() {
+        if self.session.active_tab >= self.session.tabs.len() {
             return;
         }
-        let tab_id = self.tabs[self.active_tab].id;
+        let tab_id = self.session.tabs[self.session.active_tab].id;
         let target = Self::tab_close_request_target(self.effective_tab_count_for_close(), tab_id);
         let _ = self.request_close(target, window, cx);
     }
@@ -388,9 +390,9 @@ impl TerminalView {
     /// close (the workspace folds) rather than a window close.
     fn effective_tab_count_for_close(&self) -> usize {
         if self.has_other_workspaces() {
-            self.tabs.len().saturating_add(1)
+            self.session.tabs.len().saturating_add(1)
         } else {
-            self.tabs.len()
+            self.session.tabs.len()
         }
     }
 
@@ -400,10 +402,10 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if index >= self.tabs.len() {
+        if index >= self.session.tabs.len() {
             return;
         }
-        let tab_id = self.tabs[index].id;
+        let tab_id = self.session.tabs[index].id;
         let target = Self::tab_close_request_target(self.effective_tab_count_for_close(), tab_id);
         let _ = self.request_close(target, window, cx);
     }

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn osc8_hyperlink_ranges_match_the_alacritty_engine() {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let output = b"x\x1b]8;id=same;https://example.com/docs\x1b\\linked\x1b]8;;\x1b\\ y";
     native.feed_output(output);
@@ -24,7 +24,7 @@ fn osc8_hyperlink_ranges_match_the_alacritty_engine() {
 #[test]
 fn osc8_identity_ranges_match_the_alacritty_engine() {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let output = b"\x1b]8;id=one;https://example.com/same\x1b\\A\
                    \x1b]8;id=two;https://example.com/same\x1b\\B\
@@ -53,7 +53,7 @@ fn osc8_identity_ranges_match_the_alacritty_engine() {
 #[test]
 fn common_terminal_events_match_the_alacritty_engine() {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let output = b"\x07\x1b]2;hello\x07\x1b]52;c;dGVybXk=\x07";
     native.feed_output(output);
@@ -79,7 +79,7 @@ fn common_terminal_events_match_the_alacritty_engine() {
 #[test]
 fn invalid_utf8_osc_title_events_match_the_alacritty_engine() {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let output = b"\x1b]2;A\xffB\x07";
     native.feed_output(output);
@@ -105,7 +105,7 @@ fn invalid_utf8_osc_title_events_match_the_alacritty_engine() {
 #[test]
 fn osc_parameter_limit_matches_the_alacritty_engine() {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let mut output = b"\x1b]2".to_vec();
     for index in 0..20 {
@@ -135,7 +135,7 @@ fn osc_parameter_limit_matches_the_alacritty_engine() {
 #[test]
 fn invalid_utf8_custom_osc_events_match_the_native_interceptor() {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let output = b"\x1b]7;file:///tmp/A\xffB\x07\
         \x1b]9;9;/tmp/A\xffB\x07\
@@ -164,7 +164,7 @@ fn invalid_utf8_custom_osc_events_match_the_native_interceptor() {
 #[test]
 fn title_stack_parameters_match_the_alacritty_engine() {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
 
     for output in [
@@ -196,7 +196,7 @@ fn title_stack_parameters_match_the_alacritty_engine() {
 #[test]
 fn osc_palette_overrides_and_resets_match_the_alacritty_engine() {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     assert_eq!(tmon_palette(&tmon), native_palette(&native));
 
@@ -235,7 +235,7 @@ fn osc_palette_overrides_and_resets_match_the_alacritty_engine() {
 #[test]
 fn ris_preserves_osc_palette_overrides_like_the_alacritty_engine() {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let set_then_reset = b"\x1b]4;1;#123456\x07\x1b]10;#010203;#040506;#070809\x07\x1bc";
 

@@ -179,9 +179,9 @@ impl TerminalView {
                 .h(px(TABBAR_HEIGHT)),
         );
 
-        for index in 0..self.tabs.len() {
+        for index in 0..self.session.tabs.len() {
             let (display_width, tab_title, pinned, progress_state) = {
-                let tab = &self.tabs[index];
+                let tab = &self.session.tabs[index];
                 (
                     tab.display_width,
                     tab.title.clone(),
@@ -193,7 +193,7 @@ impl TerminalView {
                 .filter(|(anim_index, _)| *anim_index == index)
                 .map(|(_, p)| p);
             let tab_width = Self::horizontal_tab_render_width(display_width, anim_progress);
-            let is_active = index == self.active_tab;
+            let is_active = index == self.session.active_tab;
             let is_drag_source = self
                 .tab_strip
                 .drag
@@ -268,7 +268,7 @@ impl TerminalView {
                     switch_hint_label,
                     is_active,
                     is_drag_source,
-                    is_pane_drop_target: self.pane_move_targets_tab(self.tabs[index].id),
+                    is_pane_drop_target: self.pane_move_targets_tab(self.session.tabs[index].id),
                     is_renaming,
                     show_tab_close,
                     show_tab_pin,

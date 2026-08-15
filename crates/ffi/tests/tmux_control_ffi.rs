@@ -10,7 +10,7 @@ use termy_ffi::{
     termy_tmux_control_close, termy_tmux_control_notifications_free, termy_tmux_control_open,
     termy_tmux_control_poll, termy_tmux_control_send,
 };
-use tmux_control_core::session::ControlSession;
+use termy_tmux_control_core::session::ControlSession;
 
 #[test]
 #[ignore = "requires tmux >= 3.3"]

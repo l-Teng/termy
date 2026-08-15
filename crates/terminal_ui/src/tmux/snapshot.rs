@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 
-use tmux_control_core::types::{
+use termy_tmux_control_core::types::{
     TmuxPaneMouseMode, TmuxPaneState, TmuxSessionSummary, TmuxSnapshot, TmuxWindowState,
 };
 

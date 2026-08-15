@@ -1,3 +1,5 @@
+//! Desktop update-banner presentation models.
+
 use termy_auto_update::UpdateState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

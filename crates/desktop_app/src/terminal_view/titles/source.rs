@@ -232,7 +232,7 @@ impl TerminalView {
     }
 
     pub(crate) fn resolved_tab_title(&self, index: usize) -> String {
-        let tab = &self.tabs[index];
+        let tab = &self.session.tabs[index];
         let fallback_title = self.fallback_title();
         let smart_mode_shell_fallback = Self::smart_mode_shell_fallback_enabled(&self.tab_title);
         let prediction_allows_shell = self.tab_title.priority.contains(&TabTitleSource::Shell);
@@ -258,23 +258,23 @@ impl TerminalView {
     }
 
     pub(crate) fn refresh_tab_title(&mut self, index: usize) -> bool {
-        if index >= self.tabs.len() {
+        if index >= self.session.tabs.len() {
             return false;
         }
 
         let next = self.resolved_tab_title(index);
-        if self.tabs[index].title == next {
+        if self.session.tabs[index].title == next {
             return false;
         }
 
-        let previous = std::mem::replace(&mut self.tabs[index].title, next);
-        let current_title = self.tabs[index].title.clone();
+        let previous = std::mem::replace(&mut self.session.tabs[index].title, next);
+        let current_title = self.session.tabs[index].title.clone();
         self.invalidate_tab_title_width_cache_for_title(previous.as_str());
         self.invalidate_tab_title_width_cache_for_title(current_title.as_str());
 
         // Keep title-width behavior uniform across manual, shell, explicit, and fallback sources.
-        self.tabs[index].sticky_title_width = 0.0;
-        self.tabs[index].title_text_width = 0.0;
+        self.session.tabs[index].sticky_title_width = 0.0;
+        self.session.tabs[index].title_text_width = 0.0;
         self.mark_tab_strip_layout_dirty();
         true
     }
@@ -286,28 +286,28 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> bool {
         let title = title.trim();
-        if title.is_empty() || index >= self.tabs.len() {
+        if title.is_empty() || index >= self.session.tabs.len() {
             return false;
         }
 
         if let Some(explicit_payload) = self.parse_explicit_title(title) {
             return match explicit_payload {
                 ExplicitTitlePayload::Prompt { title, cwd } => {
-                    self.tabs[index].last_prompt_cwd = Some(cwd);
-                    self.tabs[index].running_process = false;
-                    self.tabs[index].current_command = None;
+                    self.session.tabs[index].last_prompt_cwd = Some(cwd);
+                    self.session.tabs[index].running_process = false;
+                    self.session.tabs[index].current_command = None;
                     self.cancel_pending_command_title(index);
                     self.set_explicit_title(index, title)
                 }
                 ExplicitTitlePayload::Title(prompt_title) => {
-                    self.tabs[index].current_command = None;
+                    self.session.tabs[index].current_command = None;
                     self.cancel_pending_command_title(index);
                     self.set_explicit_title(index, prompt_title)
                 }
                 ExplicitTitlePayload::Command { title, command } => {
-                    self.tabs[index].running_process = true;
-                    self.tabs[index].current_command = Some(command);
-                    let tab_id = self.tabs[index].id;
+                    self.session.tabs[index].running_process = true;
+                    self.session.tabs[index].current_command = Some(command);
+                    let tab_id = self.session.tabs[index].id;
                     self.schedule_delayed_command_title(tab_id, title, COMMAND_TITLE_DELAY_MS, cx);
                     false
                 }
@@ -315,21 +315,21 @@ impl TerminalView {
         }
 
         let shell_title = Self::truncate_tab_title(title);
-        if self.tabs[index].shell_title.as_deref() == Some(shell_title.as_str()) {
+        if self.session.tabs[index].shell_title.as_deref() == Some(shell_title.as_str()) {
             return false;
         }
 
-        self.tabs[index].shell_title = Some(shell_title);
+        self.session.tabs[index].shell_title = Some(shell_title);
         self.refresh_tab_title(index)
     }
 
     pub(crate) fn clear_terminal_titles(&mut self, index: usize) -> bool {
-        if index >= self.tabs.len() {
+        if index >= self.session.tabs.len() {
             return false;
         }
 
         self.cancel_pending_command_title(index);
-        let tab = &mut self.tabs[index];
+        let tab = &mut self.session.tabs[index];
         tab.running_process = false;
         tab.current_command = None;
         let had_shell = tab.shell_title.take().is_some();

@@ -12,7 +12,7 @@ impl TestTempPath {
         loop {
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "termy-temon-graphics-test-{}-{id}",
+                "termy-tmon-graphics-test-{}-{id}",
                 std::process::id()
             ));
             match std::fs::create_dir(&path) {

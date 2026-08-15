@@ -6,14 +6,14 @@ enum UpdateToastEffect {
     None,
     DismissProgressToast,
     Enqueue {
-        kind: termy_toast::ToastKind,
+        kind: crate::ui::toast::ToastKind,
         message: String,
     },
     StartOrUpdateProgress {
         message: String,
     },
     FinishProgressOrEnqueue {
-        kind: termy_toast::ToastKind,
+        kind: crate::ui::toast::ToastKind,
         message: String,
     },
 }
@@ -21,7 +21,7 @@ enum UpdateToastEffect {
 fn update_toast_effect(state: Option<&UpdateState>) -> UpdateToastEffect {
     match state {
         Some(UpdateState::Available { version, .. }) => UpdateToastEffect::Enqueue {
-            kind: termy_toast::ToastKind::Info,
+            kind: crate::ui::toast::ToastKind::Info,
             message: format!("Update v{version} available"),
         },
         Some(UpdateState::Downloaded { version, .. }) => UpdateToastEffect::StartOrUpdateProgress {
@@ -32,18 +32,18 @@ fn update_toast_effect(state: Option<&UpdateState>) -> UpdateToastEffect {
         },
         Some(UpdateState::InstallerLaunched { version }) => {
             UpdateToastEffect::FinishProgressOrEnqueue {
-                kind: termy_toast::ToastKind::Info,
+                kind: crate::ui::toast::ToastKind::Info,
                 message: format!(
                     "Installer launched for v{version}; Termy will reopen when setup finishes"
                 ),
             }
         }
         Some(UpdateState::Installed { version }) => UpdateToastEffect::FinishProgressOrEnqueue {
-            kind: termy_toast::ToastKind::Success,
+            kind: crate::ui::toast::ToastKind::Success,
             message: installed_update_toast_message(version),
         },
         Some(UpdateState::Error(message)) => UpdateToastEffect::FinishProgressOrEnqueue {
-            kind: termy_toast::ToastKind::Error,
+            kind: crate::ui::toast::ToastKind::Error,
             message: format!("Update failed: {message}"),
         },
         Some(UpdateState::UpToDate) => UpdateToastEffect::DismissProgressToast,
@@ -86,27 +86,31 @@ impl TerminalView {
             UpdateToastEffect::None => {}
             UpdateToastEffect::DismissProgressToast => {
                 if let Some(id) = self.update_check_toast_id.take() {
-                    termy_toast::dismiss_toast(id);
+                    crate::ui::toast::dismiss_toast(id);
                 }
             }
             UpdateToastEffect::Enqueue { kind, message } => {
                 if let Some(id) = self.update_check_toast_id.take() {
-                    termy_toast::dismiss_toast(id);
+                    crate::ui::toast::dismiss_toast(id);
                 }
-                termy_toast::enqueue_toast(kind, message, None);
+                crate::ui::toast::enqueue_toast(kind, message, None);
             }
             UpdateToastEffect::StartOrUpdateProgress { message } => {
                 if let Some(id) = self.update_check_toast_id {
-                    termy_toast::update_toast(id, termy_toast::ToastKind::Loading, message);
+                    crate::ui::toast::update_toast(
+                        id,
+                        crate::ui::toast::ToastKind::Loading,
+                        message,
+                    );
                 } else {
-                    self.update_check_toast_id = Some(termy_toast::loading(message));
+                    self.update_check_toast_id = Some(crate::ui::toast::loading(message));
                 }
             }
             UpdateToastEffect::FinishProgressOrEnqueue { kind, message } => {
                 if let Some(id) = self.update_check_toast_id.take() {
-                    termy_toast::update_toast(id, kind, message);
+                    crate::ui::toast::update_toast(id, kind, message);
                 } else {
-                    termy_toast::enqueue_toast(kind, message, None);
+                    crate::ui::toast::enqueue_toast(kind, message, None);
                 }
             }
         }
@@ -130,7 +134,7 @@ mod tests {
                 extension: "dmg".to_string(),
             })),
             UpdateToastEffect::Enqueue {
-                kind: termy_toast::ToastKind::Info,
+                kind: crate::ui::toast::ToastKind::Info,
                 message: "Update v0.1.79 available".to_string(),
             }
         );
@@ -164,7 +168,7 @@ mod tests {
                 version: "0.1.79".to_string(),
             })),
             UpdateToastEffect::FinishProgressOrEnqueue {
-                kind: termy_toast::ToastKind::Success,
+                kind: crate::ui::toast::ToastKind::Success,
                 ..
             }
         ));
@@ -177,7 +181,7 @@ mod tests {
                 version: "0.1.79".to_string(),
             })),
             UpdateToastEffect::FinishProgressOrEnqueue {
-                kind: termy_toast::ToastKind::Info,
+                kind: crate::ui::toast::ToastKind::Info,
                 message: "Installer launched for v0.1.79; Termy will reopen when setup finishes"
                     .to_string(),
             }

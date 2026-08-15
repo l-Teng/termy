@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-tmon_current = { package = "tmon", path = "../../crates/temon" }
+tmon_current = { package = "tmon", path = "../../crates/tmon" }
 
 [build-dependencies]
 cc = "1"

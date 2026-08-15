@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 
-use tmux_control_core::types::TmuxShutdownMode;
+use termy_tmux_control_core::types::TmuxShutdownMode;
 
 pub(crate) fn is_tmux_missing_client_error(error: &anyhow::Error) -> bool {
     error_chain_contains(error, "can't find client")

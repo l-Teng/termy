@@ -4,7 +4,7 @@
 
 use super::*;
 use std::collections::VecDeque;
-use termy_terminal_ui::terminal_ui_render_metrics_snapshot;
+use termy_core::terminal_ui_render_metrics_snapshot;
 
 const INSPECTOR_DEFAULT_HEIGHT: f32 = 280.0;
 const INSPECTOR_MIN_HEIGHT: f32 = 140.0;
@@ -404,7 +404,7 @@ impl TerminalView {
     }
 
     fn inspector_pane_snapshots(&self) -> Vec<InspectorPaneSnapshot> {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.session.tabs.get(self.session.active_tab) else {
             return Vec::new();
         };
         let active_pane_id = tab.active_pane_id.as_str();
@@ -436,8 +436,9 @@ impl TerminalView {
     }
 
     fn inspector_active_tab_snapshot(&self) -> Option<InspectorActiveTabSnapshot> {
-        self.tabs
-            .get(self.active_tab)
+        self.session
+            .tabs
+            .get(self.session.active_tab)
             .map(|tab| InspectorActiveTabSnapshot {
                 title: tab.title.clone(),
                 window_id: tab.window_id.clone(),
@@ -877,8 +878,9 @@ impl TerminalView {
             },
         );
         let active_mouse_mode = self
+            .session
             .tabs
-            .get(self.active_tab)
+            .get(self.session.active_tab)
             .and_then(TerminalTab::active_terminal)
             .map_or_else(
                 || "-".to_string(),

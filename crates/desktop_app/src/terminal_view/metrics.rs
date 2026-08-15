@@ -6,8 +6,8 @@ use std::env;
 use std::time::{Duration, Instant};
 use sysinfo::{ProcessesToUpdate, System, get_current_pid};
 #[cfg(debug_assertions)]
-use termy_terminal_ui::terminal_ui_render_metrics_reset;
-use termy_terminal_ui::{TerminalUiRenderMetricsSnapshot, terminal_ui_render_metrics_snapshot};
+use termy_core::terminal_ui_render_metrics_reset;
+use termy_core::{TerminalUiRenderMetricsSnapshot, terminal_ui_render_metrics_snapshot};
 
 #[cfg(debug_assertions)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

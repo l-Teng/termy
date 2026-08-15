@@ -7,5 +7,5 @@ publish = false
 [workspace]
 
 [dependencies]
-tmon_current = { package = "tmon", path = "../../crates/temon" }
+tmon_current = { package = "tmon", path = "../../crates/tmon" }
 tmon_reference = { package = "tmon", git = "https://github.com/lassejlv/termy", rev = "03d7ca5c5420ca141afe56f725341faadb71af18" }

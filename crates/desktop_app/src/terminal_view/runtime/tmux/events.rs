@@ -107,7 +107,7 @@ impl TerminalView {
                         .complete_attempt(Instant::now(), converged);
                 }
                 Err(error) => {
-                    termy_toast::error(format!("tmux sync failed: {error}"));
+                    crate::ui::toast::error(format!("tmux sync failed: {error}"));
                     self.clear_tmux_resize_convergence();
                 }
             }
@@ -194,7 +194,7 @@ impl TerminalView {
                     needs_refresh = true;
                 }
                 TmuxNotification::Warning(message) => {
-                    termy_toast::warning(message);
+                    crate::ui::toast::warning(message);
                     should_redraw = true;
                 }
                 TmuxNotification::SubscriptionChanged {
@@ -202,6 +202,7 @@ impl TerminalView {
                 } if name == TMUX_MOUSE_MODE_SUBSCRIPTION_NAME => {
                     if let Some(mode) = parse_tmux_mouse_mode_subscription(&value)
                         && let Some(pane) = self
+                            .session
                             .tabs
                             .iter_mut()
                             .flat_map(|tab| tab.panes.iter_mut())

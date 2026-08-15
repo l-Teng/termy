@@ -1,7 +1,7 @@
 # Tmon
 
 Tmon is Termy's experimental lightweight terminal engine, located in the
-`crates/temon` directory so its implementation stays independent of GPUI and
+`crates/tmon` directory so its implementation stays independent of GPUI and
 the desktop application.
 
 The current prototype is an independent engine with no production Cargo

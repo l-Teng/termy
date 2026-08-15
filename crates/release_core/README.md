@@ -18,5 +18,4 @@ cargo test -p termy_release_core
 
 - `gpui`
 - `termy_auto_update`
-- `termy_auto_update_ui`
 - `termy` / `crates/desktop_app`

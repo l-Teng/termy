@@ -1,7 +1,7 @@
 use super::{
     TerminalRenderDamageSnapshot, TerminalViewportScroll, TerminalViewportScrollDirection,
 };
-use termy_terminal_ui::{
+use termy_core::{
     KittyGraphicsRenderPlacement, MAX_TERMINAL_SCROLLBACK_HISTORY, ProgressState,
     TabTitleShellIntegration, TerminalClipboardTarget, TerminalCursorState, TerminalCursorStyle,
     TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalKeyboardMode, TerminalLaunch,

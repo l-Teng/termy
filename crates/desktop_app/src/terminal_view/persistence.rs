@@ -464,7 +464,7 @@ impl TerminalView {
     }
 
     pub(super) fn persisted_native_workspace_working_dir(&self) -> Option<String> {
-        termy_terminal_ui::resolve_launch_working_directory(
+        termy_core::resolve_launch_working_directory(
             self.configured_working_dir.as_deref(),
             self.terminal_runtime.working_dir_fallback,
         )
@@ -476,7 +476,9 @@ impl TerminalView {
         if self.runtime_kind() != RuntimeKind::Native {
             return None;
         }
-        Some(self.collect_persisted_workspace_from_tabs(&self.tabs, self.active_tab))
+        Some(
+            self.collect_persisted_workspace_from_tabs(&self.session.tabs, self.session.active_tab),
+        )
     }
 
     /// Snapshot of every workspace — the visible strip plus stashed
@@ -486,15 +488,15 @@ impl TerminalView {
             return None;
         }
 
-        let mut workspaces = Vec::with_capacity(self.workspaces.len());
+        let mut workspaces = Vec::with_capacity(self.session.workspaces.len());
         let mut active_position = 0;
-        for (index, entry) in self.workspaces.iter().enumerate() {
+        for (index, entry) in self.session.workspaces.iter().enumerate() {
             let stored_name = if entry.custom_named {
                 entry.name.clone()
             } else {
                 String::new()
             };
-            if index == self.active_workspace {
+            if index == self.session.active_workspace {
                 active_position = workspaces.len();
             }
             if let Some(mut pending) = Self::pending_stored_workspace(entry) {
@@ -502,8 +504,8 @@ impl TerminalView {
                 workspaces.push(pending);
                 continue;
             }
-            let (tabs, active_tab) = if index == self.active_workspace {
-                (self.tabs.as_slice(), self.active_tab)
+            let (tabs, active_tab) = if index == self.session.active_workspace {
+                (self.session.tabs.as_slice(), self.session.active_tab)
             } else {
                 (entry.tabs.as_slice(), entry.active_tab)
             };
@@ -560,6 +562,7 @@ impl TerminalView {
                     .map(|(index, pane)| (pane.id.clone(), index))
                     .collect::<HashMap<_, _>>();
                 let layout_tree = self
+                    .session
                     .native_pane_layout_trees
                     .get(&tab.id)
                     .and_then(|tree| {
@@ -934,6 +937,7 @@ impl TerminalView {
 
     pub(super) fn materialize_pending_workspace(&mut self, index: usize) -> Result<bool, String> {
         let Some(stored) = self
+            .session
             .workspaces
             .get_mut(index)
             .and_then(|entry| entry.pending_restore.take())
@@ -944,14 +948,15 @@ impl TerminalView {
         let (tabs, layout_trees, active_tab) = match self.build_restored_tabs(workspace) {
             Ok(restored) => restored,
             Err(error) => {
-                if let Some(entry) = self.workspaces.get_mut(index) {
+                if let Some(entry) = self.session.workspaces.get_mut(index) {
                     entry.pending_restore = Some(stored);
                 }
                 return Err(error);
             }
         };
-        self.native_pane_layout_trees.extend(layout_trees);
+        self.session.native_pane_layout_trees.extend(layout_trees);
         let entry = self
+            .session
             .workspaces
             .get_mut(index)
             .ok_or_else(|| "saved workspace disappeared while starting".to_string())?;
@@ -1002,10 +1007,10 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let (tabs, layout_trees, active_tab) = self.build_restored_tabs(workspace)?;
-        self.tabs = tabs;
-        self.native_pane_layout_trees = layout_trees;
-        self.native_pane_zoom_snapshots.clear();
-        self.active_tab = active_tab;
+        self.session.tabs = tabs;
+        self.session.native_pane_layout_trees = layout_trees;
+        self.session.native_pane_zoom_snapshots.clear();
+        self.session.active_tab = active_tab;
         self.finish_workspace_restore(cx);
         Ok(())
     }
@@ -1067,22 +1072,22 @@ impl TerminalView {
             .iter()
             .position(|entry| entry.id == restored_active_id)
             .expect("restored active workspace must be retained");
-        self.next_workspace_id = entries
+        self.session.next_workspace_id = entries
             .iter()
             .map(|entry| entry.id)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        self.workspaces = entries;
-        self.active_workspace = active_entry;
+        self.session.workspaces = entries;
+        self.session.active_workspace = active_entry;
         let (tabs, active_tab) = {
-            let entry = &mut self.workspaces[active_entry];
+            let entry = &mut self.session.workspaces[active_entry];
             (std::mem::take(&mut entry.tabs), entry.active_tab)
         };
-        self.tabs = tabs;
-        self.active_tab = active_tab.min(self.tabs.len().saturating_sub(1));
-        self.native_pane_layout_trees = restored_layout_trees;
-        self.native_pane_zoom_snapshots.clear();
+        self.session.tabs = tabs;
+        self.session.active_tab = active_tab.min(self.session.tabs.len().saturating_sub(1));
+        self.session.native_pane_layout_trees = restored_layout_trees;
+        self.session.native_pane_zoom_snapshots.clear();
         self.finish_workspace_restore(cx);
         Ok(())
     }
@@ -1091,7 +1096,7 @@ impl TerminalView {
         self.mark_tab_strip_layout_dirty();
         self.sync_tab_strip_for_active_tab();
         self.sync_plugin_lifecycle_state(false, cx);
-        for index in 0..self.tabs.len() {
+        for index in 0..self.session.tabs.len() {
             self.refresh_tab_title(index);
         }
         self.clear_selection();

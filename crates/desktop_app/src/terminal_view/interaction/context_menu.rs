@@ -171,7 +171,7 @@ impl TerminalView {
 
         let _ = self.close_terminal_context_menu(cx);
         cx.write_to_clipboard(super::input::kitty_png_clipboard_item(png.as_ref()));
-        termy_toast::success("Copied image");
+        crate::ui::toast::success("Copied image");
         self.notify_overlay(cx);
     }
 
@@ -190,7 +190,7 @@ impl TerminalView {
         cx.write_to_clipboard(ClipboardItem::new_string(
             Self::copyable_terminal_buffer_position(position),
         ));
-        termy_toast::success("Copied buffer position");
+        crate::ui::toast::success("Copied buffer position");
         self.notify_overlay(cx);
     }
 
@@ -389,7 +389,11 @@ impl TerminalView {
     ) {
         #[cfg(not(target_os = "macos"))]
         self.schedule_plugin_refresh(cx);
-        let Some((tab_id, pinned)) = self.tabs.get(tab_index).map(|tab| (tab.id, tab.pinned))
+        let Some((tab_id, pinned)) = self
+            .session
+            .tabs
+            .get(tab_index)
+            .map(|tab| (tab.id, tab.pinned))
         else {
             return;
         };

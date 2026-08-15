@@ -38,7 +38,7 @@ impl TerminalView {
     fn open_config_action(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = crate::app_actions::open_config_file() {
             log::error!("Failed to open config file from command action: {error}");
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
             self.notify_overlay(cx);
         }
     }
@@ -51,7 +51,7 @@ impl TerminalView {
             }
             Err(error) => {
                 log::error!("Failed to prettify config file from command action: {error}");
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 self.notify_overlay(cx);
             }
         }
@@ -75,12 +75,12 @@ impl TerminalView {
             let _ = cx.update(|cx| {
                 this.update(cx, |view, cx| match result {
                     Ok(msg) => {
-                        termy_toast::success(msg);
+                        crate::ui::toast::success(msg);
                         view.reload_config(cx);
                         cx.notify();
                     }
                     Err(err) => {
-                        termy_toast::error(err);
+                        crate::ui::toast::error(err);
                         view.notify_overlay(cx);
                     }
                 })
@@ -101,7 +101,7 @@ impl TerminalView {
             std::env::consts::ARCH,
             config_path
         );
-        termy_toast::info(message);
+        crate::ui::toast::info(message);
         self.notify_overlay(cx);
     }
 
@@ -113,20 +113,20 @@ impl TerminalView {
 
         if let Err(error) = crate::app_actions::open_settings_window(cx) {
             log::error!("{error}");
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
             self.notify_overlay(cx);
         }
     }
 
     fn check_for_updates_action(&mut self, cx: &mut Context<Self>) {
         let Some(updater) = self.ensure_auto_updater(cx) else {
-            termy_toast::info("Auto updates are only available on macOS and Windows");
+            crate::ui::toast::info("Auto updates are only available on macOS and Windows");
             self.notify_overlay(cx);
             return;
         };
 
         AutoUpdater::check(updater.downgrade(), cx);
-        self.update_check_toast_id = Some(termy_toast::loading("Checking for updates"));
+        self.update_check_toast_id = Some(crate::ui::toast::loading("Checking for updates"));
         self.notify_overlay(cx);
     }
 }

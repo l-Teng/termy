@@ -154,7 +154,7 @@ impl PluginUiView {
             let _ = window_handle.update(cx, |view, window, cx| {
                 if let Err(error) = view.apply_plugin_actions(actions, window, cx) {
                     log::error!("Plugin view action failed: {error}");
-                    termy_toast::error(error);
+                    crate::ui::toast::error(error);
                     view.notify_overlay(cx);
                 }
             });

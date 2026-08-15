@@ -1,5 +1,5 @@
 use super::*;
-use termy_terminal_ui::{
+use termy_core::{
     TerminalMouseButton, TerminalMouseEventKind, TerminalMouseModifiers, TerminalMousePosition,
     encode_mouse_report,
 };
@@ -174,6 +174,7 @@ fn has_forwarded_press(state: &MouseReportingState) -> bool {
 impl TerminalView {
     fn pane_mouse_mode(&self, pane_id: &str) -> Option<TerminalMouseMode> {
         let pane = self
+            .session
             .tabs
             .iter()
             .flat_map(|tab| tab.panes.iter())
@@ -196,6 +197,7 @@ impl TerminalView {
             .query_pane_mouse_mode(pane_id)
             .ok()?;
         if let Some(pane) = self
+            .session
             .tabs
             .iter_mut()
             .flat_map(|tab| tab.panes.iter_mut())
@@ -701,7 +703,7 @@ impl TerminalView {
 mod tests {
     use super::*;
     use gpui::Modifiers;
-    use termy_terminal_ui::TerminalMouseMode;
+    use termy_core::TerminalMouseMode;
 
     fn enabled_mode() -> TerminalMouseMode {
         TerminalMouseMode {

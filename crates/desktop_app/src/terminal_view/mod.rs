@@ -9,6 +9,7 @@ use crate::config::{
 };
 use crate::keybindings;
 use crate::ui::scrollbar::{ScrollbarVisibilityController, ScrollbarVisibilityMode};
+use crate::ui::toast::ToastManager;
 use alacritty_terminal::{grid::Dimensions, term::cell::Flags};
 use flume::{Sender, bounded};
 use gpui::AppContext;
@@ -25,7 +26,7 @@ use std::process::Stdio;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
-    ops::{Deref, Range},
+    ops::Range,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -36,24 +37,27 @@ use std::{
 };
 use termy_auto_update::{AutoUpdater, UpdateState};
 use termy_config_core::{MAX_LINE_HEIGHT, MIN_LINE_HEIGHT};
+use termy_core::{
+    CommandLifecycle, KittyGraphicsRenderPlacement, ProgressState, TabTitleShellIntegration,
+    Terminal as NativeTerminal, TerminalClipboardTarget, TerminalCursorState, TerminalCursorStyle,
+    TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalKeyEventKind,
+    TerminalKeyboardMode, TerminalLaunch, TerminalMouseMode, TerminalOptions, TerminalQueryColors,
+    TerminalReplyHost, TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier,
+    WindowsShell as RuntimeWindowsShell, WorkingDirFallback as RuntimeWorkingDirFallback,
+    find_link_in_line, hyperlink_at_viewport_cell, link_at_viewport_cell,
+    normalize_working_directory_candidate, resolve_launch_working_directory,
+    resolve_working_directory_path,
+};
 use termy_plugin_runtime::{PluginEvent, PluginRuntime};
 use termy_search::SearchState;
 use termy_terminal_ui::{
-    CellRenderInfo, CommandLifecycle, KittyGraphicsRenderPlacement, PaneTerminal, ProgressState,
-    TabTitleShellIntegration, Terminal as NativeTerminal, TerminalClipboardTarget,
-    TerminalCursorState, TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan,
-    TerminalEvent, TerminalGrid, TerminalGridPaintCacheHandle, TerminalGridPaintDamage,
-    TerminalGridRows, TerminalKeyEventKind, TerminalKeyboardMode, TerminalLaunch,
-    TerminalMouseMode, TerminalOptions, TerminalQueryColors, TerminalReplyHost,
-    TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, TmuxLaunchTarget,
-    TmuxPaneMouseMode, WindowsShell as RuntimeWindowsShell,
-    WorkingDirFallback as RuntimeWorkingDirFallback, find_link_in_line, hyperlink_at_viewport_cell,
-    keystroke_to_input, link_at_viewport_cell, normalize_working_directory_candidate,
-    resolve_launch_working_directory, resolve_working_directory_path,
+    CellRenderInfo, PaneTerminal, TerminalGrid, TerminalGridPaintCacheHandle,
+    TerminalGridPaintDamage, TerminalGridRows, TmuxLaunchTarget, TmuxPaneMouseMode,
+    keystroke_to_input,
 };
-use termy_toast::ToastManager;
 
 mod appearance;
+mod backend;
 mod benchmark;
 mod command_palette;
 mod constants;
@@ -71,6 +75,7 @@ mod render_cache;
 mod runtime;
 mod scrollbar;
 mod search;
+mod session;
 pub(crate) mod tab_strip;
 mod tabs;
 mod titles;
@@ -89,6 +94,14 @@ use appearance::{
     background_opacity_factor, blend_rgba, pane_divider_color, pane_focus_preset,
     pane_focus_strength_factor, resolve_background_appearance, resolve_chrome_stroke_color,
     scaled_background_alpha_for_opacity, scaled_chrome_alpha_for_opacity,
+};
+#[cfg(test)]
+use backend::tmon_engine_enabled_for;
+use backend::{
+    ClipboardTextCache, GpuiClipboardReplyHost, NativeTerminalInstance, Terminal, TerminalCellRef,
+    TerminalLineRange, TerminalRenderDamageSnapshot, TerminalViewportScroll,
+    TerminalViewportScrollDirection, TmonTerminalInstance, terminal_engine_label,
+    tmon_engine_available, tmon_engine_enabled, tmon_engine_requested,
 };
 use command_palette::{
     CommandPaletteMode, CommandPaletteState, PluginLifecycleState, TmuxSessionIntent,
@@ -112,6 +125,7 @@ use render_cache::{
     TerminalPaneCellColorTransformKey, TerminalPaneRenderCache, TerminalPaneRenderCacheKey,
 };
 use runtime::{RuntimeKind, RuntimeState, TmuxRuntime};
+use session::SessionState;
 pub(crate) use tab_strip::constants::*;
 use tab_strip::state::TabStripState;
 
@@ -462,213 +476,6 @@ enum PaneResizeResult {
     Applied,
     BlockedByMinimum,
     NoChange,
-}
-
-#[allow(clippy::large_enum_variant)]
-enum Terminal {
-    Tmux(PaneTerminal),
-    Native(NativeTerminalInstance),
-    Tmon(TmonTerminalInstance),
-}
-
-struct NativeTerminalInstance {
-    wakeup_id: NativeTerminalWakeupId,
-    terminal: Mutex<NativeTerminal>,
-}
-
-struct TmonTerminalInstance {
-    wakeup_id: NativeTerminalWakeupId,
-    terminal: tmon::Terminal,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TerminalLineRange {
-    first_line: i32,
-    last_line: i32,
-    columns: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TerminalViewportScrollDirection {
-    Up,
-    Down,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TerminalViewportScroll {
-    top: usize,
-    bottom: usize,
-    count: usize,
-    direction: TerminalViewportScrollDirection,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TerminalRenderDamageSnapshot {
-    damage: TerminalDamageSnapshot,
-    scrolls: Vec<TerminalViewportScroll>,
-    generation: Option<u64>,
-}
-
-impl TerminalRenderDamageSnapshot {
-    fn from_core(damage: TerminalDamageSnapshot) -> Self {
-        Self {
-            damage,
-            scrolls: Vec::new(),
-            generation: None,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum TerminalCellRef<'a> {
-    Alacritty(&'a alacritty_terminal::term::cell::Cell),
-    Tmon(&'a tmon::Cell, Option<tmon::Combining<'a>>),
-}
-
-impl<'a> From<&'a alacritty_terminal::term::cell::Cell> for TerminalCellRef<'a> {
-    fn from(cell: &'a alacritty_terminal::term::cell::Cell) -> Self {
-        Self::Alacritty(cell)
-    }
-}
-
-impl<'a> From<&'a tmon::Cell> for TerminalCellRef<'a> {
-    fn from(cell: &'a tmon::Cell) -> Self {
-        Self::Tmon(cell, None)
-    }
-}
-
-impl TerminalCellRef<'_> {
-    fn character(self) -> char {
-        match self {
-            Self::Alacritty(cell) => cell.c,
-            Self::Tmon(cell, _) => cell.character,
-        }
-    }
-
-    fn is_wide_spacer(self) -> bool {
-        match self {
-            Self::Alacritty(cell) => cell
-                .flags
-                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-            Self::Tmon(cell, _) => cell.wide_spacer() || cell.leading_wide_spacer(),
-        }
-    }
-
-    fn is_trailing_wide_spacer(self) -> bool {
-        match self {
-            Self::Alacritty(cell) => cell.flags.contains(Flags::WIDE_CHAR_SPACER),
-            Self::Tmon(cell, _) => cell.wide_spacer(),
-        }
-    }
-
-    fn is_hidden(self) -> bool {
-        match self {
-            Self::Alacritty(cell) => cell.flags.contains(Flags::HIDDEN),
-            Self::Tmon(cell, _) => cell.attributes.hidden(),
-        }
-    }
-
-    fn combining(self) -> Option<SharedString> {
-        match self {
-            Self::Alacritty(_) => None,
-            Self::Tmon(_, combining) => combining
-                .map(tmon::Combining::to_owned_string)
-                .map(SharedString::from),
-        }
-    }
-
-    fn append_combining_to(self, text: &mut String) {
-        match self {
-            Self::Alacritty(_) => {}
-            Self::Tmon(_, combining) => {
-                if let Some(combining) = combining {
-                    combining.append_to(text);
-                }
-            }
-        }
-    }
-}
-
-fn tmon_engine_requested(value: Option<&std::ffi::OsStr>) -> bool {
-    value.is_some_and(|value| value == "1")
-}
-
-fn tmon_engine_available() -> bool {
-    tmon::native_pty_available()
-}
-
-fn tmon_engine_enabled_for(value: Option<&std::ffi::OsStr>, available: bool) -> bool {
-    tmon_engine_requested(value) && available
-}
-
-fn tmon_engine_enabled(value: Option<&std::ffi::OsStr>) -> bool {
-    tmon_engine_enabled_for(value, tmon_engine_available())
-}
-
-fn terminal_engine_label(terminal: Option<&Terminal>) -> &'static str {
-    match terminal {
-        Some(Terminal::Tmon(_)) => "tmon",
-        Some(Terminal::Native(_) | Terminal::Tmux(_)) => "alacritty",
-        None => "-",
-    }
-}
-
-impl Deref for TmonTerminalInstance {
-    type Target = tmon::Terminal;
-
-    fn deref(&self) -> &Self::Target {
-        &self.terminal
-    }
-}
-
-impl Deref for NativeTerminalInstance {
-    type Target = Mutex<NativeTerminal>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.terminal
-    }
-}
-
-#[derive(Default)]
-struct ClipboardTextCache {
-    // Outer `Option` records whether GPUI has been queried; the inner value is
-    // the clipboard result, which can legitimately be empty.
-    value: Option<Option<String>>,
-}
-
-impl ClipboardTextCache {
-    fn get_or_read(&mut self, read: impl FnOnce() -> Option<String>) -> Option<String> {
-        if let Some(value) = &self.value {
-            return value.clone();
-        }
-
-        let value = read();
-        self.value = Some(value.clone());
-        value
-    }
-}
-
-struct GpuiClipboardReplyHost<'host, 'cx> {
-    cx: &'host mut Context<'cx, TerminalView>,
-    clipboard_text: &'host mut ClipboardTextCache,
-}
-
-impl<'host, 'cx> GpuiClipboardReplyHost<'host, 'cx> {
-    fn new(
-        cx: &'host mut Context<'cx, TerminalView>,
-        clipboard_text: &'host mut ClipboardTextCache,
-    ) -> Self {
-        Self { cx, clipboard_text }
-    }
-}
-
-impl TerminalReplyHost for GpuiClipboardReplyHost<'_, '_> {
-    fn load_clipboard(&mut self, _target: TerminalClipboardTarget) -> Option<String> {
-        // GPUI exposes a single host clipboard source here, so both OSC 52
-        // targets resolve through the same adapter.
-        self.clipboard_text
-            .get_or_read(|| self.cx.read_from_clipboard().and_then(|item| item.text()))
-    }
 }
 
 impl Terminal {
@@ -1085,7 +892,7 @@ impl Terminal {
     }
 
     /// The OSC 8 hyperlink under the given viewport cell, if any.
-    fn hyperlink_at(&self, row: usize, col: usize) -> Option<termy_terminal_ui::DetectedLink> {
+    fn hyperlink_at(&self, row: usize, col: usize) -> Option<termy_core::DetectedLink> {
         match self {
             Self::Tmux(terminal) => {
                 terminal.with_term(|term| hyperlink_at_viewport_cell(term, row, col))
@@ -1097,7 +904,7 @@ impl Terminal {
             Self::Tmon(terminal) => {
                 terminal
                     .hyperlink_at(row, col)
-                    .map(|link| termy_terminal_ui::DetectedLink {
+                    .map(|link| termy_core::DetectedLink {
                         start_col: link.start_col,
                         end_col: link.end_col,
                         target: link.target,
@@ -1108,7 +915,7 @@ impl Terminal {
 
     /// The OSC 8 or detected text link under the given viewport cell,
     /// including links spanning soft-wrapped rows.
-    fn link_at(&self, row: usize, col: usize) -> Option<termy_terminal_ui::DetectedViewportLink> {
+    fn link_at(&self, row: usize, col: usize) -> Option<termy_core::DetectedViewportLink> {
         match self {
             Self::Tmux(terminal) => {
                 terminal.with_term(|term| link_at_viewport_cell(term, row, col))
@@ -1125,7 +932,7 @@ impl Terminal {
                         target: link.target,
                     })
                 })
-                .map(|link| termy_terminal_ui::DetectedViewportLink {
+                .map(|link| termy_core::DetectedViewportLink {
                     start_row: link.start_row,
                     start_col: link.start_col,
                     end_row: link.end_row,
@@ -1547,13 +1354,7 @@ pub(crate) enum TabBarVisibility {
 
 /// The main terminal view component
 pub struct TerminalView {
-    tabs: Vec<TerminalTab>,
-    /// All workspaces in sidebar order. The entry at `active_workspace` always
-    /// has an empty `tabs` vec: the active workspace's tabs live in `tabs`
-    /// above so the existing tab machinery only ever sees the visible strip.
-    workspaces: Vec<workspaces::WorkspaceEntry>,
-    active_workspace: usize,
-    next_workspace_id: u64,
+    session: SessionState,
     workspace_sidebar_enabled: bool,
     workspace_sidebar_width: f32,
     workspace_sidebar_resize_drag: Option<workspaces::WorkspaceSidebarResizeDragState>,
@@ -1562,10 +1363,6 @@ pub struct TerminalView {
     workspace_drag: Option<workspaces::WorkspaceDragState>,
     renaming_workspace: Option<usize>,
     workspace_rename_input: InlineInputState,
-    native_pane_zoom_snapshots: HashMap<TabId, NativePaneZoomSnapshot>,
-    native_pane_layout_trees: HashMap<TabId, NativePaneLayoutTree>,
-    next_tab_id: TabId,
-    active_tab: usize,
     renaming_tab: Option<usize>,
     rename_input: InlineInputState,
     event_wakeup_tx: Sender<()>,
@@ -2173,27 +1970,27 @@ impl TerminalView {
     }
 
     fn ensure_native_layout_tree_for_tab_id(&mut self, tab_id: TabId) -> bool {
-        if self.native_pane_layout_trees.contains_key(&tab_id) {
+        if self.session.native_pane_layout_trees.contains_key(&tab_id) {
             return true;
         }
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+        let Some(tab) = self.session.tabs.iter().find(|tab| tab.id == tab_id) else {
             return false;
         };
         let Some(tree) = Self::native_layout_tree_from_panes(&tab.panes) else {
             return false;
         };
-        self.native_pane_layout_trees.insert(tab_id, tree);
+        self.session.native_pane_layout_trees.insert(tab_id, tree);
         true
     }
 
     fn apply_native_layout_tree_to_tab(&mut self, tab_id: TabId, cols: u16, rows: u16) -> bool {
-        let Some(tree) = self.native_pane_layout_trees.get(&tab_id).cloned() else {
+        let Some(tree) = self.session.native_pane_layout_trees.get(&tab_id).cloned() else {
             return false;
         };
         let Some(tab_index) = self.tab_index_by_id(tab_id) else {
             return false;
         };
-        let Some(tab) = self.tabs.get_mut(tab_index) else {
+        let Some(tab) = self.session.tabs.get_mut(tab_index) else {
             return false;
         };
         let mut rects = HashMap::new();
@@ -2778,18 +2575,21 @@ impl TerminalView {
         explicit_working_dir: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let active_tab = self.active_tab;
+        let active_tab = self.session.active_tab;
         let prompt_cwd = self
+            .session
             .tabs
             .get(active_tab)
             .and_then(|tab| tab.last_prompt_cwd.clone());
         let process_cwd = self
+            .session
             .tabs
             .get(active_tab)
             .and_then(TerminalTab::active_terminal)
             .and_then(Terminal::child_pid)
             .and_then(|pid| self.cached_or_resolved_working_dir_for_child_pid(pid, cx));
         let title_cwd = self
+            .session
             .tabs
             .get(active_tab)
             .and_then(|tab| {
@@ -2883,7 +2683,8 @@ impl TerminalView {
     }
 
     fn pane_terminal_by_id(&self, pane_id: &str) -> Option<&Terminal> {
-        self.tabs
+        self.session
+            .tabs
             .iter()
             .flat_map(|tab| tab.panes.iter())
             .find(|pane| pane.id == pane_id)
@@ -2891,20 +2692,22 @@ impl TerminalView {
     }
 
     fn is_active_pane_id(&self, pane_id: &str) -> bool {
-        self.tabs
-            .get(self.active_tab)
+        self.session
+            .tabs
+            .get(self.session.active_tab)
             .and_then(|tab| tab.active_pane_id())
             == Some(pane_id)
     }
 
     fn active_pane_id(&self) -> Option<&str> {
-        self.tabs
-            .get(self.active_tab)
+        self.session
+            .tabs
+            .get(self.session.active_tab)
             .and_then(|tab| tab.active_pane_id())
     }
 
     fn active_tab_ref(&self) -> Option<&TerminalTab> {
-        self.tabs.get(self.active_tab)
+        self.session.tabs.get(self.session.active_tab)
     }
 
     fn active_pane_ref(&self) -> Option<&TerminalPane> {
@@ -3055,7 +2858,7 @@ impl TerminalView {
         }
         let raw = (elapsed / total).clamp(0.0, 1.0);
         let progress = 1.0 - (1.0 - raw).powi(3); // ease_out_cubic
-        let index = self.tabs.iter().position(|t| t.id == tab_id)?;
+        let index = self.session.tabs.iter().position(|t| t.id == tab_id)?;
         Some((index, progress))
     }
 
@@ -3067,8 +2870,9 @@ impl TerminalView {
 
     fn effective_terminal_padding(&self) -> (f32, f32) {
         if Self::uses_outer_terminal_padding(
-            self.tabs
-                .get(self.active_tab)
+            self.session
+                .tabs
+                .get(self.session.active_tab)
                 .map_or(0, |tab| tab.panes.len()),
         ) {
             (self.padding_x, self.padding_y)
@@ -3082,8 +2886,9 @@ impl TerminalView {
     fn native_split_content_padding(&self) -> (f32, f32) {
         if Self::uses_native_split_content_padding(
             self.runtime_uses_tmux(),
-            self.tabs
-                .get(self.active_tab)
+            self.session
+                .tabs
+                .get(self.session.active_tab)
                 .map_or(0, |tab| tab.panes.len()),
         ) {
             (self.padding_x, self.padding_y)
@@ -3685,7 +3490,7 @@ impl TerminalView {
     }
 
     pub(super) fn clear_pane_render_caches(&self) {
-        for tab in &self.tabs {
+        for tab in &self.session.tabs {
             for pane in &tab.panes {
                 pane.render_cache.borrow_mut().clear();
             }
@@ -3843,7 +3648,7 @@ impl TerminalView {
             && !self.warned_blur_unsupported_once
         {
             self.warned_blur_unsupported_once = true;
-            termy_toast::warning(
+            crate::ui::toast::warning(
                 "Background blur is unsupported in this session; using transparency",
             );
         }
@@ -3994,7 +3799,7 @@ impl TerminalView {
             Ok(hosts) => hosts,
             Err(error) => {
                 log::warn!("Failed to load saved SSH hosts: {error}");
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 Vec::new()
             }
         };
@@ -4037,7 +3842,7 @@ impl TerminalView {
                 Ok(session) => session,
                 Err(error) => {
                     log::error!("Failed to preload native tab workspace: {error}");
-                    termy_toast::error("Failed to load saved native tabs");
+                    crate::ui::toast::error("Failed to load saved native tabs");
                     None
                 }
             }
@@ -4066,10 +3871,7 @@ impl TerminalView {
 
         let plugin_runtime = PluginRuntime::new(config_path.as_deref());
         let mut view = Self {
-            tabs: Vec::new(),
-            workspaces: vec![workspaces::WorkspaceEntry::new(1)],
-            active_workspace: 0,
-            next_workspace_id: 2,
+            session: SessionState::new(),
             workspace_sidebar_enabled: config.sidebar_enabled,
             workspace_sidebar_width: Self::clamp_workspace_sidebar_width(config.sidebar_width),
             workspace_sidebar_resize_drag: None,
@@ -4078,10 +3880,6 @@ impl TerminalView {
             workspace_drag: None,
             renaming_workspace: None,
             workspace_rename_input: InlineInputState::new(String::new()),
-            native_pane_zoom_snapshots: HashMap::new(),
-            native_pane_layout_trees: HashMap::new(),
-            next_tab_id: 1,
-            active_tab: 0,
             renaming_tab: None,
             rename_input: InlineInputState::new(String::new()),
             event_wakeup_tx,
@@ -4250,7 +4048,7 @@ impl TerminalView {
         #[cfg(target_os = "windows")]
         if config.tmux_enabled {
             // Surface explicit feedback when a synced/shared config requests tmux on Windows.
-            termy_toast::warning(TMUX_UNSUPPORTED_WINDOWS_TOAST);
+            crate::ui::toast::warning(TMUX_UNSUPPORTED_WINDOWS_TOAST);
         }
         let restored_native_workspace = if resolved_runtime_kind == RuntimeKind::Native {
             match startup_native_session {
@@ -4261,7 +4059,7 @@ impl TerminalView {
                             Ok(()) => true,
                             Err(error) => {
                                 log::error!("Failed to restore native tab workspace: {error}");
-                                termy_toast::error("Failed to restore saved native tabs");
+                                crate::ui::toast::error("Failed to restore saved native tabs");
                                 false
                             }
                         },
@@ -4295,14 +4093,14 @@ impl TerminalView {
             None => {
                 if !restored_native_workspace && let Some(native_terminal) = native_terminal {
                     let tab_id = view.allocate_tab_id();
-                    view.tabs = vec![Self::create_native_tab(
+                    view.session.tabs = vec![Self::create_native_tab(
                         tab_id,
                         native_terminal,
                         initial_cols,
                         initial_rows,
                         startup_predicted_title,
                     )];
-                    view.active_tab = 0;
+                    view.session.active_tab = 0;
                     view.refresh_tab_title(0);
                     view.mark_tab_strip_layout_dirty();
                 }
@@ -4455,7 +4253,7 @@ impl TerminalView {
         // Cell colors are resolved before entering the pane cache. A repaint by
         // itself would otherwise reuse rows from the previous appearance.
         self.clear_pane_render_caches();
-        for tab in &self.tabs {
+        for tab in &self.session.tabs {
             for pane in &tab.panes {
                 pane.terminal().set_query_colors(query_colors);
             }
@@ -4551,7 +4349,7 @@ impl TerminalView {
         #[cfg(target_os = "windows")]
         if !self.tmux_enabled_config && config.tmux_enabled {
             // Keep this visible on config reload so users understand why runtime did not switch.
-            termy_toast::warning(TMUX_UNSUPPORTED_WINDOWS_TOAST);
+            crate::ui::toast::warning(TMUX_UNSUPPORTED_WINDOWS_TOAST);
         }
         #[cfg(not(target_os = "windows"))]
         let next_runtime_kind = Self::runtime_kind_from_app_config(&config);
@@ -4559,7 +4357,7 @@ impl TerminalView {
         let tmux_enabled_changed = config.tmux_enabled != self.tmux_enabled_config;
         #[cfg(not(target_os = "windows"))]
         if next_runtime_kind != self.runtime_kind() && tmux_enabled_changed {
-            termy_toast::info(
+            crate::ui::toast::info(
                 "tmux startup default saved. Use Tmux Sessions to switch runtime now.",
             );
         }
@@ -4667,8 +4465,8 @@ impl TerminalView {
         let active_options = self.terminal_runtime.term_options();
         let inactive_options = (inactive_history != active_options.scrollback_history)
             .then(|| active_options.with_scrollback_history(inactive_history));
-        for (tab_index, tab) in self.tabs.iter().enumerate() {
-            let options = if tab_index == self.active_tab {
+        for (tab_index, tab) in self.session.tabs.iter().enumerate() {
+            let options = if tab_index == self.session.active_tab {
                 active_options
             } else {
                 inactive_options.unwrap_or(active_options)
@@ -4680,7 +4478,7 @@ impl TerminalView {
             }
         }
 
-        for index in 0..self.tabs.len() {
+        for index in 0..self.session.tabs.len() {
             self.refresh_tab_title(index);
         }
         if tab_close_visibility_changed
@@ -4721,7 +4519,7 @@ impl TerminalView {
             if loaded.loaded_from_disk {
                 let changed = self.apply_runtime_config(loaded.config, cx);
                 if changed {
-                    termy_toast::info("Configuration reloaded");
+                    crate::ui::toast::info("Configuration reloaded");
                 }
                 return changed;
             }
@@ -4745,7 +4543,7 @@ impl TerminalView {
         if loaded.loaded_from_disk {
             let changed = self.apply_runtime_config(loaded.config, cx);
             if changed {
-                termy_toast::info("Configuration reloaded");
+                crate::ui::toast::info("Configuration reloaded");
             }
             changed
         } else {
@@ -4871,7 +4669,7 @@ impl TerminalView {
         }
         let mut should_redraw = false;
         let mut should_quit = false;
-        let active_tab = self.active_tab;
+        let active_tab = self.session.active_tab;
         let mut clipboard_text = ClipboardTextCache::default();
         self.record_benchmark_terminal_event_drain_pass();
 
@@ -4880,26 +4678,26 @@ impl TerminalView {
         let mut pending_workspace_close = false;
         let mut plugin_events = Vec::new();
         let wakeup_router = self.native_terminal_wakeup_router.clone();
-        let mut simulated_tab_count = self.tabs.len();
+        let mut simulated_tab_count = self.session.tabs.len();
         // Built lazily on the first Exit event: this drain pass runs for every
         // PTY wakeup burst, and allocating the map per pass is wasted work.
         let mut simulated_pane_counts: Option<HashMap<TabId, usize>> = None;
 
-        let tab_count = self.tabs.len();
+        let tab_count = self.session.tabs.len();
         let tab_indices = std::iter::once(active_tab)
             .filter(|tab_index| *tab_index < tab_count)
             .chain((0..tab_count).filter(|tab_index| *tab_index != active_tab));
         'ready_tabs: for tab_index in tab_indices {
-            let tab_id = self.tabs[tab_index].id;
+            let tab_id = self.session.tabs[tab_index].id;
             // Most ready batches belong to the active pane. Visit the active
             // tab first and defer string clones until a terminal yields work.
             let mut active_pane_id = None;
 
-            for pane_index in 0..self.tabs[tab_index].panes.len() {
+            for pane_index in 0..self.session.tabs[tab_index].panes.len() {
                 if ready_terminal_ids.is_empty() {
                     break 'ready_tabs;
                 }
-                let terminal = self.tabs[tab_index].panes[pane_index].terminal();
+                let terminal = self.session.tabs[tab_index].panes[pane_index].terminal();
                 let Some(wakeup_id) = terminal.wakeup_id() else {
                     continue;
                 };
@@ -4915,8 +4713,8 @@ impl TerminalView {
                 }
 
                 let active_pane_id = active_pane_id
-                    .get_or_insert_with(|| self.tabs[tab_index].active_pane_id.clone());
-                let pane_id = self.tabs[tab_index].panes[pane_index].id.clone();
+                    .get_or_insert_with(|| self.session.tabs[tab_index].active_pane_id.clone());
+                let pane_id = self.session.tabs[tab_index].panes[pane_index].id.clone();
                 let pane_is_active = pane_id.as_str() == active_pane_id.as_str();
                 if has_more {
                     wakeup_router.mark_ready(wakeup_id);
@@ -4935,7 +4733,8 @@ impl TerminalView {
                         TerminalEvent::Exit => {
                             let simulated_pane_counts =
                                 simulated_pane_counts.get_or_insert_with(|| {
-                                    self.tabs
+                                    self.session
+                                        .tabs
                                         .iter()
                                         .map(|tab| (tab.id, tab.panes.len()))
                                         .collect()
@@ -4981,29 +4780,35 @@ impl TerminalView {
                         // Shell integration events (OSC 133)
                         TerminalEvent::ShellPromptStart => {
                             if self.shell_integration_enabled {
-                                self.tabs[tab_index].command_lifecycle.prompt_start();
+                                self.session.tabs[tab_index]
+                                    .command_lifecycle
+                                    .prompt_start();
                             }
                         }
                         TerminalEvent::ShellCommandStart => {
                             if self.shell_integration_enabled {
-                                self.tabs[tab_index].command_lifecycle.command_start();
+                                self.session.tabs[tab_index]
+                                    .command_lifecycle
+                                    .command_start();
                             }
                         }
                         TerminalEvent::ShellCommandExecuting => {
                             if self.shell_integration_enabled {
-                                self.tabs[tab_index].command_lifecycle.command_executing();
+                                self.session.tabs[tab_index]
+                                    .command_lifecycle
+                                    .command_executing();
                             }
                         }
                         TerminalEvent::ShellCommandFinished(code) => {
                             if self.shell_integration_enabled {
-                                let command = self.tabs[tab_index].current_command.clone();
-                                let duration_ms = self.tabs[tab_index]
+                                let command = self.session.tabs[tab_index].current_command.clone();
+                                let duration_ms = self.session.tabs[tab_index]
                                     .command_lifecycle
                                     .elapsed()
                                     .map(|duration| {
                                         u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
                                     });
-                                self.tabs[tab_index]
+                                self.session.tabs[tab_index]
                                     .command_lifecycle
                                     .command_finished(code);
                                 if tab_index == active_tab && pane_is_active {
@@ -5019,16 +4824,18 @@ impl TerminalView {
                         // tab strip shows the per-tab aggregate.
                         TerminalEvent::Progress(state) => {
                             if self.progress_indicator_enabled
-                                && self.tabs[tab_index].panes[pane_index].progress_state != state
+                                && self.session.tabs[tab_index].panes[pane_index].progress_state
+                                    != state
                             {
-                                self.tabs[tab_index].panes[pane_index].progress_state = state;
+                                self.session.tabs[tab_index].panes[pane_index].progress_state =
+                                    state;
                                 should_redraw = true;
                             }
                         }
                         // Working directory (OSC 7)
                         TerminalEvent::WorkingDirectory(path) => {
                             if pane_is_active {
-                                self.tabs[tab_index].last_prompt_cwd = Some(path);
+                                self.session.tabs[tab_index].last_prompt_cwd = Some(path);
                             }
                         }
                     }
@@ -5217,8 +5024,9 @@ impl TerminalView {
     }
 
     fn active_terminal(&self) -> Option<&Terminal> {
-        self.tabs
-            .get(self.active_tab)
+        self.session
+            .tabs
+            .get(self.session.active_tab)
             .and_then(TerminalTab::active_terminal)
     }
 }

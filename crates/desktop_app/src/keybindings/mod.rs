@@ -404,7 +404,7 @@ fn report_warnings(warnings: &[KeybindWarning]) {
         } else {
             "lines"
         };
-        termy_toast::warning(format!("Ignored {keybind_warning_count} keybind {noun}"));
+        crate::ui::toast::warning(format!("Ignored {keybind_warning_count} keybind {noun}"));
     }
 }
 

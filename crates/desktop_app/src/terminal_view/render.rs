@@ -7,8 +7,8 @@ use gpui::{ElementInputHandler, ObjectFit, StyledImage, canvas};
 use std::sync::Arc;
 use std::time::Instant;
 #[cfg(debug_assertions)]
-use termy_terminal_ui::terminal_ui_render_metrics_snapshot;
-use termy_terminal_ui::{add_span_damage_compute_us, terminal_ui_render_metrics_enabled};
+use termy_core::terminal_ui_render_metrics_snapshot;
+use termy_core::{add_span_damage_compute_us, terminal_ui_render_metrics_enabled};
 
 #[derive(Clone, Copy)]
 struct KittyGraphicsSelectionPaint<'a> {
@@ -1531,7 +1531,7 @@ impl TerminalView {
         colors: &TerminalColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let model = termy_auto_update_ui::UpdateBannerModel::from_state(state)?;
+        let model = crate::ui::update_banner::UpdateBannerModel::from_state(state)?;
         let updater_weak = self.auto_updater.as_ref().map(|e| e.downgrade());
         let overlay_style = self.overlay_style();
 
@@ -1541,12 +1541,12 @@ impl TerminalView {
         let muted_text = overlay_style.panel_foreground(0.62);
 
         let (tone_bg, tone_fg) = match model.tone {
-            termy_auto_update_ui::UpdateBannerTone::Info => {
+            crate::ui::update_banner::UpdateBannerTone::Info => {
                 let mut bg = colors.cursor;
                 bg.a = 0.18;
                 (bg, colors.cursor)
             }
-            termy_auto_update_ui::UpdateBannerTone::Success => {
+            crate::ui::update_banner::UpdateBannerTone::Success => {
                 let success = gpui::Rgba {
                     r: 0.42,
                     g: 0.78,
@@ -1557,7 +1557,7 @@ impl TerminalView {
                 bg.a = 0.18;
                 (bg, success)
             }
-            termy_auto_update_ui::UpdateBannerTone::Error => {
+            crate::ui::update_banner::UpdateBannerTone::Error => {
                 let error = gpui::Rgba {
                     r: 0.92,
                     g: 0.45,
@@ -1571,11 +1571,11 @@ impl TerminalView {
         };
 
         let icon_path = match model.tone {
-            termy_auto_update_ui::UpdateBannerTone::Info => {
+            crate::ui::update_banner::UpdateBannerTone::Info => {
                 "icons/command_palette/check-update.svg"
             }
-            termy_auto_update_ui::UpdateBannerTone::Success => "icons/command_palette/info.svg",
-            termy_auto_update_ui::UpdateBannerTone::Error => "icons/command_palette/info.svg",
+            crate::ui::update_banner::UpdateBannerTone::Success => "icons/command_palette/info.svg",
+            crate::ui::update_banner::UpdateBannerTone::Error => "icons/command_palette/info.svg",
         };
 
         let mut actions = div().flex().items_center().gap(px(6.0));
@@ -1584,7 +1584,7 @@ impl TerminalView {
             let updater_weak = updater_weak.clone();
             let is_primary = matches!(
                 button.style,
-                termy_auto_update_ui::UpdateButtonStyle::Primary
+                crate::ui::update_banner::UpdateButtonStyle::Primary
             );
             let primary_bg = colors.cursor;
             let primary_label_color = colors.background;
@@ -1622,28 +1622,28 @@ impl TerminalView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event, _window, cx| match action {
-                            termy_auto_update_ui::UpdateBannerAction::Install => {
+                            crate::ui::update_banner::UpdateBannerAction::Install => {
                                 if let Some(ref weak) = updater_weak
                                     && let Some(entity) = weak.upgrade()
                                 {
                                     AutoUpdater::install(entity.downgrade(), cx);
-                                    termy_toast::info("Downloading update...");
+                                    crate::ui::toast::info("Downloading update...");
                                     this.notify_overlay(cx);
                                 }
                             }
-                            termy_auto_update_ui::UpdateBannerAction::Restart => {
+                            crate::ui::update_banner::UpdateBannerAction::Restart => {
                                 match this.restart_application_with_persist() {
                                     Ok(()) => {
                                         this.allow_quit_without_prompt = true;
                                         cx.quit();
                                     }
                                     Err(error) => {
-                                        termy_toast::error(format!("Restart failed: {error}"));
+                                        crate::ui::toast::error(format!("Restart failed: {error}"));
                                         this.notify_overlay(cx);
                                     }
                                 }
                             }
-                            termy_auto_update_ui::UpdateBannerAction::Dismiss => {
+                            crate::ui::update_banner::UpdateBannerAction::Dismiss => {
                                 if let Some(ref weak) = updater_weak
                                     && let Some(entity) = weak.upgrade()
                                 {
@@ -1790,7 +1790,7 @@ impl TerminalView {
 
             // Clean, minimal icons and subtle accent colors
             let (icon, accent, _is_loading) = match toast.kind {
-                termy_toast::ToastKind::Info => (
+                crate::ui::toast::ToastKind::Info => (
                     "\u{2139}", // ℹ info symbol
                     gpui::Rgba {
                         r: 0.53,
@@ -1800,7 +1800,7 @@ impl TerminalView {
                     },
                     false,
                 ),
-                termy_toast::ToastKind::Success => (
+                crate::ui::toast::ToastKind::Success => (
                     "\u{2713}", // ✓ checkmark
                     gpui::Rgba {
                         r: 0.42,
@@ -1810,7 +1810,7 @@ impl TerminalView {
                     },
                     false,
                 ),
-                termy_toast::ToastKind::Warning => (
+                crate::ui::toast::ToastKind::Warning => (
                     "\u{26A0}", // ⚠ warning
                     gpui::Rgba {
                         r: 0.94,
@@ -1820,7 +1820,7 @@ impl TerminalView {
                     },
                     false,
                 ),
-                termy_toast::ToastKind::Error => (
+                crate::ui::toast::ToastKind::Error => (
                     "\u{2715}", // ✕ x mark
                     gpui::Rgba {
                         r: 0.92,
@@ -1830,7 +1830,7 @@ impl TerminalView {
                     },
                     false,
                 ),
-                termy_toast::ToastKind::Loading => {
+                crate::ui::toast::ToastKind::Loading => {
                     // Animated spinner using braille characters
                     const SPINNER_FRAMES: &[&str] =
                         &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -1929,8 +1929,8 @@ impl TerminalView {
                                                 MouseButton::Left,
                                                 cx.listener(move |this, _event, _window, cx| {
                                                     crate::config::execute_fix_for_toast(toast_id);
-                                                    termy_toast::dismiss_toast(toast_id);
-                                                    termy_toast::success("Config fixed");
+                                                    crate::ui::toast::dismiss_toast(toast_id);
+                                                    crate::ui::toast::success("Config fixed");
                                                     this.notify_overlay(cx);
                                                     cx.stop_propagation();
                                                 }),
@@ -2114,11 +2114,14 @@ impl TerminalView {
     }
 
     fn active_tab_has_indeterminate_progress(&self) -> bool {
-        self.tabs.get(self.active_tab).is_some_and(|tab| {
-            tab.panes
-                .iter()
-                .any(|pane| pane.progress_state.is_indeterminate())
-        })
+        self.session
+            .tabs
+            .get(self.session.active_tab)
+            .is_some_and(|tab| {
+                tab.panes
+                    .iter()
+                    .any(|pane| pane.progress_state.is_indeterminate())
+            })
     }
 
     /// Thin progress bar pinned to the top edge of a single pane, driven by
@@ -3091,8 +3094,9 @@ impl Render for TerminalView {
         let frame_now = Instant::now();
         if !self.launch_probe_scheduled
             && self
+                .session
                 .tabs
-                .get(self.active_tab)
+                .get(self.session.active_tab)
                 .and_then(TerminalTab::active_terminal)
                 .is_some()
         {
@@ -3156,8 +3160,9 @@ impl Render for TerminalView {
         let mut render_pass_cache_counts = RenderPassCacheStrategyCounts::default();
 
         let active_pane_font_sizes = self
+            .session
             .tabs
-            .get(self.active_tab)
+            .get(self.session.active_tab)
             .map(|tab| {
                 tab.panes
                     .iter()
@@ -3173,7 +3178,7 @@ impl Render for TerminalView {
             self.schedule_progress_indicator_animation(cx);
         }
 
-        if let Some(active_tab) = self.tabs.get(self.active_tab)
+        if let Some(active_tab) = self.session.tabs.get(self.session.active_tab)
             && let Some(content_bounds) = self.terminal_content_bounds(window)
         {
             let multi_pane = active_tab.panes.len() > 1;
@@ -3684,7 +3689,7 @@ impl Render for TerminalView {
             }
         }
 
-        if self.tabs.is_empty()
+        if self.session.tabs.is_empty()
             && let Some(content_bounds) = self.terminal_content_bounds(window)
         {
             let mut empty_text = colors.foreground;
@@ -3741,7 +3746,7 @@ impl Render for TerminalView {
             .then(|| self.render_workspace_sidebar_edge_peek_target(cx));
         let hidden_titlebar_branding = Self::should_render_hidden_titlebar_branding(
             self.auto_hide_tabbar,
-            self.tabs.len(),
+            self.session.tabs.len(),
             self.effective_tab_bar_visibility(),
             self.show_termy_in_titlebar,
         )

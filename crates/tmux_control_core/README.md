@@ -1,4 +1,4 @@
-# tmux_control_core
+# termy_tmux_control_core
 
 Shared, UI-agnostic core for tmux **control mode** (`tmux -CC`): command-line construction, payload escaping, the control-stream parser/state machine, notification coalescing, session launch, and worker channel plumbing.
 
@@ -11,7 +11,7 @@ Pane/layout integration and GPUI state live in consumers such as `termy_terminal
 ## Validation
 
 ```sh
-cargo test -p tmux_control_core
+cargo test -p termy_tmux_control_core
 ```
 
 ## Forbidden Dependencies

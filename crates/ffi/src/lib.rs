@@ -2342,9 +2342,9 @@ pub struct TermyFfiTmuxNotificationBatch {
 
 #[cfg(unix)]
 fn ffi_tmux_notification(
-    notification: tmux_control_core::types::TmuxNotification,
+    notification: termy_tmux_control_core::types::TmuxNotification,
 ) -> Option<TermyFfiTmuxNotification> {
-    use tmux_control_core::types::TmuxNotification;
+    use termy_tmux_control_core::types::TmuxNotification;
     Some(match notification {
         TmuxNotification::Output { pane_id, bytes } => TermyFfiTmuxNotification {
             kind: 0,
@@ -2386,7 +2386,7 @@ pub unsafe extern "C" fn termy_tmux_control_open(
     socket_len: usize,
     session_ptr: *const u8,
     session_len: usize,
-    out_session: *mut *mut tmux_control_core::session::ControlSession,
+    out_session: *mut *mut termy_tmux_control_core::session::ControlSession,
 ) -> TermyFfiStatus {
     ffi_status_guard(|| {
         if out_session.is_null() {
@@ -2404,7 +2404,8 @@ pub unsafe extern "C" fn termy_tmux_control_open(
             Ok(value) => value,
             Err(status) => return status,
         };
-        match tmux_control_core::session::ControlSession::launch(binary, socket, session_name) {
+        match termy_tmux_control_core::session::ControlSession::launch(binary, socket, session_name)
+        {
             Ok(session) => {
                 unsafe { *out_session = Box::into_raw(Box::new(session)) };
                 TermyFfiStatus::Ok
@@ -2419,7 +2420,7 @@ pub unsafe extern "C" fn termy_tmux_control_open(
 #[cfg(unix)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn termy_tmux_control_poll(
-    session: *mut tmux_control_core::session::ControlSession,
+    session: *mut termy_tmux_control_core::session::ControlSession,
     out_batch: *mut TermyFfiTmuxNotificationBatch,
 ) -> TermyFfiStatus {
     ffi_status_guard(|| {
@@ -2479,7 +2480,7 @@ pub unsafe extern "C" fn termy_tmux_control_notifications_free(
 #[cfg(unix)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn termy_tmux_control_send(
-    session: *mut tmux_control_core::session::ControlSession,
+    session: *mut termy_tmux_control_core::session::ControlSession,
     command_ptr: *const u8,
     command_len: usize,
     out_output: *mut TermyFfiBytes,
@@ -2509,7 +2510,7 @@ pub unsafe extern "C" fn termy_tmux_control_send(
 #[cfg(unix)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn termy_tmux_control_close(
-    session: *mut tmux_control_core::session::ControlSession,
+    session: *mut termy_tmux_control_core::session::ControlSession,
 ) {
     ffi_guard((), || {
         if !session.is_null() {

@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use super::session::normalize_tmux_command_env;
 use super::session::{append_socket_args, tmux_base_command};
-use tmux_control_core::types::{
+use termy_tmux_control_core::types::{
     TmuxLaunchTarget, TmuxRuntimeConfig, TmuxShutdownMode, TmuxSocketTarget,
 };
 

@@ -161,7 +161,7 @@ impl TerminalView {
         self.workspace_sidebar_visible()
             || Self::tab_strip_chrome_visible(
                 self.auto_hide_tabbar,
-                self.tabs.len(),
+                self.session.tabs.len(),
                 self.effective_tab_bar_visibility(),
             )
     }

@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use std::io::{Read, Write};
 #[cfg(test)]
-use tmux_control_core::command::split_control_completion_token;
-use tmux_control_core::command::{
+use termy_tmux_control_core::command::split_control_completion_token;
+use termy_tmux_control_core::command::{
     SEND_INPUT_BULK_HEX_BYTES, SEND_INPUT_CHUNKED_HEX_BYTES, SendInputMode, choose_send_input_mode,
     next_control_completion_token, send_keys_hex_command, tmux_command_line,
     tmux_control_command_line,
 };
-use tmux_control_core::control::{
+use termy_tmux_control_core::control::{
     ControlRequest, NotificationCoalescer, try_enqueue_control_request,
 };
 
@@ -32,14 +32,14 @@ use super::snapshot::{
     PANE_MOUSE_MODE_FORMAT, PANE_SNAPSHOT_FORMAT, WINDOW_SNAPSHOT_FORMAT, parse_pane_mouse_mode,
     parse_snapshot,
 };
-use tmux_control_core::control::{
+use termy_tmux_control_core::control::{
     FATAL_EXIT_QUEUE_BOUND, NOTIFICATION_QUEUE_BOUND, PENDING_QUEUE_BOUND, REQUEST_QUEUE_BOUND,
     spawn_control_threads,
 };
-use tmux_control_core::payload::{
+use termy_tmux_control_core::payload::{
     capture_full_pane_args, capture_pane_range_args, sanitize_tmux_payload, unescape_tmux_payload,
 };
-use tmux_control_core::types::{
+use termy_tmux_control_core::types::{
     TmuxControlError, TmuxLaunchTarget, TmuxNotification, TmuxPaneMouseMode, TmuxRuntimeConfig,
     TmuxSessionSummary, TmuxShutdownMode, TmuxSnapshot, TmuxSocketTarget,
 };
@@ -754,7 +754,7 @@ impl TmuxClient {
         &self,
         command: &str,
         timeout: Duration,
-    ) -> Result<tmux_control_core::control::ControlCommandResult> {
+    ) -> Result<termy_tmux_control_core::control::ControlCommandResult> {
         let (response_tx, response_rx) = flume::bounded(1);
         self.enqueue_control_request(ControlRequest {
             command: command.to_string(),
@@ -781,7 +781,7 @@ impl TmuxClient {
     fn send_control_command_wait(
         &self,
         command: &str,
-    ) -> Result<tmux_control_core::control::ControlCommandResult> {
+    ) -> Result<termy_tmux_control_core::control::ControlCommandResult> {
         const CONTROL_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
         self.send_control_command_wait_with_timeout(command, CONTROL_COMMAND_TIMEOUT)
     }
@@ -930,7 +930,7 @@ mod tests {
     use super::*;
     use anyhow::anyhow;
     use std::cell::Cell;
-    use tmux_control_core::control::coalescer::signal_fatal_exit;
+    use termy_tmux_control_core::control::coalescer::signal_fatal_exit;
 
     fn test_tmux_client(shutdown_mode_on_drop: TmuxShutdownMode) -> TmuxClient {
         let (request_tx, _request_rx) = flume::bounded::<ControlRequest>(1);

@@ -702,7 +702,7 @@ fn inclusive_line_count(first: i32, last: i32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use termy_terminal_ui::TerminalSize;
+    use termy_core::TerminalSize;
 
     #[test]
     fn search_prefill_ignores_empty_selection() {

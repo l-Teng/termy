@@ -66,7 +66,7 @@ impl TerminalView {
     }
 
     pub(crate) fn begin_tab_drag(&mut self, index: usize, orientation: TabStripOrientation) {
-        if index < self.tabs.len() {
+        if index < self.session.tabs.len() {
             self.disarm_titlebar_window_move();
             self.clear_tab_drag_preview_state();
             self.tab_strip.drag = Some(TabDragState {
@@ -126,7 +126,7 @@ impl TerminalView {
                 let scroll_offset_x: f32 =
                     self.tab_strip.horizontal_scroll_handle.offset().x.into();
                 Self::tab_drop_slot_from_pointer_primary_axis_for_extents(
-                    self.tabs.iter().map(|tab| tab.display_width),
+                    self.session.tabs.iter().map(|tab| tab.display_width),
                     pointer_primary_axis,
                     scroll_offset_x,
                     TAB_HORIZONTAL_PADDING,
@@ -136,7 +136,7 @@ impl TerminalView {
             TabStripOrientation::Vertical => {
                 let scroll_offset_y: f32 = self.tab_strip.vertical_scroll_handle.offset().y.into();
                 Self::tab_drop_slot_from_pointer_primary_axis_for_extents(
-                    std::iter::repeat_n(SIDEBAR_TAB_ROW_HEIGHT, self.tabs.len()),
+                    std::iter::repeat_n(SIDEBAR_TAB_ROW_HEIGHT, self.session.tabs.len()),
                     pointer_primary_axis,
                     scroll_offset_y,
                     SIDEBAR_TAB_PADDING_Y,
@@ -172,7 +172,7 @@ impl TerminalView {
     }
 
     pub(crate) fn tab_drop_marker_side(&self, index: usize) -> Option<TabDropMarkerSide> {
-        if index >= self.tabs.len() {
+        if index >= self.session.tabs.len() {
             return None;
         }
 

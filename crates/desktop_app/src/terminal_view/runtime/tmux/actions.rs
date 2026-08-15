@@ -40,7 +40,7 @@ impl TerminalView {
         }
 
         if let Err(error) = action(&self.tmux_runtime().client) {
-            termy_toast::error(format!("{error_prefix}: {error}"));
+            crate::ui::toast::error(format!("{error_prefix}: {error}"));
             return false;
         }
 
@@ -95,7 +95,7 @@ impl TerminalView {
         match tmux.client.send_input(pane_id, input) {
             Ok(()) => true,
             Err(error) => {
-                termy_toast::error(format!("Input write failed: {error}"));
+                crate::ui::toast::error(format!("Input write failed: {error}"));
                 false
             }
         }
@@ -130,25 +130,28 @@ impl TerminalView {
         if from == to {
             return false;
         }
-        let Some(moved_window_id) = self.tabs.get(from).map(|tab| tab.window_id.clone()) else {
+        let Some(moved_window_id) = self.session.tabs.get(from).map(|tab| tab.window_id.clone())
+        else {
             log::warn!(
                 "Ignoring tmux reorder tab request for stale source index {from} -> {to}; current tab count is {}",
-                self.tabs.len()
+                self.session.tabs.len()
             );
             return false;
         };
-        if self.tabs.get(to).is_none() {
+        if self.session.tabs.get(to).is_none() {
             log::warn!(
                 "Ignoring tmux reorder tab request for stale destination index {from} -> {to} (window_id={moved_window_id}); current tab count is {}",
-                self.tabs.len()
+                self.session.tabs.len()
             );
             return false;
         }
         let previous_active_window_id = self
+            .session
             .tabs
-            .get(self.active_tab)
+            .get(self.session.active_tab)
             .map(|tab| tab.window_id.clone());
         let mut window_order = self
+            .session
             .tabs
             .iter()
             .map(|tab| tab.window_id.clone())
@@ -200,11 +203,12 @@ impl TerminalView {
             moved_window_id.as_str(),
         );
         if let Some(index) = self
+            .session
             .tabs
             .iter()
             .position(|tab| tab.window_id == active_target_window_id)
         {
-            self.active_tab = index;
+            self.session.active_tab = index;
         }
 
         true
@@ -254,11 +258,12 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(active_window_id) = self
+            .session
             .tabs
-            .get(self.active_tab)
+            .get(self.session.active_tab)
             .map(|tab| tab.window_id.clone())
         else {
-            termy_toast::error("Failed to create tab: active tmux window is unavailable");
+            crate::ui::toast::error("Failed to create tab: active tmux window is unavailable");
             return false;
         };
         let working_dir = self.preferred_working_dir_for_new_session(working_dir, cx);
@@ -272,11 +277,15 @@ impl TerminalView {
         if !self.refresh_tmux_snapshot() {
             return false;
         }
-        let created_terminal_is_active = self.tabs.get(self.active_tab).is_some_and(|tab| {
-            tab.window_id != active_window_id && tab.active_terminal().is_some()
-        });
+        let created_terminal_is_active = self
+            .session
+            .tabs
+            .get(self.session.active_tab)
+            .is_some_and(|tab| {
+                tab.window_id != active_window_id && tab.active_terminal().is_some()
+            });
         if !created_terminal_is_active {
-            termy_toast::error("Failed to create tab: new tmux terminal is unavailable");
+            crate::ui::toast::error("Failed to create tab: new tmux terminal is unavailable");
             return false;
         }
         self.reset_tab_interaction_state();
@@ -289,8 +298,13 @@ impl TerminalView {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(window_id) = self.tabs.get(index).map(|tab| tab.window_id.clone()) else {
-            Self::warn_stale_tmux_tab_index("close", index, self.tabs.len());
+        let Some(window_id) = self
+            .session
+            .tabs
+            .get(index)
+            .map(|tab| tab.window_id.clone())
+        else {
+            Self::warn_stale_tmux_tab_index("close", index, self.session.tabs.len());
             return;
         };
         if !self.run_tmux_action("Failed to close tab", |tmux_client| {
@@ -312,8 +326,13 @@ impl TerminalView {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(window_id) = self.tabs.get(index).map(|tab| tab.window_id.clone()) else {
-            Self::warn_stale_tmux_tab_index("switch", index, self.tabs.len());
+        let Some(window_id) = self
+            .session
+            .tabs
+            .get(index)
+            .map(|tab| tab.window_id.clone())
+        else {
+            Self::warn_stale_tmux_tab_index("switch", index, self.session.tabs.len());
             return;
         };
         if !self.run_tmux_action("Failed to switch tab", |tmux_client| {
@@ -337,8 +356,13 @@ impl TerminalView {
         }
 
         let renamed = Self::truncate_tab_title(trimmed);
-        let Some(window_id) = self.tabs.get(index).map(|tab| tab.window_id.clone()) else {
-            Self::warn_stale_tmux_tab_index("rename", index, self.tabs.len());
+        let Some(window_id) = self
+            .session
+            .tabs
+            .get(index)
+            .map(|tab| tab.window_id.clone())
+        else {
+            Self::warn_stale_tmux_tab_index("rename", index, self.session.tabs.len());
             return;
         };
         if self.run_tmux_action("Failed to rename tab", |tmux_client| {
@@ -353,7 +377,7 @@ impl TerminalView {
         pane_id: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.session.tabs.get(self.session.active_tab) else {
             return false;
         };
         if tab.active_pane_id == pane_id || !tab.panes.iter().any(|pane| pane.id == pane_id) {
@@ -366,7 +390,7 @@ impl TerminalView {
             return false;
         }
 
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.session.tabs.get_mut(self.session.active_tab) else {
             return false;
         };
         if !apply_local_tmux_pane_focus(tab, pane_id) {
@@ -576,7 +600,7 @@ mod tests {
         TerminalSize, TerminalTab,
     };
     use std::cell::{Cell, RefCell};
-    use termy_terminal_ui::{CommandLifecycle, ProgressState};
+    use termy_core::{CommandLifecycle, ProgressState};
 
     #[test]
     fn reorder_active_window_id_preserves_previously_active_window() {

@@ -68,8 +68,9 @@ impl TerminalView {
             return false;
         }
         let multi_pane = self
+            .session
             .tabs
-            .get(self.active_tab)
+            .get(self.session.active_tab)
             .is_some_and(|tab| tab.panes.len() > 1);
         if !multi_pane {
             return false;
@@ -105,8 +106,9 @@ impl TerminalView {
             return;
         }
         let pane_exists = self
+            .session
             .tabs
-            .get(self.active_tab)
+            .get(self.session.active_tab)
             .is_some_and(|tab| tab.panes.len() > 1 && tab.panes.iter().any(|p| p.id == pane_id));
         if !pane_exists {
             return;
@@ -220,8 +222,9 @@ impl TerminalView {
     ) -> Option<PaneMoveDropTarget> {
         if let Some(tab_id) = self.pane_move_tab_drop_target(position, window)
             && self
+                .session
                 .tabs
-                .get(self.active_tab)
+                .get(self.session.active_tab)
                 .is_none_or(|tab| tab.id != tab_id)
         {
             return Some(PaneMoveDropTarget::Tab { tab_id });
@@ -259,7 +262,7 @@ impl TerminalView {
                 let pointer = x - geometry.row_start_x;
                 let scroll: f32 = self.tab_strip.horizontal_scroll_handle.offset().x.into();
                 Self::pane_move_tab_index_for_axis(
-                    self.tabs.iter().map(|tab| tab.display_width),
+                    self.session.tabs.iter().map(|tab| tab.display_width),
                     pointer,
                     scroll,
                     TAB_HORIZONTAL_PADDING,
@@ -277,7 +280,7 @@ impl TerminalView {
                 let pointer = y - self.terminal_content_top_inset() - SIDEBAR_HEADER_HEIGHT;
                 let scroll: f32 = self.tab_strip.vertical_scroll_handle.offset().y.into();
                 Self::pane_move_tab_index_for_axis(
-                    std::iter::repeat_n(SIDEBAR_TAB_ROW_HEIGHT, self.tabs.len()),
+                    std::iter::repeat_n(SIDEBAR_TAB_ROW_HEIGHT, self.session.tabs.len()),
                     pointer,
                     scroll,
                     SIDEBAR_TAB_PADDING_Y,
@@ -285,13 +288,16 @@ impl TerminalView {
                 )?
             }
         };
-        self.tabs.get(index).and_then(|tab| {
+        self.session.tabs.get(index).and_then(|tab| {
             let active_pane = tab
                 .panes
                 .iter()
                 .find(|pane| pane.id == tab.active_pane_id)?;
             let min_width = Self::native_pane_min_extent_for_axis(PaneResizeAxis::Horizontal);
-            (!self.native_pane_zoom_snapshots.contains_key(&tab.id)
+            (!self
+                .session
+                .native_pane_zoom_snapshots
+                .contains_key(&tab.id)
                 && active_pane.width >= min_width.saturating_mul(2))
             .then_some(tab.id)
         })
@@ -373,7 +379,7 @@ impl TerminalView {
         if self.runtime_kind() != RuntimeKind::Native || source_pane_id == target_pane_id {
             return false;
         }
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.session.tabs.get(self.session.active_tab) else {
             return false;
         };
         let tab_id = tab.id;
@@ -403,18 +409,18 @@ impl TerminalView {
         }
 
         let restructured = match region {
-            PaneDropRegion::Center => {
-                self.native_pane_layout_trees
-                    .get_mut(&tab_id)
-                    .is_some_and(|tree| {
-                        Self::native_swap_leaves(&mut tree.root, source_pane_id, target_pane_id)
-                    })
-            }
+            PaneDropRegion::Center => self
+                .session
+                .native_pane_layout_trees
+                .get_mut(&tab_id)
+                .is_some_and(|tree| {
+                    Self::native_swap_leaves(&mut tree.root, source_pane_id, target_pane_id)
+                }),
             PaneDropRegion::Left
             | PaneDropRegion::Right
             | PaneDropRegion::Top
             | PaneDropRegion::Bottom => {
-                let Some(tree) = self.native_pane_layout_trees.remove(&tab_id) else {
+                let Some(tree) = self.session.native_pane_layout_trees.remove(&tab_id) else {
                     return false;
                 };
                 let (next_root, _, removed) =
@@ -441,7 +447,8 @@ impl TerminalView {
                     return false;
                 }
                 Self::native_balance_split_group_containing_leaf(&mut root, axis, source_pane_id);
-                self.native_pane_layout_trees
+                self.session
+                    .native_pane_layout_trees
                     .insert(tab_id, NativePaneLayoutTree { root });
                 true
             }
@@ -451,7 +458,7 @@ impl TerminalView {
         }
 
         self.apply_native_layout_tree_to_tab(tab_id, cols, rows);
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+        if let Some(tab) = self.session.tabs.get_mut(self.session.active_tab) {
             // Focus follows the moved pane.
             tab.active_pane_id = source_pane_id.to_string();
             tab.assert_active_pane_invariant();
@@ -473,25 +480,30 @@ impl TerminalView {
         if self.runtime_kind() != RuntimeKind::Native {
             return false;
         }
-        let source_index = self.active_tab;
+        let source_index = self.session.active_tab;
         let Some(target_index) = self.tab_index_by_id(target_tab_id) else {
             return false;
         };
         if source_index == target_index
             || self
+                .session
                 .tabs
                 .get(source_index)
                 .is_none_or(|tab| tab.panes.len() <= 1)
         {
             return false;
         }
-        let source_tab_id = self.tabs[source_index].id;
-        if self.native_pane_zoom_snapshots.contains_key(&target_tab_id) {
+        let source_tab_id = self.session.tabs[source_index].id;
+        if self
+            .session
+            .native_pane_zoom_snapshots
+            .contains_key(&target_tab_id)
+        {
             return false;
         }
-        let target_pane_id = self.tabs[target_index].active_pane_id.clone();
+        let target_pane_id = self.session.tabs[target_index].active_pane_id.clone();
         let min_width = Self::native_pane_min_extent_for_axis(PaneResizeAxis::Horizontal);
-        if self.tabs[target_index]
+        if self.session.tabs[target_index]
             .panes
             .iter()
             .find(|pane| pane.id == target_pane_id)
@@ -499,35 +511,35 @@ impl TerminalView {
         {
             return false;
         }
-        let Some(source_pane_index) = self.tabs[source_index]
+        let Some(source_pane_index) = self.session.tabs[source_index]
             .panes
             .iter()
             .position(|pane| pane.id == source_pane_id)
         else {
             return false;
         };
-        let target_cols = self.tabs[target_index]
+        let target_cols = self.session.tabs[target_index]
             .panes
             .iter()
             .map(|pane| pane.left.saturating_add(pane.width))
             .max()
             .unwrap_or(1)
             .max(1);
-        let target_rows = self.tabs[target_index]
+        let target_rows = self.session.tabs[target_index]
             .panes
             .iter()
             .map(|pane| pane.top.saturating_add(pane.height))
             .max()
             .unwrap_or(1)
             .max(1);
-        let source_cols = self.tabs[source_index]
+        let source_cols = self.session.tabs[source_index]
             .panes
             .iter()
             .map(|pane| pane.left.saturating_add(pane.width))
             .max()
             .unwrap_or(1)
             .max(1);
-        let source_rows = self.tabs[source_index]
+        let source_rows = self.session.tabs[source_index]
             .panes
             .iter()
             .map(|pane| pane.top.saturating_add(pane.height))
@@ -535,17 +547,20 @@ impl TerminalView {
             .unwrap_or(1)
             .max(1);
 
-        self.native_pane_zoom_snapshots.remove(&source_tab_id);
+        self.session
+            .native_pane_zoom_snapshots
+            .remove(&source_tab_id);
         if !self.ensure_native_layout_tree_for_tab_id(source_tab_id)
             || !self.ensure_native_layout_tree_for_tab_id(target_tab_id)
         {
             return false;
         }
-        let Some(source_tree) = self.native_pane_layout_trees.remove(&source_tab_id) else {
+        let Some(source_tree) = self.session.native_pane_layout_trees.remove(&source_tab_id) else {
             return false;
         };
-        let Some(target_tree) = self.native_pane_layout_trees.remove(&target_tab_id) else {
-            self.native_pane_layout_trees
+        let Some(target_tree) = self.session.native_pane_layout_trees.remove(&target_tab_id) else {
+            self.session
+                .native_pane_layout_trees
                 .insert(source_tab_id, source_tree);
             return false;
         };
@@ -555,29 +570,35 @@ impl TerminalView {
             source_pane_id,
             target_pane_id.as_str(),
         ) else {
-            self.native_pane_layout_trees
+            self.session
+                .native_pane_layout_trees
                 .insert(source_tab_id, source_tree);
-            self.native_pane_layout_trees
+            self.session
+                .native_pane_layout_trees
                 .insert(target_tab_id, target_tree);
             return false;
         };
-        self.native_pane_layout_trees
+        self.session
+            .native_pane_layout_trees
             .insert(source_tab_id, NativePaneLayoutTree { root: source_root });
-        self.native_pane_layout_trees
+        self.session
+            .native_pane_layout_trees
             .insert(target_tab_id, NativePaneLayoutTree { root: target_root });
-        let pane = self.tabs[source_index].panes.remove(source_pane_index);
-        self.tabs[source_index].active_pane_id = next_focus_id
+        let pane = self.session.tabs[source_index]
+            .panes
+            .remove(source_pane_index);
+        self.session.tabs[source_index].active_pane_id = next_focus_id
             .or_else(|| {
-                self.tabs[source_index]
+                self.session.tabs[source_index]
                     .panes
                     .first()
                     .map(|pane| pane.id.clone())
             })
             .unwrap_or_default();
-        self.tabs[source_index].assert_active_pane_invariant();
-        self.tabs[target_index].panes.push(pane);
-        self.tabs[target_index].active_pane_id = source_pane_id.to_string();
-        self.tabs[target_index].assert_active_pane_invariant();
+        self.session.tabs[source_index].assert_active_pane_invariant();
+        self.session.tabs[target_index].panes.push(pane);
+        self.session.tabs[target_index].active_pane_id = source_pane_id.to_string();
+        self.session.tabs[target_index].assert_active_pane_invariant();
         self.refresh_tab_title(source_index);
         self.refresh_tab_title(target_index);
 

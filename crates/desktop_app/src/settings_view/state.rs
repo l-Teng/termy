@@ -309,10 +309,10 @@ impl SettingsWindow {
                 let _ = self.reload_config_if_changed(cx);
                 self.active_input = None;
                 self.capturing_action = None;
-                termy_toast::success("Reset to default");
+                crate::ui::toast::success("Reset to default");
                 cx.notify();
             }
-            Err(error) => termy_toast::error(error),
+            Err(error) => crate::ui::toast::error(error),
         }
     }
 
@@ -401,10 +401,10 @@ impl SettingsWindow {
                 let _ = self.reload_config_if_changed(cx);
                 self.active_input = None;
                 self.capturing_action = None;
-                termy_toast::success("Section reset to defaults");
+                crate::ui::toast::success("Section reset to defaults");
                 cx.notify();
             }
-            Err(error) => termy_toast::error(error),
+            Err(error) => crate::ui::toast::error(error),
         }
     }
 
@@ -844,11 +844,11 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         if let Err(error) = self.apply_editable_field(field, selected_value) {
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
             return;
         }
         self.active_input = None;
-        termy_toast::success("Saved");
+        crate::ui::toast::success("Saved");
         cx.notify();
     }
 
@@ -1053,7 +1053,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         let Some(step) = Self::field_spec(field).numeric_step else {
-            termy_toast::error("Invalid numeric setting");
+            crate::ui::toast::error("Invalid numeric setting");
             return;
         };
         let result = match field {
@@ -1172,9 +1172,9 @@ impl SettingsWindow {
         };
 
         if let Err(error) = result {
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
         } else {
-            termy_toast::success("Saved");
+            crate::ui::toast::success("Saved");
         }
         self.active_input = None;
         cx.notify();
@@ -1253,10 +1253,10 @@ impl SettingsWindow {
         };
 
         if let Err(error) = self.apply_editable_field(input.field, input.state.text()) {
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
             self.active_input = Some(input);
         } else {
-            termy_toast::success("Saved");
+            crate::ui::toast::success("Saved");
         }
         cx.notify();
     }

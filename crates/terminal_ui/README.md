@@ -4,7 +4,7 @@ GPUI-facing terminal runtime support for the desktop app.
 
 ## Owner
 
-This crate owns the terminal grid paint cache, native pane runtime, tmux runtime/client support, and GPUI-adjacent terminal adapter behavior used by `crates/desktop_app/src/terminal_view/`. It can depend on GPUI, but shared headless behavior should live in `termy_core` or a pure domain crate instead.
+This crate owns the terminal grid paint cache, GPUI keystroke adapter, tmux pane display runtime, and tmux client support used by `crates/desktop_app/src/terminal_view/`. It can depend on GPUI, but callers import shared headless terminal types directly from `termy_core` instead of through this crate.
 
 ## Validation
 

@@ -1,15 +1,15 @@
-use crate::render_metrics::{
-    add_span_grid_paint_us, add_span_row_ops_rebuild_us, add_span_text_shaping_us,
-    increment_grid_paint_count, increment_shape_line_calls, increment_shaped_line_cache_hit,
-    increment_shaped_line_cache_miss, terminal_ui_render_metrics_enabled,
-};
 use gpui::{
     App, Bounds, Element, Font, FontFeatures, FontStyle, FontWeight, Hsla, IntoElement,
     PathBuilder, Pixels, ShapedLine, SharedString, Size, StrikethroughStyle, TextAlign, TextRun,
     UnderlineStyle as GpuiUnderlineStyle, Window, point, px, quad,
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
-use termy_core::TerminalCursorStyle;
+use termy_core::{
+    TerminalCursorStyle, add_span_grid_paint_us, add_span_row_ops_rebuild_us,
+    add_span_text_shaping_us, increment_grid_paint_count, increment_shape_line_calls,
+    increment_shaped_line_cache_hit, increment_shaped_line_cache_miss,
+    terminal_ui_render_metrics_enabled,
+};
 
 /// The visual form of a terminal underline requested by SGR 4 variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,7 +1,7 @@
 use super::*;
 
 /// A workspace groups tabs under one sidebar entry. The active workspace's
-/// tabs live in `TerminalView::tabs`; only inactive workspaces keep their
+/// tabs live in `TerminalView::session`; only inactive workspaces keep their
 /// tabs stashed here. Switching workspaces swaps the whole tab vec so the
 /// index-based tab machinery (strip, drag, persistence) never has to filter.
 pub(crate) struct WorkspaceEntry {
@@ -200,18 +200,18 @@ impl TerminalView {
     }
 
     pub(crate) fn has_other_workspaces(&self) -> bool {
-        self.workspaces.len() > 1
+        self.session.workspaces.len() > 1
     }
 
     /// Sidebar status for the workspace at `index`. The active workspace only
     /// reports Busy/Idle: the user is already looking at it, so its attention
     /// flag stays cleared.
     pub(crate) fn workspace_status(&self, index: usize) -> WorkspaceStatus {
-        let Some(entry) = self.workspaces.get(index) else {
+        let Some(entry) = self.session.workspaces.get(index) else {
             return WorkspaceStatus::Idle;
         };
-        let tabs = if index == self.active_workspace {
-            self.tabs.as_slice()
+        let tabs = if index == self.session.active_workspace {
+            self.session.tabs.as_slice()
         } else {
             if entry.attention {
                 return WorkspaceStatus::Attention;
@@ -231,14 +231,14 @@ impl TerminalView {
     /// on stashed tabs are frozen at stash time, so inactive workspaces show
     /// the title from when they were last active.
     pub(crate) fn workspace_display_name(&self, index: usize) -> String {
-        let Some(entry) = self.workspaces.get(index) else {
+        let Some(entry) = self.session.workspaces.get(index) else {
             return String::new();
         };
         if entry.custom_named {
             return entry.name.clone();
         }
-        let active_tab_title = if index == self.active_workspace {
-            self.tabs.get(self.active_tab)
+        let active_tab_title = if index == self.session.active_workspace {
+            self.session.tabs.get(self.session.active_tab)
         } else {
             entry.tabs.get(entry.active_tab)
         }
@@ -251,7 +251,7 @@ impl TerminalView {
     }
 
     pub(crate) fn begin_workspace_drag(&mut self, index: usize) {
-        if index >= self.workspaces.len() || self.renaming_workspace.is_some() {
+        if index >= self.session.workspaces.len() || self.renaming_workspace.is_some() {
             return;
         }
         self.workspace_drag = Some(WorkspaceDragState {
@@ -268,7 +268,9 @@ impl TerminalView {
         let Some(drag) = self.workspace_drag else {
             return;
         };
-        if hover_index >= self.workspaces.len() || drag.source_index >= self.workspaces.len() {
+        if hover_index >= self.session.workspaces.len()
+            || drag.source_index >= self.session.workspaces.len()
+        {
             return;
         }
 
@@ -298,7 +300,7 @@ impl TerminalView {
         &self,
         index: usize,
     ) -> Option<crate::terminal_view::tab_strip::state::TabDropMarkerSide> {
-        if index >= self.workspaces.len() {
+        if index >= self.session.workspaces.len() {
             return None;
         }
         let drop_slot = self.workspace_drag.and_then(|drag| drag.drop_slot)?;
@@ -319,28 +321,30 @@ impl TerminalView {
         else {
             return false;
         };
-        if source_index >= self.workspaces.len() {
+        if source_index >= self.session.workspaces.len() {
             return false;
         }
         let target_index =
             Self::workspace_reorder_target_index_for_drop_slot(source_index, drop_slot);
-        if target_index >= self.workspaces.len() || source_index == target_index {
+        if target_index >= self.session.workspaces.len() || source_index == target_index {
             return false;
         }
 
         let active_id = self
+            .session
             .workspaces
-            .get(self.active_workspace)
+            .get(self.session.active_workspace)
             .map(|entry| entry.id);
-        let entry = self.workspaces.remove(source_index);
-        self.workspaces.insert(target_index, entry);
+        let entry = self.session.workspaces.remove(source_index);
+        self.session.workspaces.insert(target_index, entry);
         if let Some(active_id) = active_id
             && let Some(next_active) = self
+                .session
                 .workspaces
                 .iter()
                 .position(|entry| entry.id == active_id)
         {
-            self.active_workspace = next_active;
+            self.session.active_workspace = next_active;
         }
         self.schedule_persist_native_workspace(cx);
         cx.notify();
@@ -366,15 +370,17 @@ impl TerminalView {
     }
 
     fn workspace_pin_group_bounds(&self, source_index: usize) -> (usize, usize) {
-        let Some(source) = self.workspaces.get(source_index) else {
-            return (0, self.workspaces.len());
+        let Some(source) = self.session.workspaces.get(source_index) else {
+            return (0, self.session.workspaces.len());
         };
         let mut start = source_index;
-        while start > 0 && self.workspaces[start - 1].pinned == source.pinned {
+        while start > 0 && self.session.workspaces[start - 1].pinned == source.pinned {
             start -= 1;
         }
         let mut end = source_index + 1;
-        while end < self.workspaces.len() && self.workspaces[end].pinned == source.pinned {
+        while end < self.session.workspaces.len()
+            && self.session.workspaces[end].pinned == source.pinned
+        {
             end += 1;
         }
         (start, end)
@@ -390,40 +396,49 @@ impl TerminalView {
     }
 
     fn reorder_workspaces_for_pins(&mut self) {
-        if self.workspaces.len() <= 1 {
+        if self.session.workspaces.len() <= 1 {
             return;
         }
         let active_id = self
+            .session
             .workspaces
-            .get(self.active_workspace)
+            .get(self.session.active_workspace)
             .map(|entry| entry.id);
-        self.workspaces
+        self.session
+            .workspaces
             .sort_by_key(|entry| (!entry.pinned, entry.id));
         if let Some(active_id) = active_id
             && let Some(next_active) = self
+                .session
                 .workspaces
                 .iter()
                 .position(|entry| entry.id == active_id)
         {
-            self.active_workspace = next_active;
+            self.session.active_workspace = next_active;
         }
     }
 
     fn stash_active_workspace_tabs(&mut self) {
-        let active_tab = self.active_tab;
-        if let Some(entry) = self.workspaces.get_mut(self.active_workspace) {
-            entry.tabs = std::mem::take(&mut self.tabs);
+        let active_tab = self.session.active_tab;
+        if let Some(entry) = self
+            .session
+            .workspaces
+            .get_mut(self.session.active_workspace)
+        {
+            entry.tabs = std::mem::take(&mut self.session.tabs);
             entry.active_tab = active_tab;
         }
     }
 
     fn restore_workspace_tabs(&mut self, index: usize) {
-        if let Some(entry) = self.workspaces.get_mut(index) {
-            self.tabs = std::mem::take(&mut entry.tabs);
-            self.active_tab = entry.active_tab.min(self.tabs.len().saturating_sub(1));
+        if let Some(entry) = self.session.workspaces.get_mut(index) {
+            self.session.tabs = std::mem::take(&mut entry.tabs);
+            self.session.active_tab = entry
+                .active_tab
+                .min(self.session.tabs.len().saturating_sub(1));
             entry.attention = false;
         }
-        self.active_workspace = index;
+        self.session.active_workspace = index;
     }
 
     fn set_tab_scrollback_options(&self, tab_index: usize, active: bool) {
@@ -436,7 +451,7 @@ impl TerminalView {
         } else {
             active_options.with_scrollback_history(inactive_scrollback)
         };
-        if let Some(tab) = self.tabs.get(tab_index) {
+        if let Some(tab) = self.session.tabs.get(tab_index) {
             for pane in &tab.panes {
                 pane.terminal().set_term_options(options);
             }
@@ -459,20 +474,20 @@ impl TerminalView {
     }
 
     pub(crate) fn switch_workspace(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.workspaces.len() || index == self.active_workspace {
+        if index >= self.session.workspaces.len() || index == self.session.active_workspace {
             return;
         }
         if let Err(error) = self.materialize_pending_workspace(index) {
             log::error!("Failed to start saved workspace: {error}");
-            termy_toast::error("Failed to start saved workspace");
+            crate::ui::toast::error("Failed to start saved workspace");
             self.notify_overlay(cx);
             return;
         }
 
-        self.set_tab_scrollback_options(self.active_tab, false);
+        self.set_tab_scrollback_options(self.session.active_tab, false);
         self.stash_active_workspace_tabs();
         self.restore_workspace_tabs(index);
-        self.set_tab_scrollback_options(self.active_tab, true);
+        self.set_tab_scrollback_options(self.session.active_tab, true);
         self.reset_view_state_after_workspace_change(cx);
     }
 
@@ -482,7 +497,7 @@ impl TerminalView {
         pinned: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(entry) = self.workspaces.get_mut(index) else {
+        let Some(entry) = self.session.workspaces.get_mut(index) else {
             return false;
         };
         if entry.pinned == pinned {
@@ -499,7 +514,7 @@ impl TerminalView {
     }
 
     pub(crate) fn toggle_workspace_pinned(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
-        let Some(pinned) = self.workspaces.get(index).map(|entry| entry.pinned) else {
+        let Some(pinned) = self.session.workspaces.get(index).map(|entry| entry.pinned) else {
             return false;
         };
         self.set_workspace_pinned(index, !pinned, cx)
@@ -519,7 +534,7 @@ impl TerminalView {
     }
 
     pub(crate) fn begin_rename_workspace(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.workspaces.len() {
+        if index >= self.session.workspaces.len() {
             return;
         }
 
@@ -545,7 +560,7 @@ impl TerminalView {
             return;
         };
         let trimmed = self.workspace_rename_input.text().trim().to_string();
-        if let Some(entry) = self.workspaces.get_mut(index) {
+        if let Some(entry) = self.session.workspaces.get_mut(index) {
             if trimmed.is_empty() {
                 // Committing an empty name reverts to auto-titling.
                 entry.custom_named = false;
@@ -571,25 +586,25 @@ impl TerminalView {
 
     pub(crate) fn add_workspace(&mut self, cx: &mut Context<Self>) {
         if self.runtime_kind() != RuntimeKind::Native {
-            termy_toast::info("Workspaces are not available with the tmux runtime");
+            crate::ui::toast::info("Workspaces are not available with the tmux runtime");
             self.notify_overlay(cx);
             return;
         }
 
-        let previous_workspace = self.active_workspace;
-        let id = self.next_workspace_id;
+        let previous_workspace = self.session.active_workspace;
+        let id = self.session.next_workspace_id;
         self.stash_active_workspace_tabs();
-        self.workspaces.push(WorkspaceEntry::new(id));
-        self.active_workspace = self.workspaces.len() - 1;
-        self.active_tab = 0;
+        self.session.workspaces.push(WorkspaceEntry::new(id));
+        self.session.active_workspace = self.session.workspaces.len() - 1;
+        self.session.active_tab = 0;
         self.add_tab(cx);
-        if self.tabs.is_empty() {
+        if self.session.tabs.is_empty() {
             // Tab creation failed; roll back so no empty workspace survives.
-            self.workspaces.pop();
+            self.session.workspaces.pop();
             self.restore_workspace_tabs(previous_workspace);
             return;
         }
-        self.next_workspace_id += 1;
+        self.session.next_workspace_id += 1;
         self.reset_view_state_after_workspace_change(cx);
     }
 
@@ -597,20 +612,30 @@ impl TerminalView {
     /// Used when the last tab of a workspace is closed or exits.
     pub(crate) fn close_active_workspace(&mut self, cx: &mut Context<Self>) {
         let removed_pane_ids = self
+            .session
             .tabs
             .iter()
             .flat_map(|tab| tab.panes.iter().map(|pane| pane.id.clone()))
             .collect::<Vec<_>>();
         let _ = self.release_forwarded_mouse_presses_for_panes(&removed_pane_ids);
-        let removed_tab_ids = self.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        let removed_tab_ids = self
+            .session
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .collect::<Vec<_>>();
         for tab_id in removed_tab_ids {
-            self.native_pane_zoom_snapshots.remove(&tab_id);
-            self.native_pane_layout_trees.remove(&tab_id);
+            self.session.native_pane_zoom_snapshots.remove(&tab_id);
+            self.session.native_pane_layout_trees.remove(&tab_id);
         }
 
-        self.tabs.clear();
-        self.active_tab = 0;
-        if let Some(entry) = self.workspaces.get_mut(self.active_workspace) {
+        self.session.tabs.clear();
+        self.session.active_tab = 0;
+        if let Some(entry) = self
+            .session
+            .workspaces
+            .get_mut(self.session.active_workspace)
+        {
             entry.tabs.clear();
             entry.active_tab = 0;
         }
@@ -624,37 +649,40 @@ impl TerminalView {
         if !self.has_other_workspaces() {
             return;
         }
-        for index in 0..self.workspaces.len() {
-            if index == self.active_workspace {
+        for index in 0..self.session.workspaces.len() {
+            if index == self.session.active_workspace {
                 continue;
             }
             if let Err(error) = self.materialize_pending_workspace(index) {
                 log::error!("Failed to start saved workspace before merging: {error}");
-                termy_toast::error("Could not merge saved workspaces");
+                crate::ui::toast::error("Could not merge saved workspaces");
                 self.notify_overlay(cx);
                 return;
             }
         }
 
         let mut merged: Vec<TerminalTab> = Vec::new();
-        let mut active_tab = self.active_tab;
+        let mut active_tab = self.session.active_tab;
         let mut kept_entry: Option<WorkspaceEntry> = None;
-        for (index, mut entry) in std::mem::take(&mut self.workspaces).into_iter().enumerate() {
-            if index == self.active_workspace {
-                active_tab = merged.len() + self.active_tab;
-                merged.append(&mut self.tabs);
+        for (index, mut entry) in std::mem::take(&mut self.session.workspaces)
+            .into_iter()
+            .enumerate()
+        {
+            if index == self.session.active_workspace {
+                active_tab = merged.len() + self.session.active_tab;
+                merged.append(&mut self.session.tabs);
                 kept_entry = Some(entry);
             } else {
                 merged.append(&mut entry.tabs);
             }
         }
 
-        self.active_tab = active_tab.min(merged.len().saturating_sub(1));
-        self.tabs = merged;
+        self.session.active_tab = active_tab.min(merged.len().saturating_sub(1));
+        self.session.tabs = merged;
         let mut entry = kept_entry.unwrap_or_else(|| WorkspaceEntry::new(1));
         entry.tabs = Vec::new();
-        self.workspaces = vec![entry];
-        self.active_workspace = 0;
+        self.session.workspaces = vec![entry];
+        self.session.active_workspace = 0;
         self.mark_tab_strip_layout_dirty();
         self.sync_tab_strip_for_active_tab();
         self.schedule_persist_native_workspace(cx);
@@ -676,7 +704,7 @@ impl TerminalView {
         let shell_integration_enabled = self.shell_integration_enabled;
         let wakeup_router = self.native_terminal_wakeup_router.clone();
 
-        for entry in &mut self.workspaces {
+        for entry in &mut self.session.workspaces {
             let mut attention = false;
             for tab in &mut entry.tabs {
                 if ready_terminal_ids.is_empty() {
@@ -800,17 +828,18 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         let Some(workspace_index) = self
+            .session
             .workspaces
             .iter()
             .position(|entry| entry.id == workspace_id)
         else {
             return;
         };
-        if workspace_index == self.active_workspace {
+        if workspace_index == self.session.active_workspace {
             return;
         }
 
-        let entry = &mut self.workspaces[workspace_index];
+        let entry = &mut self.session.workspaces[workspace_index];
         let Some(tab_index) = entry.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
@@ -830,8 +859,8 @@ impl TerminalView {
             }
             // The stored layout tree still references the removed leaf; drop
             // it so it is rebuilt from pane geometry on next use.
-            self.native_pane_layout_trees.remove(&tab_id);
-            self.native_pane_zoom_snapshots.remove(&tab_id);
+            self.session.native_pane_layout_trees.remove(&tab_id);
+            self.session.native_pane_zoom_snapshots.remove(&tab_id);
             return;
         }
 
@@ -839,14 +868,17 @@ impl TerminalView {
         if entry.active_tab >= entry.tabs.len() {
             entry.active_tab = entry.tabs.len().saturating_sub(1);
         }
-        self.native_pane_layout_trees.remove(&tab_id);
-        self.native_pane_zoom_snapshots.remove(&tab_id);
+        self.session.native_pane_layout_trees.remove(&tab_id);
+        self.session.native_pane_zoom_snapshots.remove(&tab_id);
         self.schedule_persist_native_workspace(cx);
     }
 
     /// All tabs held by inactive workspaces, in sidebar order.
     pub(super) fn stashed_workspace_tabs(&self) -> impl Iterator<Item = &TerminalTab> {
-        self.workspaces.iter().flat_map(|entry| entry.tabs.iter())
+        self.session
+            .workspaces
+            .iter()
+            .flat_map(|entry| entry.tabs.iter())
     }
 
     /// Stashed tabs that are busy (running process or fullscreen app), for

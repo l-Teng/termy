@@ -746,7 +746,7 @@ fn print_block(block: &Block) {
 fn run_gate() -> Result<Classification, String> {
     println!("Tmon immutable dual-revision snapshot regression gate");
     println!("baseline_sha: {BASELINE_SHA}");
-    println!("current_source: ../../crates/temon");
+    println!("current_source: ../../crates/tmon");
     println!(
         "workload: native Terminal::snapshot() + black_box + drop; {COLS}x{ROWS}; \
          scrollback={SCROLLBACK}; plain_prefill={PREFILL_BYTES} bytes; mixed visible fixture; \

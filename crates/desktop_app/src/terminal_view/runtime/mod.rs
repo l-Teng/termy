@@ -206,7 +206,7 @@ impl TerminalView {
         match RuntimeKind::from_app_config(config) {
             RuntimeKind::Tmux => {
                 let tmux_runtime = Self::tmux_runtime_from_app_config(config);
-                let initial_working_dir = termy_terminal_ui::resolve_launch_working_directory(
+                let initial_working_dir = termy_core::resolve_launch_working_directory(
                     configured_working_dir,
                     terminal_runtime.working_dir_fallback,
                 )
@@ -225,7 +225,7 @@ impl TerminalView {
                             &error,
                         );
                         log::warn!("{message}");
-                        termy_toast::warning(message);
+                        crate::ui::toast::warning(message);
                         return start_native();
                     }
                 };
@@ -243,7 +243,7 @@ impl TerminalView {
                             &error,
                         );
                         log::warn!("{message}");
-                        termy_toast::warning(message);
+                        crate::ui::toast::warning(message);
                         return start_native();
                     }
                 };

@@ -1,6 +1,6 @@
 # Tmon immutable revision gate
 
-This standalone Cargo package compares the current `crates/temon` native
+This standalone Cargo package compares the current `crates/tmon` native
 `Terminal::snapshot()` throughput with the immutable Tmon revision
 `03d7ca5c5420ca141afe56f725341faadb71af18` in one process.
 

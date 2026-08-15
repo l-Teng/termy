@@ -1,7 +1,7 @@
 use super::super::*;
 use super::render_palette::TabStripPalette;
 use super::state::{TabDropMarkerSide, TabStripOrientation};
-use termy_terminal_ui::ProgressState;
+use termy_core::ProgressState;
 
 pub(super) struct TabItemRenderInput {
     pub(super) orientation: TabStripOrientation,

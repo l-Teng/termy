@@ -142,7 +142,7 @@ impl TerminalView {
                 palette,
                 cx,
                 |_this, _cx| {
-                    termy_toast::info("No notifications");
+                    crate::ui::toast::info("No notifications");
                 },
             ))
             .child(self.workspace_sidebar_icon_button(
@@ -185,7 +185,7 @@ impl TerminalView {
                 palette,
                 cx,
                 |_this, _cx| {
-                    termy_toast::info("No notifications");
+                    crate::ui::toast::info("No notifications");
                 },
             ))
             .child(self.workspace_sidebar_icon_button(
@@ -222,16 +222,16 @@ impl TerminalView {
             .py(px(WORKSPACE_SIDEBAR_PADDING_Y))
             .gap(px(WORKSPACE_SIDEBAR_ROW_GAP));
 
-        for index in 0..self.workspaces.len() {
-            let is_active = index == self.active_workspace;
+        for index in 0..self.session.workspaces.len() {
+            let is_active = index == self.session.active_workspace;
             let is_renaming = self.renaming_workspace == Some(index);
             let name = self.workspace_display_name(index);
             let status = self.workspace_status(index);
-            let pinned = self.workspaces[index].pinned;
+            let pinned = self.session.workspaces[index].pinned;
             let tab_count = if is_active {
-                self.tabs.len()
+                self.session.tabs.len()
             } else {
-                self.workspaces[index].tabs.len()
+                self.session.workspaces[index].tabs.len()
             };
 
             let row_bg = if is_active {

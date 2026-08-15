@@ -272,13 +272,13 @@ impl SettingsWindow {
                 match config::set_root_setting(setting, &next.to_string()) {
                     Ok(()) => {
                         let _ = view.reload_config_if_changed(cx);
-                        termy_toast::success(success_message);
+                        crate::ui::toast::success(success_message);
                         if setting == RootSettingId::SimpleMode && next {
                             window.remove_window();
                         }
                         cx.notify();
                     }
-                    Err(error) => termy_toast::error(error),
+                    Err(error) => crate::ui::toast::error(error),
                 }
             },
         )
@@ -1023,9 +1023,9 @@ impl SettingsWindow {
             .child(label)
             .on_click(cx.listener(move |view, _, _, cx| {
                 match view.step_background_opacity(delta) {
-                    Ok(true) => termy_toast::success("Saved"),
+                    Ok(true) => crate::ui::toast::success("Saved"),
                     Ok(false) => {}
-                    Err(error) => termy_toast::error(error),
+                    Err(error) => crate::ui::toast::error(error),
                 }
                 cx.notify();
             }))
@@ -1075,9 +1075,9 @@ impl SettingsWindow {
                 cx.listener(|view, _event: &MouseUpEvent, _window, cx| {
                     cx.stop_propagation();
                     match view.finish_background_opacity_drag() {
-                        Ok(true) => termy_toast::success("Saved"),
+                        Ok(true) => crate::ui::toast::success("Saved"),
                         Ok(false) => {}
-                        Err(error) => termy_toast::error(error),
+                        Err(error) => crate::ui::toast::error(error),
                     }
                     cx.notify();
                 }),
@@ -1090,9 +1090,9 @@ impl SettingsWindow {
                     }
                     cx.stop_propagation();
                     match view.finish_background_opacity_drag() {
-                        Ok(true) => termy_toast::success("Saved"),
+                        Ok(true) => crate::ui::toast::success("Saved"),
                         Ok(false) => {}
-                        Err(error) => termy_toast::error(error),
+                        Err(error) => crate::ui::toast::error(error),
                     }
                     cx.notify();
                 }),

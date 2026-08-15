@@ -119,7 +119,7 @@ impl TerminalView {
         }
         let selection_start = self.selection_pos_for_pane_cell(pane_id.as_str(), target)?;
         let terminal = self.pane_terminal_by_id(pane_id.as_str())?;
-        let tab = self.tabs.get(self.active_tab)?;
+        let tab = self.session.tabs.get(self.session.active_tab)?;
         let runtime_kind = self.runtime_kind();
         if !Self::click_cursor_move_allowed_for_state(
             runtime_kind,
@@ -276,7 +276,7 @@ impl TerminalView {
     }
 
     fn pane_resize_hit_test(&self, position: gpui::Point<Pixels>) -> Option<PaneResizeDragState> {
-        let tab = self.tabs.get(self.active_tab)?;
+        let tab = self.session.tabs.get(self.session.active_tab)?;
         let (x, y) = self.terminal_content_position(position);
         self.native_pane_dividers(tab)
             .into_iter()
@@ -323,7 +323,7 @@ impl TerminalView {
             target_width,
             target_height,
         ) = {
-            let Some(tab) = self.tabs.get(self.active_tab) else {
+            let Some(tab) = self.session.tabs.get(self.session.active_tab) else {
                 return PaneResizeResult::NoChange;
             };
             let Some(target_index) = tab.panes.iter().position(|pane| pane.id == pane_id) else {
@@ -355,7 +355,7 @@ impl TerminalView {
         };
 
         if self.ensure_native_layout_tree_for_tab_id(tab_id)
-            && let Some(tree) = self.native_pane_layout_trees.get_mut(&tab_id)
+            && let Some(tree) = self.session.native_pane_layout_trees.get_mut(&tab_id)
         {
             let min_extent = match axis {
                 PaneResizeAxis::Horizontal => Self::native_min_extent_allowed(
@@ -389,7 +389,7 @@ impl TerminalView {
             }
         }
 
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.session.tabs.get_mut(self.session.active_tab) else {
             return PaneResizeResult::NoChange;
         };
         debug_assert_eq!(tab.id, tab_id);
@@ -813,8 +813,8 @@ impl TerminalView {
         {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             if self.copy_on_select_toast {
-                termy_toast::enqueue_toast(
-                    termy_toast::ToastKind::Success,
+                crate::ui::toast::enqueue_toast(
+                    crate::ui::toast::ToastKind::Success,
                     "Copied",
                     Some(std::time::Duration::from_millis(1500)),
                 );
@@ -1057,7 +1057,7 @@ impl TerminalView {
             && let Some(link) = self.link_at_cell(cell)
         {
             if !Self::open_link(&link.target) {
-                termy_toast::error("Failed to open link");
+                crate::ui::toast::error("Failed to open link");
             }
             if self.clear_hovered_link() || image_selection_changed {
                 cx.notify();

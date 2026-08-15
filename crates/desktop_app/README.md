@@ -8,10 +8,11 @@ This crate owns the GPUI app shell, windows, titlebar/chrome, menus, settings, o
 
 Important internal areas:
 
-- `src/terminal_view/`: terminal surface, tabs, panes, search, command palette, input, rendering, persistence, and runtime coordination.
+- `src/terminal_view/`: terminal surface, tabs, panes, search, command palette, input, rendering, persistence, and runtime coordination. `session.rs` owns coherent tab/workspace/pane state; `backend.rs` owns the Alacritty/Tmon/tmux facade and low-level render adapters.
 - `src/settings_view/`: settings UI and state application.
 - `src/onboarding/`: first-run and import flows.
 - `src/config/`: app-owned config I/O and mutation.
+- `src/ui/`: desktop-only presentation and state, including update banners, toasts, and scrollbars.
 
 Push reusable headless behavior into `termy_core` or a pure domain crate. Push GPUI-adjacent terminal adapter behavior into `termy_terminal_ui` only when it is reusable outside the desktop app shell. Push reusable chrome presentation — surfaces, controls, status affordances — into `termy_ui`, and keep the state and behavior behind it here.
 

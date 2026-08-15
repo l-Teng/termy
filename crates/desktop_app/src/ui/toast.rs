@@ -1,3 +1,5 @@
+//! Desktop toast state and queueing.
+
 use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
@@ -147,28 +149,6 @@ impl ToastManager {
         self.active.retain(|toast| toast.elapsed() < toast.duration);
     }
 
-    pub fn tick(&mut self) {
-        self.tick_with_hovered(None);
-    }
-
-    /// Pause a toast's timer.
-    pub fn pause(&mut self, id: u64) {
-        if let Some(toast) = self.active.iter_mut().find(|t| t.id == id)
-            && toast.paused_at.is_none()
-        {
-            toast.paused_at = Some(Instant::now());
-        }
-    }
-
-    /// Resume a paused toast's timer.
-    pub fn resume(&mut self, id: u64) {
-        if let Some(toast) = self.active.iter_mut().find(|t| t.id == id)
-            && let Some(paused_at) = toast.paused_at.take()
-        {
-            toast.paused_total += Instant::now().duration_since(paused_at);
-        }
-    }
-
     pub fn ingest_pending(&mut self) {
         for request in drain_pending() {
             self.push(request);
@@ -268,25 +248,6 @@ pub fn warning(message: impl Into<String>) {
 
 pub fn error(message: impl Into<String>) {
     enqueue_toast(ToastKind::Error, message, None);
-}
-
-/// Show an info toast that stays longer (6 seconds)
-pub fn info_long(message: impl Into<String>) {
-    enqueue_toast(ToastKind::Info, message, Some(Duration::from_millis(6000)));
-}
-
-/// Show a success toast that stays longer (6 seconds)
-pub fn success_long(message: impl Into<String>) {
-    enqueue_toast(
-        ToastKind::Success,
-        message,
-        Some(Duration::from_millis(6000)),
-    );
-}
-
-/// Show an error toast that stays longer (8 seconds)
-pub fn error_long(message: impl Into<String>) {
-    enqueue_toast(ToastKind::Error, message, Some(Duration::from_millis(8000)));
 }
 
 /// Show a loading toast (stays indefinitely until updated or dismissed)

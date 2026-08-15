@@ -1,6 +1,7 @@
 use super::super::*;
 use super::TmuxResizeWakeup;
-use termy_terminal_ui::{CommandLifecycle, ProgressState, TmuxPaneState, TmuxWindowState};
+use termy_core::{CommandLifecycle, ProgressState};
+use termy_terminal_ui::{TmuxPaneState, TmuxWindowState};
 
 mod actions;
 mod events;

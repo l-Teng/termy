@@ -51,12 +51,11 @@ sysinfo = "0.37"
 
 # Termy Workspace Crates
 termy_auto_update = { path = "../auto_update" }
-termy_auto_update_ui = { path = "../auto_update_ui" }
+termy_core = { path = "../core" }
 termy_themes = { path = "../themes" }
 termy_terminal_ui = { path = "../terminal_ui" }
-tmon = { path = "../temon" }
+tmon = { path = "../tmon" }
 termy_ui = { path = "../ui" }
-termy_toast = { path = "../toast_sdk" }
 termy_search = { path = "../search" }
 termy_ssh_core = { path = "../ssh_core" }
 termy_native_sdk = { path = "../native_sdk" }

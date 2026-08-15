@@ -983,7 +983,7 @@ impl SettingsWindow {
                     .child("Open repo ↗")
                     .on_click(cx.listener(move |_view, _, _, cx| {
                         if let Err(error) = SettingsWindow::open_url(store_url) {
-                            termy_toast::error(error);
+                            crate::ui::toast::error(error);
                         }
                         cx.notify();
                     })),
@@ -1612,7 +1612,7 @@ impl SettingsWindow {
                     .on_click(cx.listener(|_view, _, _, cx| {
                         if let Err(error) = crate::config::open_config_file() {
                             log::error!("Failed to open config file from settings: {error}");
-                            termy_toast::error(error.to_string());
+                            crate::ui::toast::error(error.to_string());
                         }
                         cx.notify();
                     })),

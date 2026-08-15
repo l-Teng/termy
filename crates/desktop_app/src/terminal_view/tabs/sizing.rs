@@ -14,11 +14,11 @@ impl TerminalView {
     }
 
     pub(in crate::terminal_view) fn evict_inactive_terminal_render_caches(&self) {
-        Self::evict_inactive_tab_render_caches(&self.tabs, self.active_tab);
+        Self::evict_inactive_tab_render_caches(&self.session.tabs, self.session.active_tab);
 
-        // The active workspace keeps its tabs in `self.tabs`; every tab stored
+        // The active workspace keeps its tabs in `self.session.tabs`; every tab stored
         // on a workspace entry is hidden and can rebuild lazily when restored.
-        for workspace in &self.workspaces {
+        for workspace in &self.session.workspaces {
             for tab in &workspace.tabs {
                 tab.clear_render_caches();
             }
@@ -26,7 +26,7 @@ impl TerminalView {
 
         // Native zoom temporarily stashes the other panes outside the active
         // tab. They are hidden for the lifetime of the snapshot as well.
-        for snapshot in self.native_pane_zoom_snapshots.values() {
+        for snapshot in self.session.native_pane_zoom_snapshots.values() {
             for pane in &snapshot.other_panes {
                 pane.render_cache.borrow_mut().clear();
             }
@@ -38,8 +38,8 @@ impl TerminalView {
             return;
         }
 
-        for (tab_index, tab) in self.tabs.iter().enumerate() {
-            let tab_visible = tab_index == self.active_tab;
+        for (tab_index, tab) in self.session.tabs.iter().enumerate() {
+            let tab_visible = tab_index == self.session.active_tab;
             for pane in &tab.panes {
                 pane.terminal().set_wakeup_enabled(tab_visible);
             }
@@ -49,7 +49,7 @@ impl TerminalView {
         // Those panes must stop driving render wakeups just like ordinary
         // inactive tabs; their event queues are still drained by the shared
         // workspace drain pass, and damage is retained until reactivation.
-        for workspace in &self.workspaces {
+        for workspace in &self.session.workspaces {
             for tab in &workspace.tabs {
                 for pane in &tab.panes {
                     pane.terminal().set_wakeup_enabled(false);
@@ -57,7 +57,7 @@ impl TerminalView {
             }
         }
 
-        for snapshot in self.native_pane_zoom_snapshots.values() {
+        for snapshot in self.session.native_pane_zoom_snapshots.values() {
             for pane in &snapshot.other_panes {
                 pane.terminal().set_wakeup_enabled(false);
             }
@@ -76,8 +76,8 @@ impl TerminalView {
     }
 
     pub(crate) fn tab_strip_fixed_content_width(&self) -> f32 {
-        let tabs_width: f32 = self.tabs.iter().map(|tab| tab.display_width).sum();
-        let gaps = TAB_ITEM_GAP * self.tabs.len().saturating_sub(1) as f32;
+        let tabs_width: f32 = self.session.tabs.iter().map(|tab| tab.display_width).sum();
+        let gaps = TAB_ITEM_GAP * self.session.tabs.len().saturating_sub(1) as f32;
         TAB_HORIZONTAL_PADDING + tabs_width + gaps
     }
 
@@ -110,7 +110,7 @@ impl TerminalView {
     }
 
     pub(crate) fn scroll_active_tab_into_view(&self, orientation: TabStripOrientation) {
-        if self.active_tab >= self.tabs.len() {
+        if self.session.active_tab >= self.session.tabs.len() {
             return;
         }
 
@@ -126,9 +126,9 @@ impl TerminalView {
 
                 let max_scroll = self.tab_strip_scroll_max_x();
                 let mut tab_left = TAB_HORIZONTAL_PADDING;
-                for (index, tab) in self.tabs.iter().enumerate() {
+                for (index, tab) in self.session.tabs.iter().enumerate() {
                     let tab_right = tab_left + tab.display_width;
-                    if index == self.active_tab {
+                    if index == self.session.active_tab {
                         let offset = self.tab_strip.horizontal_scroll_handle.offset();
                         let current_scroll = -Into::<f32>::into(offset.x);
                         let target_scroll = Self::target_scroll_for_active_tab_bounds(
@@ -162,9 +162,9 @@ impl TerminalView {
 
                 let max_scroll = self.tab_strip_scroll_max_y();
                 let mut tab_top = SIDEBAR_TAB_PADDING_Y;
-                for index in 0..self.tabs.len() {
+                for index in 0..self.session.tabs.len() {
                     let tab_bottom = tab_top + SIDEBAR_TAB_ROW_HEIGHT;
-                    if index == self.active_tab {
+                    if index == self.session.active_tab {
                         let offset = self.tab_strip.vertical_scroll_handle.offset();
                         let current_scroll = -Into::<f32>::into(offset.y);
                         // target_scroll_for_active_tab_bounds is axis-agnostic.
@@ -191,7 +191,7 @@ impl TerminalView {
     }
 
     pub(crate) fn tab_strip_vertical_content_height(&self) -> f32 {
-        let rows = self.tabs.len();
+        let rows = self.session.tabs.len();
         if rows == 0 {
             return 0.0;
         }
@@ -344,10 +344,10 @@ impl TerminalView {
     }
 
     pub(crate) fn sync_tab_title_text_widths(&mut self, measured_text_widths: &[f32]) -> bool {
-        debug_assert_eq!(measured_text_widths.len(), self.tabs.len());
+        debug_assert_eq!(measured_text_widths.len(), self.session.tabs.len());
         let mut changed = false;
 
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
+        for (index, tab) in self.session.tabs.iter_mut().enumerate() {
             let Some(width) = measured_text_widths.get(index).copied() else {
                 continue;
             };
@@ -433,7 +433,7 @@ impl TerminalView {
             0.0
         };
         let effective_max =
-            Self::effective_tab_max_width_for_viewport(viewport_width, self.tabs.len());
+            Self::effective_tab_max_width_for_viewport(viewport_width, self.session.tabs.len());
         let mut changed = false;
         let tab_width_mode = self.tab_width_mode;
         let tab_close_visibility = self.tab_close_visibility;
@@ -446,8 +446,8 @@ impl TerminalView {
         let rename_cap = TAB_RENAME_MAX_WIDTH.min(viewport_cap);
         let rename_floor = TAB_RENAME_MIN_WIDTH.min(viewport_cap);
 
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
-            let is_active = index == self.active_tab;
+        for (index, tab) in self.session.tabs.iter_mut().enumerate() {
+            let is_active = index == self.session.active_tab;
             let reserve_close_slot = Self::tab_reserves_close_slot_for_layout(
                 tab_width_mode,
                 tab_close_visibility,

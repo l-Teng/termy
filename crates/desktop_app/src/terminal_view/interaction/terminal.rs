@@ -43,8 +43,8 @@ impl TerminalView {
 
     fn pane_layout_fingerprint(&self) -> u64 {
         let mut fingerprint = Self::TERMINAL_RESIZE_FINGERPRINT_OFFSET;
-        Self::mix_terminal_resize_fingerprint(&mut fingerprint, self.tabs.len() as u64);
-        for tab in &self.tabs {
+        Self::mix_terminal_resize_fingerprint(&mut fingerprint, self.session.tabs.len() as u64);
+        for tab in &self.session.tabs {
             Self::mix_terminal_resize_fingerprint(&mut fingerprint, tab.id);
             Self::mix_terminal_resize_fingerprint(&mut fingerprint, tab.panes.len() as u64);
             for pane in &tab.panes {
@@ -85,7 +85,11 @@ impl TerminalView {
             padding_x_bits: self.padding_x.to_bits(),
             padding_y_bits: self.padding_y.to_bits(),
             runtime_kind,
-            active_tab_id: self.tabs.get(self.active_tab).map(|tab| tab.id),
+            active_tab_id: self
+                .session
+                .tabs
+                .get(self.session.active_tab)
+                .map(|tab| tab.id),
             pane_layout_fingerprint: self.pane_layout_fingerprint(),
         }
     }
@@ -133,7 +137,7 @@ impl TerminalView {
     }
 
     fn sync_active_alternate_screen_state(&self) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.session.tabs.get(self.session.active_tab) else {
             return;
         };
         for pane in &tab.panes {
@@ -216,7 +220,7 @@ impl TerminalView {
             return;
         }
 
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.session.tabs.get_mut(self.session.active_tab) else {
             return;
         };
         let Some(active_pane_index) = tab.active_pane_index() else {
@@ -246,7 +250,7 @@ impl TerminalView {
             return;
         }
 
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.session.tabs.get_mut(self.session.active_tab) else {
             return;
         };
         let Some(active_pane_index) = tab.active_pane_index() else {
@@ -431,8 +435,9 @@ impl TerminalView {
         let backend_mode = self.runtime_kind();
         let runtime_uses_tmux = matches!(backend_mode, RuntimeKind::Tmux);
         let active_pane_count = self
+            .session
             .tabs
-            .get(self.active_tab)
+            .get(self.session.active_tab)
             .map_or(0, |tab| tab.panes.len());
         let total_sidebar_width = sidebar_width + self.workspace_sidebar_width();
         let resize_signature = self.terminal_resize_signature(
@@ -472,7 +477,7 @@ impl TerminalView {
                 {
                     let now = Instant::now();
                     if self.should_emit_tmux_resize_error_toast(now) {
-                        termy_toast::error(format!("tmux resize failed: {error}"));
+                        crate::ui::toast::error(format!("tmux resize failed: {error}"));
                     } else {
                         log::debug!("tmux resize failed (toast debounced): {error}");
                     }
@@ -480,14 +485,15 @@ impl TerminalView {
             }
             RuntimeKind::Native => {
                 let mut tab_index = 0usize;
-                while tab_index < self.tabs.len() {
-                    let resize_tab = tab_index == self.active_tab || apply_deferred_inactive_resize;
+                while tab_index < self.session.tabs.len() {
+                    let resize_tab =
+                        tab_index == self.session.active_tab || apply_deferred_inactive_resize;
                     if !resize_tab {
                         tab_index += 1;
                         continue;
                     }
                     let (tab_id, pane_count, should_sync) = {
-                        let tab = &mut self.tabs[tab_index];
+                        let tab = &mut self.session.tabs[tab_index];
                         (
                             tab.id,
                             tab.panes.len(),
@@ -520,11 +526,11 @@ impl TerminalView {
             Self::resize_throttle_follow_up_delay(now, self.last_resize_applied_at);
         let mut needs_throttle_follow_up = false;
 
-        for tab_index in 0..self.tabs.len() {
-            if tab_index != self.active_tab && !apply_deferred_inactive_resize {
+        for tab_index in 0..self.session.tabs.len() {
+            if tab_index != self.session.active_tab && !apply_deferred_inactive_resize {
                 continue;
             }
-            let pane_count = self.tabs[tab_index].panes.len();
+            let pane_count = self.session.tabs[tab_index].panes.len();
             let tab_uses_native_split_padding =
                 Self::uses_native_split_content_padding(runtime_uses_tmux, pane_count);
             let (content_padding_x, content_padding_y) = if tab_uses_native_split_padding {
@@ -535,7 +541,7 @@ impl TerminalView {
             let use_local_zoom = backend_mode == RuntimeKind::Native && pane_count > 1;
             for pane_index in 0..pane_count {
                 let pane_font_size = {
-                    let pane = &self.tabs[tab_index].panes[pane_index];
+                    let pane = &self.session.tabs[tab_index].panes[pane_index];
                     self.effective_font_size_for_zoom_steps(pane.pane_zoom_steps, use_local_zoom)
                 };
                 let pane_cell_size = if backend_mode == RuntimeKind::Native {
@@ -543,7 +549,7 @@ impl TerminalView {
                 } else {
                     layout_cell_size
                 };
-                let pane = &self.tabs[tab_index].panes[pane_index];
+                let pane = &self.session.tabs[tab_index].panes[pane_index];
                 let mut pane_cols = pane.width.max(1);
                 let mut pane_rows = pane.height.max(1);
                 if content_padding_x > 0.0 || content_padding_y > 0.0 {
@@ -594,10 +600,11 @@ impl TerminalView {
             backend_mode,
         );
         let has_inactive_terminal = self
+            .session
             .tabs
             .iter()
             .enumerate()
-            .any(|(tab_index, tab)| tab_index != self.active_tab && !tab.panes.is_empty());
+            .any(|(tab_index, tab)| tab_index != self.session.active_tab && !tab.panes.is_empty());
         if apply_deferred_inactive_resize {
             self.deferred_inactive_resize = if needs_throttle_follow_up {
                 DeferredTerminalResize::Ready {

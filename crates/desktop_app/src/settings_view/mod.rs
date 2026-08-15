@@ -427,19 +427,19 @@ impl SettingsWindow {
     fn install_theme_store_theme(&mut self, theme: ThemeStoreTheme, cx: &mut Context<Self>) {
         let installed_slug = theme.slug.trim().to_ascii_lowercase();
         let installed_version = theme.latest_version.clone().unwrap_or_default();
-        let loading_id = termy_toast::loading(format!("Installing {}...", theme.name));
+        let loading_id = crate::ui::toast::loading(format!("Installing {}...", theme.name));
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result =
                 smol::unblock(move || theme_store::install_theme_from_store_blocking(theme)).await;
 
-            termy_toast::dismiss_toast(loading_id);
+            crate::ui::toast::dismiss_toast(loading_id);
 
             let _ = cx.update(|cx| {
                 this.update(cx, |view, cx| {
                     match result {
                         Ok(installed_theme) => {
-                            termy_toast::success(installed_theme.message);
+                            crate::ui::toast::success(installed_theme.message);
                             view.theme_store_installed_versions
                                 .insert(installed_slug.clone(), installed_version.clone());
                             if let Err(error) = theme_store::persist_installed_theme_versions(
@@ -451,7 +451,7 @@ impl SettingsWindow {
                             view.reload_theme_assets(cx);
                             crate::app_actions::refresh_open_terminal_theme_assets(cx);
                         }
-                        Err(error) => termy_toast::error(error),
+                        Err(error) => crate::ui::toast::error(error),
                     }
                     cx.notify();
                 })
@@ -497,7 +497,7 @@ impl SettingsWindow {
                 Ok(reset) => reset,
                 Err(error) => {
                     log::error!("Failed to reset theme references during uninstall: {error}");
-                    termy_toast::error("Failed to reset selected theme");
+                    crate::ui::toast::error("Failed to reset selected theme");
                     return;
                 }
             };
@@ -518,16 +518,16 @@ impl SettingsWindow {
                 let _ = self.reload_config_if_changed(cx);
                 self.reload_theme_assets(cx);
                 crate::app_actions::refresh_open_terminal_theme_assets(cx);
-                termy_toast::success("Theme uninstalled");
+                crate::ui::toast::success("Theme uninstalled");
             }
             Ok(false) => {
                 self.reload_theme_assets(cx);
                 crate::app_actions::refresh_open_terminal_theme_assets(cx);
-                termy_toast::info("Theme is not installed");
+                crate::ui::toast::info("Theme is not installed");
             }
             Err(error) => {
                 log::error!("Failed to uninstall theme: {error}");
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
             }
         }
     }
@@ -576,12 +576,12 @@ impl SettingsWindow {
                         Ok(()) => {
                             view.theme_store_auth_session = None;
                             view.theme_store_auth_error = None;
-                            termy_toast::success("Logged out from theme store");
+                            crate::ui::toast::success("Logged out from theme store");
                         }
                         Err(error) => {
                             log::error!("Failed to logout from theme store: {error}");
                             view.theme_store_auth_error = Some(error.clone());
-                            termy_toast::error(error);
+                            crate::ui::toast::error(error);
                         }
                     }
                     cx.notify();
@@ -1294,9 +1294,9 @@ impl Render for SettingsWindow {
                     MouseButton::Left,
                     cx.listener(|view, _event: &MouseUpEvent, _window, cx| {
                         match view.finish_background_opacity_drag() {
-                            Ok(true) => termy_toast::success("Saved"),
+                            Ok(true) => crate::ui::toast::success("Saved"),
                             Ok(false) => {}
-                            Err(error) => termy_toast::error(error),
+                            Err(error) => crate::ui::toast::error(error),
                         }
                         cx.notify();
                     }),
@@ -1305,9 +1305,9 @@ impl Render for SettingsWindow {
                     MouseButton::Left,
                     cx.listener(|view, _event: &MouseUpEvent, _window, cx| {
                         match view.finish_background_opacity_drag() {
-                            Ok(true) => termy_toast::success("Saved"),
+                            Ok(true) => crate::ui::toast::success("Saved"),
                             Ok(false) => {}
-                            Err(error) => termy_toast::error(error),
+                            Err(error) => crate::ui::toast::error(error),
                         }
                         cx.notify();
                     }),

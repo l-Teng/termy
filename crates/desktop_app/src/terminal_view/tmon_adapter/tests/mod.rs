@@ -123,7 +123,7 @@ fn native_underline_style(flags: Flags) -> tmon::UnderlineStyle {
     }
 }
 
-fn native_palette(terminal: &termy_terminal_ui::Terminal) -> SemanticPalette {
+fn native_palette(terminal: &termy_core::Terminal) -> SemanticPalette {
     terminal.with_term(|term| {
         let colors = term.colors();
         let tuple = |color: alacritty_terminal::vte::ansi::Rgb| (color.r, color.g, color.b);
@@ -204,7 +204,7 @@ fn tmon_cell(cell: &tmon::Cell, combining: Option<tmon::Combining<'_>>) -> Seman
     }
 }
 
-fn native_cells(terminal: &termy_terminal_ui::Terminal) -> Vec<SemanticCell> {
+fn native_cells(terminal: &termy_core::Terminal) -> Vec<SemanticCell> {
     terminal.with_term(|term| {
         term.renderable_content()
             .display_iter
@@ -221,7 +221,7 @@ fn tmon_cells(terminal: &tmon::Terminal) -> Vec<SemanticCell> {
     cells
 }
 
-fn native_grid_lines(terminal: &termy_terminal_ui::Terminal) -> Vec<Vec<SemanticCell>> {
+fn native_grid_lines(terminal: &termy_core::Terminal) -> Vec<Vec<SemanticCell>> {
     terminal.with_term(|term| {
         let grid = term.grid();
         let first = -(grid.history_size() as i32);
@@ -381,7 +381,7 @@ fn config_propagates_core_launch_validation_errors() {
 }
 
 fn assert_terminal_states_match(
-    native: &termy_terminal_ui::Terminal,
+    native: &termy_core::Terminal,
     tmon: &tmon::Terminal,
     context: &str,
 ) {
@@ -512,7 +512,7 @@ fn assert_damage_covers_changes(
 
 fn assert_engines_match(context: &str, bytes: &[u8]) {
     let native_size = test_size(12, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     native.feed_output(bytes);
     tmon.feed_output(bytes);

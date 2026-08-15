@@ -99,8 +99,8 @@ impl SettingsWindow {
                 this.update(cx, |view, cx| {
                     view.apply_plugin_settings_snapshot(snapshot);
                     match result {
-                        Ok(()) => termy_toast::success("Plugin setting saved"),
-                        Err(error) => termy_toast::error(error),
+                        Ok(()) => crate::ui::toast::success("Plugin setting saved"),
+                        Err(error) => crate::ui::toast::error(error),
                     }
                     cx.notify();
                 })
@@ -134,8 +134,8 @@ impl SettingsWindow {
                 this.update(cx, |view, cx| {
                     view.apply_plugin_settings_snapshot(snapshot);
                     match result {
-                        Ok(()) => termy_toast::success("Plugin setting reset"),
-                        Err(error) => termy_toast::error(error),
+                        Ok(()) => crate::ui::toast::success("Plugin setting reset"),
+                        Err(error) => crate::ui::toast::error(error),
                     }
                     cx.notify();
                 })
@@ -350,11 +350,11 @@ impl SettingsWindow {
                 this.update(cx, |view, cx| {
                     view.apply_plugin_settings_snapshot(snapshot);
                     match result {
-                        Ok(plugin) => termy_toast::success(format!(
+                        Ok(plugin) => crate::ui::toast::success(format!(
                             "Installed {}. Open the command menu to use it.",
                             plugin.name
                         )),
-                        Err(error) => termy_toast::error(error),
+                        Err(error) => crate::ui::toast::error(error),
                     }
                     cx.notify();
                 })
@@ -386,9 +386,9 @@ impl SettingsWindow {
                 this.update(cx, |view, cx| {
                     view.apply_plugin_settings_snapshot(snapshot);
                     match result {
-                        Ok(()) if enabled => termy_toast::success("Plugin enabled"),
-                        Ok(()) => termy_toast::success("Plugin disabled"),
-                        Err(error) => termy_toast::error(error),
+                        Ok(()) if enabled => crate::ui::toast::success("Plugin enabled"),
+                        Ok(()) => crate::ui::toast::success("Plugin disabled"),
+                        Err(error) => crate::ui::toast::error(error),
                     }
                     cx.notify();
                 })
@@ -428,8 +428,8 @@ impl SettingsWindow {
                 this.update(cx, |view, cx| {
                     view.apply_plugin_settings_snapshot(snapshot);
                     match result {
-                        Ok(()) => termy_toast::success("Plugin uninstalled"),
-                        Err(error) => termy_toast::error(error),
+                        Ok(()) => crate::ui::toast::success("Plugin uninstalled"),
+                        Err(error) => crate::ui::toast::error(error),
                     }
                     cx.notify();
                 })
@@ -440,11 +440,11 @@ impl SettingsWindow {
 
     fn open_plugins_directory(&mut self) {
         if let Err(error) = self.plugin_runtime.installed_plugins() {
-            termy_toast::error(error);
+            crate::ui::toast::error(error);
             return;
         }
         let Some(path) = self.plugin_runtime.plugins_directory() else {
-            termy_toast::error("Termy config path is unavailable");
+            crate::ui::toast::error("Termy config path is unavailable");
             return;
         };
 
@@ -471,7 +471,7 @@ impl SettingsWindow {
             .spawn();
 
         if let Err(error) = result {
-            termy_toast::error(format!(
+            crate::ui::toast::error(format!(
                 "Failed to open plugin folder {}: {error}",
                 path.display()
             ));

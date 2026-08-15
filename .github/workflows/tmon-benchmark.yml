@@ -7,7 +7,7 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/core/**"
-      - "crates/temon/**"
+      - "crates/tmon/**"
       - "tools/tmon-revision-gate/**"
       - ".github/workflows/tmon-benchmark.yml"
   workflow_dispatch:

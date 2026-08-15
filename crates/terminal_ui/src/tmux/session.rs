@@ -1,19 +1,19 @@
 #![cfg_attr(not(unix), allow(unused_variables))]
 
-#[cfg(unix)]
-use crate::locale::{Utf8LocaleOverridePlan, preferred_utf8_locale, utf8_locale_override_plan};
-#[cfg(unix)]
-use crate::path_env::normalized_path_env;
 use anyhow::{Context, Result, anyhow};
 #[cfg(unix)]
 use std::env;
 use std::process::Command;
+#[cfg(unix)]
+use termy_core::{
+    Utf8LocaleOverridePlan, normalized_path_env, preferred_utf8_locale, utf8_locale_override_plan,
+};
 
 use super::snapshot::{parse_session_summaries, session_snapshot_format};
 #[cfg(test)]
-use tmux_control_core::command::quote_tmux_arg;
-use tmux_control_core::command::tmux_command_line;
-use tmux_control_core::types::{TmuxSessionSummary, TmuxSocketTarget};
+use termy_tmux_control_core::command::quote_tmux_arg;
+use termy_tmux_control_core::command::tmux_command_line;
+use termy_tmux_control_core::types::{TmuxSessionSummary, TmuxSocketTarget};
 
 pub(crate) fn append_socket_args(command: &mut Command, socket_target: &TmuxSocketTarget) {
     if let Some(socket_name) = socket_target.socket_name() {

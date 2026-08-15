@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn damage_covers_all_observable_changes_for_both_engines() {
     let initial = test_size(12, 4);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
 
     assert_eq!(native.take_damage_snapshot(), TerminalDamageSnapshot::Full);
@@ -85,7 +85,7 @@ fn damage_covers_all_observable_changes_for_both_engines() {
 #[test]
 fn kitty_partial_region_cursor_advance_matches_the_alacritty_engine() {
     let native_size = test_size(8, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let output = b"\x1b[2;3r\x1b[3;1H\x1b_Ga=T,f=32,s=1,v=1,i=82,c=2,r=3;AQID/w==\x1b\\\x1b[r";
 
@@ -110,7 +110,7 @@ fn kitty_partial_region_cursor_advance_matches_the_alacritty_engine() {
 #[test]
 fn kitty_chunk_completion_on_another_screen_matches_the_alacritty_engine() {
     let native_size = test_size(8, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let output = b"\x1b[2;3H\x1b_Ga=T,f=32,s=1,v=1,i=7,c=2,r=1,m=1,q=1;AQI=\x1b\\\x1b[?1049h\x1b_Gm=0;A/8=\x1b\\\x1b[?1049l";
 
@@ -135,7 +135,7 @@ fn kitty_chunk_completion_on_another_screen_matches_the_alacritty_engine() {
 #[test]
 fn kitty_image_data_survives_terminal_reset_like_the_alacritty_engine() {
     let native_size = test_size(8, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let output = b"\x1b_Ga=t,f=32,s=1,v=1,i=7,q=2;AQID/w==\x1b\\\x1bc\x1b_Ga=p,i=7,C=1,q=2\x1b\\";
 
@@ -160,7 +160,7 @@ fn kitty_image_data_survives_terminal_reset_like_the_alacritty_engine() {
 #[test]
 fn kitty_footer_survives_partial_top_scroll_like_the_alacritty_engine() {
     let native_size = test_size(8, 4);
-    let native = termy_terminal_ui::Terminal::new_display(native_size, None);
+    let native = termy_core::Terminal::new_display(native_size, None);
     let tmon = tmon::Terminal::new_display(size(native_size), tmon::Config::default());
     let output = b"\x1b[4;1H\x1b_Ga=T,f=32,s=1,v=1,i=7,C=1,q=2;AQID/w==\x1b\\\x1b[1;3r\x1b[3;1H\n";
 
@@ -186,7 +186,7 @@ fn kitty_footer_survives_partial_top_scroll_like_the_alacritty_engine() {
 #[test]
 fn kitty_placements_survive_column_resize_like_the_alacritty_engine() {
     let initial = test_size(8, 4);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let output = b"\x1b[2;7H\x1b_Ga=T,f=32,s=1,v=1,i=83,c=3,r=2,C=1;AQID/w==\x1b\\";
     native.feed_output(output);
@@ -216,7 +216,7 @@ fn kitty_placements_survive_column_resize_like_the_alacritty_engine() {
 #[test]
 fn reflow_resize_matches_the_alacritty_engine() {
     let initial = test_size(8, 3);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let output = b"one two three four five six seven eight";
     native.feed_output(output);
@@ -237,7 +237,7 @@ fn reflow_resize_matches_the_alacritty_engine() {
 #[test]
 fn scrolled_viewport_stays_anchored_through_width_reflow() {
     let initial = test_size(4, 2);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     native.feed_output(b"abcdefghijkl");
     tmon.feed_output(b"abcdefghijkl");
@@ -258,7 +258,7 @@ fn scrolled_viewport_matches_the_alacritty_engine_when_widening() {
         (b"abcdefghijklmnopqrstuvwxyzABCDEF".as_slice(), 4, 6),
     ] {
         let initial = test_size(initial_cols, 2);
-        let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+        let mut native = termy_core::Terminal::new_display(initial, None);
         let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
         native.feed_output(fixture);
         tmon.feed_output(fixture);
@@ -293,7 +293,7 @@ fn scrolled_soft_wrap_width_reflow_matrix_matches_the_alacritty_engine() {
                     .collect::<Vec<_>>();
                 let initial = test_size(initial_cols, rows);
 
-                let history_probe = termy_terminal_ui::Terminal::new_display(initial, None);
+                let history_probe = termy_core::Terminal::new_display(initial, None);
                 history_probe.feed_output(&fixture);
                 let history = history_probe.scroll_state().1;
 
@@ -303,8 +303,7 @@ fn scrolled_soft_wrap_width_reflow_matrix_matches_the_alacritty_engine() {
                             if resized_cols == initial_cols && resized_rows == rows {
                                 continue;
                             }
-                            let mut native =
-                                termy_terminal_ui::Terminal::new_display(initial, None);
+                            let mut native = termy_core::Terminal::new_display(initial, None);
                             let tmon =
                                 tmon::Terminal::new_display(size(initial), tmon::Config::default());
                             native.feed_output(&fixture);
@@ -353,7 +352,7 @@ fn scrolled_complex_width_reflow_matrix_matches_the_alacritty_engine() {
             test_size(6, 3),
         ),
     ] {
-        let history_probe = termy_terminal_ui::Terminal::new_display(initial, None);
+        let history_probe = termy_core::Terminal::new_display(initial, None);
         history_probe.feed_output(fixture);
         let history = history_probe.scroll_state().1;
 
@@ -366,7 +365,7 @@ fn scrolled_complex_width_reflow_matrix_matches_the_alacritty_engine() {
                 if resized_cols == initial.cols {
                     continue;
                 }
-                let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+                let mut native = termy_core::Terminal::new_display(initial, None);
                 let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
                 native.feed_output(fixture);
                 tmon.feed_output(fixture);
@@ -415,7 +414,7 @@ fn deterministic_scrolled_reflow_stress_matches_the_alacritty_engine() {
         ),
     ] {
         for requested_offset in 1..=3 {
-            let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+            let mut native = termy_core::Terminal::new_display(initial, None);
             let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
             native.feed_output(fixture);
             tmon.feed_output(fixture);
@@ -458,7 +457,7 @@ fn deterministic_scrolled_reflow_stress_matches_the_alacritty_engine() {
 #[test]
 fn cursor_after_sparse_wide_reflow_matches_the_alacritty_engine() {
     let initial = test_size(8, 2);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let output = "  ws界a";
     native.feed_output(output.as_bytes());
@@ -474,7 +473,7 @@ fn cursor_after_sparse_wide_reflow_matches_the_alacritty_engine() {
 #[test]
 fn cursor_gap_reflow_matches_the_termy_native_engine() {
     let initial = test_size(8, 4);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
 
     native.feed_output(b"\x1b[8G");
@@ -497,7 +496,7 @@ fn cursor_gap_reflow_matches_the_termy_native_engine() {
 #[test]
 fn cursor_at_wrapped_wide_boundary_matches_the_alacritty_engine() {
     let initial = test_size(9, 3);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let output = "\r\n  \u{301}m界α界 \u{8}\u{301}";
     native.feed_output(output.as_bytes());
@@ -513,7 +512,7 @@ fn cursor_at_wrapped_wide_boundary_matches_the_alacritty_engine() {
 #[test]
 fn growing_preserves_an_empty_soft_wrap_continuation() {
     let initial = test_size(4, 3);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let output = b"abcdefghX\x1b[2K";
     native.feed_output(output);
@@ -529,7 +528,7 @@ fn growing_preserves_an_empty_soft_wrap_continuation() {
 #[test]
 fn growing_retains_the_clear_live_cursor_continuation() {
     let initial = test_size(2, 2);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let output = b"abcdefghijk\x1b[1;1H";
     native.feed_output(output);
@@ -549,7 +548,7 @@ fn growing_retains_the_clear_live_cursor_continuation() {
 #[test]
 fn wide_margin_reflow_matches_the_alacritty_engine() {
     let initial = test_size(4, 3);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let output = "abc界x".as_bytes();
     native.feed_output(output);
@@ -570,7 +569,7 @@ fn wide_margin_reflow_matches_the_alacritty_engine() {
 #[test]
 fn row_only_resize_matches_the_alacritty_engine() {
     let initial = test_size(8, 3);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     native.feed_output(b"line-1\r\nline-2\r\nline-3\r\nline-4");
     tmon.feed_output(b"line-1\r\nline-2\r\nline-3\r\nline-4");
@@ -590,7 +589,7 @@ fn row_only_resize_matches_the_alacritty_engine() {
 #[test]
 fn repeated_output_and_reflow_resizes_match_the_alacritty_engine() {
     let initial = test_size(10, 4);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let output = "one two three four\r\nfive 界 six seven\r\neight nine ten";
     native.feed_output(output.as_bytes());
@@ -631,7 +630,7 @@ fn repeated_output_and_reflow_resizes_match_the_alacritty_engine() {
 fn wide_character_after_a_sparse_wrapped_row_reflows_like_alacritty() {
     let initial = test_size(12, 2);
     let resized = test_size(5, 2);
-    let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+    let mut native = termy_core::Terminal::new_display(initial, None);
     let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
     let output = "word 界\x1b[12G α界 ";
     native.feed_output(output.as_bytes());
@@ -648,7 +647,7 @@ fn deterministic_reflow_stress_matches_the_alacritty_engine() {
     let mut random = 0xa076_1d64_78bd_642f_u64;
     for trace in 0..16 {
         let initial = test_size(10, 4);
-        let mut native = termy_terminal_ui::Terminal::new_display(initial, None);
+        let mut native = termy_core::Terminal::new_display(initial, None);
         let tmon = tmon::Terminal::new_display(size(initial), tmon::Config::default());
         let mut operations = Vec::new();
 

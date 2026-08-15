@@ -104,7 +104,7 @@ fn notify_fallback(requested: &str, reason: &str) {
         return;
     }
     log::warn!("Configured terminal font '{requested}' {reason}; using '{DEFAULT_FONT_FAMILY}'");
-    termy_toast::warning(format!(
+    crate::ui::toast::warning(format!(
         "Font \"{requested}\" {reason}; using {DEFAULT_FONT_FAMILY}"
     ));
 }

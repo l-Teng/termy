@@ -281,7 +281,7 @@ fn open_main_window(
                     }
                     Err(error) => {
                         log::error!("Failed to install native macOS file drop bridge: {error}");
-                        termy_toast::error(error.to_string());
+                        crate::ui::toast::error(error.to_string());
                         view.update(cx, |view, cx| {
                             view.set_native_file_drop_enabled(false);
                             cx.notify();
@@ -335,12 +335,12 @@ pub(crate) fn open_main_window_with_runtime_config_overrides(
     }
     if let Some(message) = guard_tmux_startup(&mut reopen_config) {
         log::warn!("{message}");
-        termy_toast::warning(message);
+        crate::ui::toast::warning(message);
     }
 
     open_main_window(cx, reopen_config).inspect_err(|error| {
         log::error!("{error}");
-        termy_toast::error(error.clone());
+        crate::ui::toast::error(error.clone());
     })
 }
 
@@ -361,7 +361,7 @@ fn focus_or_open_main_window<V: 'static>(
 }
 
 fn start_theme_install_from_deeplink(cx: &mut App, slug: String) {
-    let loading_id = termy_toast::loading(format!("Fetching theme \"{slug}\"..."));
+    let loading_id = crate::ui::toast::loading(format!("Fetching theme \"{slug}\"..."));
 
     cx.spawn(async move |cx: &mut AsyncApp| {
         let fetch_result = cx
@@ -369,7 +369,7 @@ fn start_theme_install_from_deeplink(cx: &mut App, slug: String) {
             .spawn(async move { theme_store::fetch_theme_for_deeplink_blocking(&slug) })
             .await;
 
-        termy_toast::dismiss_toast(loading_id);
+        crate::ui::toast::dismiss_toast(loading_id);
 
         match fetch_result {
             Ok(theme) => {
@@ -383,16 +383,16 @@ fn start_theme_install_from_deeplink(cx: &mut App, slug: String) {
                 }
 
                 let install_loading_id =
-                    termy_toast::loading(format!("Installing {}...", theme.name));
+                    crate::ui::toast::loading(format!("Installing {}...", theme.name));
                 let install_result = cx
                     .background_executor()
                     .spawn(async move { theme_store::install_theme_from_store_blocking(theme) })
                     .await;
-                termy_toast::dismiss_toast(install_loading_id);
+                crate::ui::toast::dismiss_toast(install_loading_id);
 
                 cx.update(|cx| match install_result {
                     Ok(installed_theme) => {
-                        termy_toast::success(installed_theme.message.clone());
+                        crate::ui::toast::success(installed_theme.message.clone());
                         app_actions::update_open_settings_windows(cx, |view, settings_cx| {
                             view.apply_theme_store_install(
                                 &installed_theme.slug,
@@ -404,13 +404,13 @@ fn start_theme_install_from_deeplink(cx: &mut App, slug: String) {
                     }
                     Err(error) => {
                         log::error!("Failed to install theme from deeplink: {error}");
-                        termy_toast::error(error);
+                        crate::ui::toast::error(error);
                     }
                 });
             }
             Err(error) => {
                 log::error!("Failed to fetch theme from deeplink: {error}");
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
             }
         }
     })
@@ -460,12 +460,12 @@ fn handle_open_urls_with_main_window<V: 'static>(
                 let _ = focus_or_open_main_window::<V>(cx, &mut open_window);
                 if let Err(error) = dispatch(cx, route, route_argument) {
                     log::error!("Failed to handle deeplink {raw_url}: {error}");
-                    termy_toast::error(error);
+                    crate::ui::toast::error(error);
                 }
             }
             Err(error) => {
                 log::warn!("Rejected deeplink {raw_url}: {error}");
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
             }
         }
     }
@@ -527,13 +527,13 @@ fn main() {
         cx.on_action(|_: &OpenConfig, _cx| {
             if let Err(error) = app_actions::open_config_file() {
                 log::error!("Failed to open config file: {error}");
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
             }
         });
         cx.on_action(|_: &OpenSettings, cx| {
             if let Err(error) = app_actions::open_settings_or_config_file(cx) {
                 log::error!("{error}");
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
             }
         });
 
@@ -547,7 +547,7 @@ fn main() {
         app_icon::apply_from_config(&app_config);
         if let Some(message) = guard_tmux_startup(&mut app_config) {
             log::warn!("{message}");
-            termy_toast::warning(message);
+            crate::ui::toast::warning(message);
         }
         // Keep startup menus/keybinds aligned with the active runtime capability set.
         let tmux_runtime_active = if cfg!(target_os = "windows") {

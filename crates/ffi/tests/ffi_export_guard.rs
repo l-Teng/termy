@@ -128,7 +128,7 @@ fn canonical_rust_type(raw_type: &str) -> String {
         "u32" => "u32".to_string(),
         "u64" => "u64".to_string(),
         "usize" => "usize".to_string(),
-        "tmux_control_core::session::ControlSession" => "TermyFfiTmuxControl".to_string(),
+        "termy_tmux_control_core::session::ControlSession" => "TermyFfiTmuxControl".to_string(),
         other => other.to_string(),
     }
 }

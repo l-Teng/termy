@@ -381,8 +381,9 @@ impl TerminalView {
     }
 
     fn active_current_command(&self) -> Option<&str> {
-        self.tabs
-            .get(self.active_tab)
+        self.session
+            .tabs
+            .get(self.session.active_tab)
             .and_then(|tab| tab.current_command.as_deref())
             .map(str::trim)
             .filter(|command| !command.is_empty())
@@ -607,12 +608,12 @@ impl TerminalView {
                 Vec::new(),
                 self.tmux_primary_socket_target_for_session_palette(),
             );
-            termy_toast::error(format!("Failed to list tmux sessions: {error}"));
+            crate::ui::toast::error(format!("Failed to list tmux sessions: {error}"));
         }
         if mode == CommandPaletteMode::Layouts
             && let Err(error) = self.reload_saved_layout_palette_items()
         {
-            termy_toast::error(format!("Failed to load saved layouts: {error}"));
+            crate::ui::toast::error(format!("Failed to load saved layouts: {error}"));
         }
         if mode == CommandPaletteMode::Commands {
             self.reload_saved_ssh_hosts();
@@ -686,7 +687,7 @@ impl TerminalView {
 
     pub(super) fn open_saved_layouts_palette(&mut self, cx: &mut Context<Self>) {
         if self.runtime_kind() != RuntimeKind::Native {
-            termy_toast::info("Switch to the native runtime to use saved layouts");
+            crate::ui::toast::info("Switch to the native runtime to use saved layouts");
             self.notify_overlay(cx);
             return;
         }
@@ -1114,10 +1115,12 @@ impl TerminalView {
         match item.kind {
             CommandPaletteItemKind::Command(action) => {
                 if !item.enabled {
-                    termy_toast::info(Self::command_palette_disabled_action_message_for_state(
-                        action,
-                        self.command_capabilities(),
-                    ));
+                    crate::ui::toast::info(
+                        Self::command_palette_disabled_action_message_for_state(
+                            action,
+                            self.command_capabilities(),
+                        ),
+                    );
                     self.notify_overlay(cx);
                     return;
                 }
@@ -1129,7 +1132,7 @@ impl TerminalView {
                 ..
             } => {
                 if !item.enabled {
-                    termy_toast::info(
+                    crate::ui::toast::info(
                         item.status_hint
                             .unwrap_or_else(|| "Plugin command is unavailable".to_string()),
                     );
@@ -1140,7 +1143,7 @@ impl TerminalView {
             }
             CommandPaletteItemKind::PluginInputSubmit { .. } => {
                 if !item.enabled {
-                    termy_toast::info(
+                    crate::ui::toast::info(
                         item.status_hint
                             .unwrap_or_else(|| "Plugin input is invalid".to_string()),
                     );
@@ -1154,7 +1157,7 @@ impl TerminalView {
             }
             CommandPaletteItemKind::SshHost { host_id } => {
                 if !item.enabled {
-                    termy_toast::info(
+                    crate::ui::toast::info(
                         item.status_hint
                             .unwrap_or_else(|| "SSH host is unavailable".to_string()),
                     );
@@ -1171,7 +1174,7 @@ impl TerminalView {
                     cx,
                 ) {
                     log::error!("{error}");
-                    termy_toast::error(error);
+                    crate::ui::toast::error(error);
                     self.notify_overlay(cx);
                 }
             }
@@ -1302,12 +1305,12 @@ impl TerminalView {
             ),
             CommandPaletteItemKind::AppInfoEntry { label, value } => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(value));
-                termy_toast::success(format!("Copied {label}"));
+                crate::ui::toast::success(format!("Copied {label}"));
                 self.notify_overlay(cx);
             }
             CommandPaletteItemKind::AppInfoCopyAll { payload } => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(payload));
-                termy_toast::success("Copied app info to clipboard");
+                crate::ui::toast::success("Copied app info to clipboard");
                 self.close_command_palette(cx);
                 self.notify_overlay(cx);
             }
@@ -1324,7 +1327,7 @@ impl TerminalView {
     ) {
         let command = command.trim();
         if command.is_empty() {
-            termy_toast::error(format!("Task \"{task_name}\" has no command"));
+            crate::ui::toast::error(format!("Task \"{task_name}\" has no command"));
             self.notify_overlay(cx);
             return;
         }
@@ -1341,11 +1344,12 @@ impl TerminalView {
             return;
         }
         let Some(terminal) = self
+            .session
             .tabs
-            .get(self.active_tab)
+            .get(self.session.active_tab)
             .and_then(TerminalTab::active_terminal)
         else {
-            termy_toast::error(format!(
+            crate::ui::toast::error(format!(
                 "Failed to start task \"{task_name}\": new terminal is unavailable"
             ));
             self.notify_overlay(cx);
@@ -1354,10 +1358,10 @@ impl TerminalView {
         terminal.write_input(command_input.as_bytes());
         cx.notify();
         match layout_name {
-            Some(layout_name) => termy_toast::success(format!(
+            Some(layout_name) => crate::ui::toast::success(format!(
                 "Started task \"{task_name}\" for layout \"{layout_name}\""
             )),
-            None => termy_toast::success(format!("Started task \"{task_name}\"")),
+            None => crate::ui::toast::success(format!("Started task \"{task_name}\"")),
         }
         self.notify_overlay(cx);
     }
@@ -1388,7 +1392,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         let Some(command) = self.active_current_command().map(ToOwned::to_owned) else {
-            termy_toast::info("No active command to save");
+            crate::ui::toast::info("No active command to save");
             self.notify_overlay(cx);
             return;
         };
@@ -1410,14 +1414,14 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         if !enabled {
-            termy_toast::info("Use format name: command and pick a unique task name");
+            crate::ui::toast::info("Use format name: command and pick a unique task name");
             self.notify_overlay(cx);
             return;
         }
 
         let task_name = task_name.trim();
         if !Self::palette_task_name_is_valid(task_name) {
-            termy_toast::error("Task names cannot contain '.'");
+            crate::ui::toast::error("Task names cannot contain '.'");
             self.notify_overlay(cx);
             return;
         }
@@ -1438,16 +1442,16 @@ impl TerminalView {
                 self.close_command_palette(cx);
                 self.reload_config(cx);
                 match task.layout.as_deref() {
-                    Some(layout_name) => termy_toast::success(format!(
+                    Some(layout_name) => crate::ui::toast::success(format!(
                         "Saved task \"{}\" for layout \"{}\"",
                         task.name, layout_name
                     )),
-                    None => termy_toast::success(format!("Saved task \"{}\"", task.name)),
+                    None => crate::ui::toast::success(format!("Saved task \"{}\"", task.name)),
                 }
                 self.notify_overlay(cx);
             }
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 self.notify_overlay(cx);
             }
         }
@@ -1476,12 +1480,12 @@ impl TerminalView {
 
     fn open_tasks_palette_from_saved_layout(&mut self, layout_name: &str, cx: &mut Context<Self>) {
         let Some(current_layout) = self.current_named_layout.as_deref() else {
-            termy_toast::info("Load a saved layout before running layout tasks");
+            crate::ui::toast::info("Load a saved layout before running layout tasks");
             self.notify_overlay(cx);
             return;
         };
         if !current_layout.eq_ignore_ascii_case(layout_name) {
-            termy_toast::info("Load that saved layout first to run its tasks");
+            crate::ui::toast::info("Load that saved layout first to run its tasks");
             self.notify_overlay(cx);
             return;
         }
@@ -1495,18 +1499,18 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         if !enabled {
-            termy_toast::info("Enter a layout name first");
+            crate::ui::toast::info("Enter a layout name first");
             self.notify_overlay(cx);
             return;
         }
         match self.save_current_workspace_as_named_layout(layout_name) {
             Ok(()) => {
                 self.close_command_palette(cx);
-                termy_toast::success(format!("Saved layout \"{}\"", layout_name.trim()));
+                crate::ui::toast::success(format!("Saved layout \"{}\"", layout_name.trim()));
                 self.notify_overlay(cx);
             }
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 self.notify_overlay(cx);
             }
         }
@@ -1516,11 +1520,11 @@ impl TerminalView {
         match self.load_named_layout(layout_name, cx) {
             Ok(()) => {
                 self.close_command_palette(cx);
-                termy_toast::success(format!("Loaded layout \"{layout_name}\""));
+                crate::ui::toast::success(format!("Loaded layout \"{layout_name}\""));
                 self.notify_overlay(cx);
             }
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 self.notify_overlay(cx);
             }
         }
@@ -1559,14 +1563,14 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         if !enabled {
-            termy_toast::info("Enter a different layout name");
+            crate::ui::toast::info("Enter a different layout name");
             self.notify_overlay(cx);
             return;
         }
         match self.rename_named_layout(current_layout_name, next_layout_name) {
             Ok(()) => {
                 self.close_command_palette(cx);
-                termy_toast::success(format!(
+                crate::ui::toast::success(format!(
                     "Renamed layout \"{}\" to \"{}\"",
                     current_layout_name,
                     next_layout_name.trim()
@@ -1574,7 +1578,7 @@ impl TerminalView {
                 self.notify_overlay(cx);
             }
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 self.notify_overlay(cx);
             }
         }
@@ -1595,11 +1599,11 @@ impl TerminalView {
         match self.delete_named_layout(layout_name) {
             Ok(()) => {
                 self.close_command_palette(cx);
-                termy_toast::success(format!("Deleted layout \"{layout_name}\""));
+                crate::ui::toast::success(format!("Deleted layout \"{layout_name}\""));
                 self.notify_overlay(cx);
             }
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 self.notify_overlay(cx);
             }
         }
@@ -1627,16 +1631,16 @@ impl TerminalView {
         match self.persist_theme_selection(theme_id, cx) {
             Ok(true) => {
                 self.close_command_palette(cx);
-                termy_toast::success(format!("Theme set to {}", self.theme_id));
+                crate::ui::toast::success(format!("Theme set to {}", self.theme_id));
                 self.notify_overlay(cx);
             }
             Ok(false) => {
                 self.close_command_palette(cx);
-                termy_toast::info(format!("Theme already set to {theme_id}"));
+                crate::ui::toast::info(format!("Theme already set to {theme_id}"));
                 self.notify_overlay(cx);
             }
             Err(error) => {
-                termy_toast::error(error);
+                crate::ui::toast::error(error);
                 self.notify_overlay(cx);
             }
         }
@@ -1658,7 +1662,7 @@ impl TerminalView {
             self.command_capabilities(),
         );
         if !availability.enabled {
-            termy_toast::info(Self::command_palette_disabled_action_message_for_state(
+            crate::ui::toast::info(Self::command_palette_disabled_action_message_for_state(
                 action,
                 self.command_capabilities(),
             ));
@@ -1679,19 +1683,19 @@ impl TerminalView {
 
         match action {
             CommandAction::OpenConfig => {
-                termy_toast::info("Opened settings file");
+                crate::ui::toast::info("Opened settings file");
                 self.notify_overlay(cx);
             }
             CommandAction::PrettifyConfig => {
-                termy_toast::success("Prettified settings file");
+                crate::ui::toast::success("Prettified settings file");
                 self.notify_overlay(cx);
             }
-            CommandAction::NewTab => termy_toast::success("Opened new tab"),
-            CommandAction::CloseTab => termy_toast::info("Closed active tab"),
-            CommandAction::ClosePaneOrTab => termy_toast::info("Closed active pane or tab"),
-            CommandAction::ZoomIn => termy_toast::info("Zoomed in"),
-            CommandAction::ZoomOut => termy_toast::info("Zoomed out"),
-            CommandAction::ZoomReset => termy_toast::info("Zoom reset"),
+            CommandAction::NewTab => crate::ui::toast::success("Opened new tab"),
+            CommandAction::CloseTab => crate::ui::toast::info("Closed active tab"),
+            CommandAction::ClosePaneOrTab => crate::ui::toast::info("Closed active pane or tab"),
+            CommandAction::ZoomIn => crate::ui::toast::info("Zoomed in"),
+            CommandAction::ZoomOut => crate::ui::toast::info("Zoomed out"),
+            CommandAction::ZoomReset => crate::ui::toast::info("Zoom reset"),
             CommandAction::ImportColors => {}
             CommandAction::Quit
             | CommandAction::SwitchTheme

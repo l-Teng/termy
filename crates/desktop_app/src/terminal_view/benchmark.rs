@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 use sysinfo::{ProcessesToUpdate, System, get_current_pid};
-use termy_terminal_ui::{
+use termy_core::{
     monotonic_now_ns, terminal_ui_render_metrics_reset, terminal_ui_render_metrics_snapshot,
 };
 

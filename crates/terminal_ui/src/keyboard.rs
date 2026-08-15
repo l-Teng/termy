@@ -1,4 +1,4 @@
-pub use termy_core::{TerminalKeyEventKind, TerminalKeyboardMode, TermyKeystroke, TermyModifiers};
+use termy_core::{TerminalKeyEventKind, TerminalKeyboardMode, TermyKeystroke, TermyModifiers};
 
 pub fn keystroke_to_input(
     keystroke: &gpui::Keystroke,

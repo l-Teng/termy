@@ -12,8 +12,10 @@ Termy is a Rust workspace split by ownership boundary, not by implementation con
 ## Runtime And UI
 
 - `core/` (`termy_core`): headless terminal runtime/API for embedders.
+- `tmon/` (`tmon`): experimental renderer-neutral terminal engine and native PTY/ConPTY runtime.
 - `plugin_runtime/` (`termy_plugin_runtime`): plugin discovery, typed protocol validation, and the on-demand Bun/Worker runtime.
-- `terminal_ui/` (`termy_terminal_ui`): GPUI-facing terminal adapter, grid paint cache, native pane runtime, and tmux support.
+- `terminal_ui/` (`termy_terminal_ui`): GPUI grid and keystroke adapters plus tmux pane display/client support; shared terminal types come directly from `termy_core`.
+- `tmux_control_core/` (`termy_tmux_control_core`): UI-agnostic tmux control-mode protocol, session, and transport logic shared by terminal UI and FFI.
 - `ui/` (`termy_ui`): Termy's design system in GPUI — theme-derived color tokens, layout metrics, and the stateless chrome components (sidebar, section headers, grouped cards, setting rows, controls, status surfaces).
 - `native_sdk/` (`termy_native_sdk`): narrow platform-native helpers.
 
@@ -30,9 +32,7 @@ Termy is a Rust workspace split by ownership boundary, not by implementation con
 
 - `release_core/` (`termy_release_core`): release metadata and version helpers.
 - `auto_update/` (`termy_auto_update`): update discovery, verification, and platform update decisions.
-- `auto_update_ui/` (`termy_auto_update_ui`): reusable update UI wrappers.
 - `cli_install_core/` (`termy_cli_install_core`): shared CLI install/path helpers.
-- `toast_sdk/` (`termy_toast`): small notification primitives.
 - `xtask/` (`xtask`): repository automation and generated-doc checks.
 
 Each crate has its own `README.md` with `Owner`, `Validation`, and `Forbidden Dependencies` sections. Update the local README when a crate gains or loses ownership of a responsibility, changes its test command, or changes its dependency boundary.
