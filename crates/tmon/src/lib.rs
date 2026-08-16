@@ -346,6 +346,17 @@ pub struct RenderDamageSnapshot {
     pub generation: u64,
 }
 
+/// Coherent renderer state captured while visiting one frame update.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameUpdate {
+    pub render: RenderDamageSnapshot,
+    pub size: Size,
+    pub viewport: ViewportMetadata,
+    pub palette: Palette,
+    pub graphics_revision: u64,
+    pub graphics_placements: Vec<GraphicsRenderPlacement>,
+}
+
 struct EngineOutput {
     events: Vec<Event>,
     replies: Vec<u8>,
@@ -681,6 +692,23 @@ impl Terminal {
 
     /// Construct a parser/grid surface with no child process. Useful for replay and tests.
     pub fn new_display(size: Size, config: Config) -> Self {
+        Self::new_display_inner(size, config, None)
+    }
+
+    /// Construct a display-only surface with a host wakeup notifier.
+    pub fn new_display_with_wakeup_notifier(
+        size: Size,
+        config: Config,
+        wakeup_notifier: WakeupNotifier,
+    ) -> Self {
+        Self::new_display_inner(size, config, Some(wakeup_notifier))
+    }
+
+    fn new_display_inner(
+        size: Size,
+        config: Config,
+        wakeup_notifier: Option<WakeupNotifier>,
+    ) -> Self {
         let size = size.clamped();
         let protocol_replies = Arc::new(Mutex::new(VecDeque::new()));
         let sink_replies = protocol_replies.clone();
@@ -696,7 +724,7 @@ impl Terminal {
             wakeup_enabled: Arc::new(AtomicBool::new(true)),
             sync_batch_active: Arc::new(AtomicBool::new(false)),
             sync_generation: Arc::new(AtomicU64::new(0)),
-            wakeup_notifier: None,
+            wakeup_notifier,
             #[cfg(any(
                 target_os = "linux",
                 target_os = "android",
@@ -830,6 +858,37 @@ impl Terminal {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .drain(..)
             .collect()
+    }
+
+    /// Drain at most `limit` pending display-only protocol reply bytes.
+    pub fn drain_protocol_replies_bounded(&self, limit: usize) -> (Vec<u8>, bool) {
+        let mut replies = self
+            .protocol_replies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = replies.len().min(limit);
+        let drained = replies.drain(..count).collect();
+        (drained, !replies.is_empty())
+    }
+
+    /// Discard at most `limit` pending display-only protocol reply bytes.
+    pub fn discard_protocol_replies(&self, limit: usize) -> (usize, bool) {
+        let mut replies = self
+            .protocol_replies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = replies.len().min(limit);
+        replies.drain(..count);
+        (count, !replies.is_empty())
+    }
+
+    /// Returns whether events are currently queued for the host.
+    pub fn has_pending_events(&self) -> bool {
+        !self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
     }
 
     pub fn drain_events(&self) -> (Vec<Event>, bool) {
@@ -1066,6 +1125,61 @@ impl Terminal {
         }
     }
 
+    /// Visit one coherent renderer update and consume only the represented damage.
+    pub fn visit_frame_update(
+        &self,
+        mut visitor: impl FnMut(usize, usize, i32, usize, &Cell, Option<Combining<'_>>),
+    ) -> FrameUpdate {
+        self.visit_frame_update_with_options(false, &mut visitor)
+    }
+
+    /// Visit one coherent renderer update, optionally forcing a full rebuild.
+    pub fn visit_frame_update_with_options(
+        &self,
+        force_full: bool,
+        mut visitor: impl FnMut(usize, usize, i32, usize, &Cell, Option<Combining<'_>>),
+    ) -> FrameUpdate {
+        let mut engine = self
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (damage, scrolls) = if force_full {
+            engine.grid.clear_damage();
+            (DamageSnapshot::Full, Vec::new())
+        } else {
+            engine.grid.take_render_damage()
+        };
+        let ranges = match &damage {
+            DamageSnapshot::Full => (0..usize::from(engine.size.rows))
+                .map(|row| (row, 0, usize::from(engine.size.cols).saturating_sub(1)))
+                .collect::<Vec<_>>(),
+            DamageSnapshot::Partial(spans) => spans
+                .iter()
+                .map(|span| (span.row, span.left_col, span.right_col))
+                .collect(),
+        };
+        let display_offset = engine.grid.for_each_viewport_range(ranges, &mut visitor);
+        let viewport = ViewportMetadata {
+            cols: engine.size.cols,
+            rows: engine.size.rows,
+            cursor: engine.grid.cursor_state(),
+            display_offset,
+            history_size: engine.grid.history_size(),
+        };
+        FrameUpdate {
+            render: RenderDamageSnapshot {
+                damage,
+                scrolls,
+                generation: engine.render_generation,
+            },
+            size: engine.size,
+            viewport,
+            palette: engine.grid.palette(),
+            graphics_revision: engine.parser.graphics_revision(),
+            graphics_placements: engine.parser.graphics_placements(&engine.grid),
+        }
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.engine
             .lock()
@@ -1082,12 +1196,29 @@ impl Terminal {
             .palette()
     }
 
+    /// Monotonic revision for rendered Kitty placement state.
+    pub fn kitty_graphics_revision(&self) -> u64 {
+        self.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .parser
+            .graphics_revision()
+    }
+
     pub fn kitty_graphics_placements(&self) -> Vec<GraphicsRenderPlacement> {
+        self.kitty_graphics_snapshot().1
+    }
+
+    /// Capture the Kitty revision and visible placements under one engine lock.
+    pub fn kitty_graphics_snapshot(&self) -> (u64, Vec<GraphicsRenderPlacement>) {
         let engine = self
             .engine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        engine.parser.graphics_placements(&engine.grid)
+        (
+            engine.parser.graphics_revision(),
+            engine.parser.graphics_placements(&engine.grid),
+        )
     }
 
     #[inline]

@@ -367,6 +367,10 @@ impl Parser {
         self.osc52 = osc52;
     }
 
+    pub(crate) fn graphics_revision(&self) -> u64 {
+        self.graphics.revision()
+    }
+
     pub(crate) fn graphics_placements(&self, grid: &Grid) -> Vec<GraphicsRenderPlacement> {
         self.graphics.render_placements(grid)
     }

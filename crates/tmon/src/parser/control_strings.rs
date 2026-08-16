@@ -110,6 +110,7 @@ impl Parser {
         let result = self.graphics.apply(command, grid, self.size);
         output.replies.extend(result.replies);
         if result.changed {
+            self.graphics.bump_revision();
             grid.mark_full_damage();
         }
     }

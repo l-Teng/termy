@@ -321,6 +321,124 @@ fn stale_render_generation_refuses_incremental_cell_visits() {
 }
 
 #[test]
+fn coherent_frame_update_visits_and_clears_only_represented_damage() {
+    let terminal = Terminal::new_display(
+        Size {
+            cols: 4,
+            rows: 2,
+            ..Size::default()
+        },
+        Config::default(),
+    );
+    let _ = terminal.visit_frame_update_with_options(true, |_, _, _, _, _, _| {});
+    terminal.feed_output(b"a\r\nb\r\nc");
+
+    let mut visited = Vec::new();
+    let update = terminal.visit_frame_update(|row, _, _, col, cell, _| {
+        visited.push((row, col, cell.character));
+    });
+
+    assert_eq!(
+        update.render.scrolls,
+        vec![ScrollDamage {
+            top: 0,
+            bottom: 1,
+            count: 1,
+            direction: ScrollDirection::Up,
+        }]
+    );
+    assert!(matches!(update.render.damage, DamageSnapshot::Partial(_)));
+    assert_eq!(update.size, terminal.size());
+    assert_eq!(update.viewport.cursor, terminal.cursor_state());
+    assert_eq!(
+        (update.viewport.display_offset, update.viewport.history_size),
+        terminal.scroll_state()
+    );
+    assert_eq!(update.palette, terminal.palette());
+    assert!(
+        visited
+            .iter()
+            .any(|(row, _, character)| *row == 0 && *character == 'b')
+    );
+    assert!(
+        visited
+            .iter()
+            .any(|(row, _, character)| *row == 1 && *character == 'c')
+    );
+
+    terminal.feed_output(b"d");
+    let next = terminal.visit_frame_update(|_, _, _, _, _, _| {});
+    assert_eq!(
+        next.render.damage,
+        DamageSnapshot::Partial(vec![DirtySpan {
+            row: 1,
+            left_col: 1,
+            right_col: 1,
+        }])
+    );
+    assert!(next.render.scrolls.is_empty());
+}
+
+#[test]
+fn coherent_frame_update_holds_output_until_its_visit_finishes() {
+    let terminal = Arc::new(Terminal::new_display(
+        Size {
+            cols: 4,
+            rows: 2,
+            ..Size::default()
+        },
+        Config::default(),
+    ));
+    let _ = terminal.visit_frame_update_with_options(true, |_, _, _, _, _, _| {});
+    terminal.feed_output(b"a");
+
+    let (start_tx, start_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let update_terminal = terminal.clone();
+    let update = std::thread::spawn(move || {
+        update_terminal.visit_frame_update(|_, _, _, _, _, _| {
+            let _ = start_tx.send(());
+            let _ = release_rx.recv();
+        })
+    });
+    start_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("frame visitation should start");
+
+    let (fed_tx, fed_rx) = std::sync::mpsc::channel();
+    let output_terminal = terminal.clone();
+    let output = std::thread::spawn(move || {
+        output_terminal.feed_output(b"b");
+        let _ = fed_tx.send(());
+    });
+    assert!(fed_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    release_tx.send(()).unwrap();
+    let update = update.join().unwrap();
+    fed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("output should finish after visitation releases the engine lock");
+    output.join().unwrap();
+
+    assert_eq!(
+        update.render.damage,
+        DamageSnapshot::Partial(vec![DirtySpan {
+            row: 0,
+            left_col: 0,
+            right_col: 0,
+        }])
+    );
+    let next = terminal.visit_frame_update(|_, _, _, _, _, _| {});
+    assert_eq!(
+        next.render.damage,
+        DamageSnapshot::Partial(vec![DirtySpan {
+            row: 0,
+            left_col: 1,
+            right_col: 1,
+        }])
+    );
+}
+
+#[test]
 fn full_viewport_fallback_consumes_damage_represented_by_the_rebuild() {
     let terminal = Terminal::new_display(
         Size {
@@ -528,6 +646,34 @@ fn display_protocol_reply_api_routes_to_the_drain_queue() {
 }
 
 #[test]
+fn display_protocol_reply_draining_and_discarding_are_bounded() {
+    let terminal = Terminal::new_display(Size::default(), Config::default());
+    terminal.write_protocol_reply_owned(b"abcdefgh".to_vec());
+
+    assert_eq!(
+        terminal.drain_protocol_replies_bounded(3),
+        (b"abc".to_vec(), true)
+    );
+    assert_eq!(terminal.discard_protocol_replies(2), (2, true));
+    assert_eq!(
+        terminal.drain_protocol_replies_bounded(usize::MAX),
+        (b"fgh".to_vec(), false)
+    );
+    assert_eq!(terminal.discard_protocol_replies(1), (0, false));
+}
+
+#[test]
+fn pending_event_probe_tracks_bounded_drains() {
+    let terminal = Terminal::new_display(Size::default(), Config::default());
+    assert!(!terminal.has_pending_events());
+
+    terminal.feed_output(b"\x07");
+    assert!(terminal.has_pending_events());
+    assert_eq!(terminal.drain_events().0, [Event::Bell, Event::Wakeup]);
+    assert!(!terminal.has_pending_events());
+}
+
+#[test]
 fn live_color_query_replies_match_the_alacritty_engine() {
     let size = Size::default();
     let input = b"\x1b]4;1;#123456\x1b\\\
@@ -578,12 +724,50 @@ fn base64_decoder_accepts_padded_and_unpadded_data_but_rejects_junk() {
 
 #[test]
 fn synchronized_updates_wake_after_a_bounded_timeout() {
-    let terminal = Terminal::new_display(Size::default(), Config::default());
+    let notifications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let notifier_notifications = notifications.clone();
+    let terminal = Terminal::new_display_with_wakeup_notifier(
+        Size::default(),
+        Config::default(),
+        WakeupNotifier::new(move || {
+            notifier_notifications.fetch_add(1, Ordering::Relaxed);
+        }),
+    );
     terminal.feed_output(b"\x1b[?2026hframe");
     assert!(terminal.drain_events().0.is_empty());
+    assert_eq!(notifications.load(Ordering::Relaxed), 0);
     assert_eq!(terminal.snapshot().cells[0].character, ' ');
 
     std::thread::sleep(SYNC_WATCHDOG_DELAY + Duration::from_millis(75));
+    assert_eq!(notifications.load(Ordering::Relaxed), 1);
+    assert_eq!(terminal.drain_events().0, vec![Event::Wakeup]);
+    assert_eq!(
+        terminal.snapshot().cells[..5]
+            .iter()
+            .map(|cell| cell.character)
+            .collect::<String>(),
+        "frame"
+    );
+}
+
+#[test]
+fn synchronized_update_end_notifies_and_exposes_the_committed_frame() {
+    let notifications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let notifier_notifications = notifications.clone();
+    let terminal = Terminal::new_display_with_wakeup_notifier(
+        Size::default(),
+        Config::default(),
+        WakeupNotifier::new(move || {
+            notifier_notifications.fetch_add(1, Ordering::Relaxed);
+        }),
+    );
+
+    terminal.feed_output(b"\x1b[?2026hframe");
+    assert_eq!(notifications.load(Ordering::Relaxed), 0);
+    assert_eq!(terminal.snapshot().cells[0].character, ' ');
+
+    terminal.feed_output(b"\x1b[?2026l");
+    assert_eq!(notifications.load(Ordering::Relaxed), 1);
     assert_eq!(terminal.drain_events().0, vec![Event::Wakeup]);
     assert_eq!(
         terminal.snapshot().cells[..5]

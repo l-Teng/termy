@@ -349,6 +349,34 @@ fn kitty_graphics_are_placed_at_the_cursor_when_the_command_arrives() {
     assert_eq!(frame.cells[1].character, 'B');
 }
 
+#[test]
+fn kitty_graphics_revision_and_visible_placements_are_atomic() {
+    let terminal = graphics_test_terminal(8);
+    assert_eq!(terminal.kitty_graphics_snapshot(), (0, Vec::new()));
+
+    terminal.feed_output(b"\x1b[2;1H\x1b_Ga=T,f=32,s=1,v=1,i=31,c=2,r=1,C=1;AQID/w==\x1b\\");
+    let (placed_revision, placed) = terminal.kitty_graphics_snapshot();
+    assert!(placed_revision > 0);
+    assert_eq!(placed.len(), 1);
+    assert_eq!(placed_revision, terminal.kitty_graphics_revision());
+
+    terminal.feed_output(b"\x1b[?1049h");
+    let (alternate_revision, alternate) = terminal.kitty_graphics_snapshot();
+    assert!(alternate_revision > placed_revision);
+    assert!(alternate.is_empty());
+
+    terminal.feed_output(b"\x1b[?1049l");
+    let (restored_revision, restored) = terminal.kitty_graphics_snapshot();
+    assert!(restored_revision > alternate_revision);
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].placement_serial, placed[0].placement_serial);
+
+    terminal.feed_output(b"\x1b_Ga=d,d=a,q=1\x1b\\");
+    let (deleted_revision, deleted) = terminal.kitty_graphics_snapshot();
+    assert!(deleted_revision > restored_revision);
+    assert!(deleted.is_empty());
+}
+
 fn graphics_test_terminal(scrollback_history: usize) -> Terminal {
     Terminal::new_display(
         Size {

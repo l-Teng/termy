@@ -147,7 +147,7 @@ struct UploadContext {
     alternate: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphicsRenderPlacement {
     pub placement_serial: u64,
     pub image_id: u32,
@@ -181,6 +181,7 @@ pub(crate) struct GraphicsState {
     stored_bytes: usize,
     next_generation: u64,
     next_serial: u64,
+    revision: u64,
 }
 
 #[derive(Default)]
@@ -191,7 +192,7 @@ pub(crate) struct ApplyResult {
 
 impl GraphicsState {
     pub(crate) fn apply_grid_effect(&mut self, effect: GridEffect) -> bool {
-        match effect {
+        let changed = match effect {
             GridEffect::ScrollUp {
                 alternate,
                 top,
@@ -229,6 +230,7 @@ impl GraphicsState {
                 history_size,
             } => self.scroll_region_down(alternate, top, bottom, count, history_size),
             GridEffect::EnteredAlternate => self.clear_screen_placements(true),
+            GridEffect::ExitedAlternate => false,
             GridEffect::ClearViewport {
                 alternate,
                 history_size,
@@ -241,7 +243,9 @@ impl GraphicsState {
                 let alternate = self.clear_screen_placements(true);
                 primary || alternate
             }
-        }
+        };
+        self.bump_revision();
+        changed
     }
 
     pub(crate) fn apply(
@@ -738,6 +742,10 @@ impl GraphicsState {
         }
     }
 
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub(crate) fn render_placements(&self, grid: &Grid) -> Vec<GraphicsRenderPlacement> {
         let alternate = grid.alternate_screen_mode();
         let history = i64::try_from(grid.history_size()).unwrap_or(i64::MAX);
@@ -1009,6 +1017,10 @@ impl GraphicsState {
         self.placements
             .retain(|placement| placement.image_id != image_id);
         self.insertion_order.retain(|id| *id != image_id);
+    }
+
+    pub(crate) fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 }
 

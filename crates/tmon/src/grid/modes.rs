@@ -270,6 +270,7 @@ impl Grid {
             self.effects.push_back(GridEffect::EnteredAlternate);
         } else {
             self.alternate_active = false;
+            self.effects.push_back(GridEffect::ExitedAlternate);
         }
         std::mem::swap(
             &mut self.kitty_keyboard_stack,

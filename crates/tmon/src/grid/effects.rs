@@ -18,6 +18,7 @@ pub(crate) enum GridEffect {
         history_size: usize,
     },
     EnteredAlternate,
+    ExitedAlternate,
     ClearViewport {
         alternate: bool,
         history_size: usize,
