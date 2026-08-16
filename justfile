@@ -166,34 +166,6 @@ check-file-sizes:
 test-tmux-integration:
     #!/usr/bin/env bash
     set -euo pipefail
-    validate_exact_test() {
-      local package="$1"
-      local target_kind="$2"
-      local target_name="$3"
-      local test_name="$4"
-      local listed match_count
-      local cargo_args=(test --locked -p "$package")
-      case "$target_kind" in
-        lib) cargo_args+=(--lib) ;;
-        integration) cargo_args+=(--test "$target_name") ;;
-        *)
-          echo "Tmux integration configuration error: invalid target kind '$target_kind'" >&2
-          return 1
-          ;;
-      esac
-      listed=$(cargo "${cargo_args[@]}" "$test_name" -- --ignored --exact --list)
-      match_count=$(printf '%s\n' "$listed" | grep -Fxc -- "$test_name: test" || true)
-      if (( match_count != 1 )); then
-        echo "Tmux integration configuration error: '$test_name' matched $match_count tests" >&2
-        printf '%s\n' "$listed" >&2
-        return 1
-      fi
-    }
-    if [[ -n "${TERMY_TMUX_VALIDATE_TEST_SPEC:-}" ]]; then
-      IFS='|' read -r package target_kind target_name test_name <<<"$TERMY_TMUX_VALIDATE_TEST_SPEC"
-      validate_exact_test "$package" "$target_kind" "$target_name" "$test_name"
-      exit
-    fi
     tmux_tests=(
       "termy_terminal_ui|integration|tmux_split_integration|tmux_split_vertical_then_horizontal_refresh_snapshot_parses_nested_layout"
       "termy_terminal_ui|integration|tmux_split_integration|tmux_repeated_split_refresh_cycles_remain_parseable"
@@ -218,8 +190,8 @@ test-tmux-integration:
       exit 1
     fi
     for test_spec in "${tmux_tests[@]}"; do
+      just _validate-exact-tmux-test "$test_spec"
       IFS='|' read -r package target_kind target_name test_name <<<"$test_spec"
-      validate_exact_test "$package" "$target_kind" "$target_name" "$test_name"
       cargo_args=(test --locked -p "$package")
       case "$target_kind" in
         lib) cargo_args+=(--lib) ;;
@@ -228,6 +200,28 @@ test-tmux-integration:
       cargo "${cargo_args[@]}" "$test_name" -- \
         --ignored --exact --nocapture --test-threads=1
     done
+
+_validate-exact-tmux-test test_spec:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test_spec={{ quote(test_spec) }}
+    IFS='|' read -r package target_kind target_name test_name <<<"$test_spec"
+    cargo_args=(test --locked -p "$package")
+    case "$target_kind" in
+      lib) cargo_args+=(--lib) ;;
+      integration) cargo_args+=(--test "$target_name") ;;
+      *)
+        echo "Tmux integration configuration error: invalid target kind '$target_kind'" >&2
+        exit 1
+        ;;
+    esac
+    listed=$(cargo "${cargo_args[@]}" "$test_name" -- --ignored --exact --list)
+    match_count=$(printf '%s\n' "$listed" | grep -Fxc -- "$test_name: test" || true)
+    if (( match_count != 1 )); then
+      echo "Tmux integration configuration error: '$test_name' matched $match_count tests" >&2
+      printf '%s\n' "$listed" >&2
+      exit 1
+    fi
 
 # Bump version in desktop app + cli Cargo.toml. Kind: major | minor | patch
 bump kind:
