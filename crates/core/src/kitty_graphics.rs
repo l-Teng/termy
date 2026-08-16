@@ -540,7 +540,7 @@ impl KittyGraphicsState {
         before != self.placements.len()
     }
 
-    pub(crate) fn clear_viewport_on_screen(
+    pub fn clear_viewport_on_screen(
         &mut self,
         screen: KittyGraphicsScreen,
         history_size: usize,
@@ -612,7 +612,7 @@ impl KittyGraphicsState {
         true
     }
 
-    pub(crate) fn preserve_primary_placements_across_partial_history_growth(
+    pub fn preserve_primary_placements_across_partial_history_growth(
         &mut self,
         lines: usize,
     ) -> bool {

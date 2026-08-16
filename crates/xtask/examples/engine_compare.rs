@@ -256,15 +256,9 @@ mod allocation_counter {
     }
 }
 
-use alacritty_terminal::{
-    grid::Dimensions,
-    index::Line,
-    term::cell::{Cell as AlacrittyCell, Flags},
-    vte::ansi::{Color as AlacrittyColor, CursorShape, NamedColor},
-};
 use termy_core::{
-    Terminal as AlacrittyTerminal, TerminalCursorStyle, TerminalRuntimeConfig,
-    TerminalSize as AlacrittySize,
+    Terminal as AlacrittyTerminal, TerminalCursorStyle, TerminalRenderCell, TerminalRenderColor,
+    TerminalRuntimeConfig, TerminalSize as AlacrittySize, TerminalUnderlineStyle,
 };
 use tmon::{
     Combining as TmonCombining, Config as TmonConfig, CursorStyle as TmonCursorStyle,

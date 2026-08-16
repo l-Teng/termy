@@ -49,7 +49,31 @@ pub(super) struct TerminalRenderDamageSnapshot {
 }
 
 impl TerminalRenderDamageSnapshot {
-    pub(super) fn from_core(damage: TerminalDamageSnapshot) -> Self {
+    pub(super) fn from_core(update: termy_core::TerminalRenderDamageSnapshot) -> Self {
+        Self {
+            damage: update.damage,
+            scrolls: update
+                .scrolls
+                .into_iter()
+                .map(|scroll| TerminalViewportScroll {
+                    top: scroll.top,
+                    bottom: scroll.bottom,
+                    count: scroll.count,
+                    direction: match scroll.direction {
+                        termy_core::TerminalViewportScrollDirection::Up => {
+                            TerminalViewportScrollDirection::Up
+                        }
+                        termy_core::TerminalViewportScrollDirection::Down => {
+                            TerminalViewportScrollDirection::Down
+                        }
+                    },
+                })
+                .collect(),
+            generation: Some(update.generation),
+        }
+    }
+
+    pub(super) fn from_damage(damage: TerminalDamageSnapshot) -> Self {
         Self {
             damage,
             scrolls: Vec::new(),
@@ -61,12 +85,19 @@ impl TerminalRenderDamageSnapshot {
 #[derive(Clone, Copy)]
 pub(super) enum TerminalCellRef<'a> {
     Alacritty(&'a alacritty_terminal::term::cell::Cell),
+    Core(&'a termy_core::TerminalRenderCell),
     Tmon(&'a tmon::Cell, Option<tmon::Combining<'a>>),
 }
 
 impl<'a> From<&'a alacritty_terminal::term::cell::Cell> for TerminalCellRef<'a> {
     fn from(cell: &'a alacritty_terminal::term::cell::Cell) -> Self {
         Self::Alacritty(cell)
+    }
+}
+
+impl<'a> From<&'a termy_core::TerminalRenderCell> for TerminalCellRef<'a> {
+    fn from(cell: &'a termy_core::TerminalRenderCell) -> Self {
+        Self::Core(cell)
     }
 }
 
@@ -80,6 +111,7 @@ impl TerminalCellRef<'_> {
     pub(super) fn character(self) -> char {
         match self {
             Self::Alacritty(cell) => cell.c,
+            Self::Core(cell) => cell.text.chars().next().unwrap_or('\0'),
             Self::Tmon(cell, _) => cell.character,
         }
     }
@@ -89,6 +121,7 @@ impl TerminalCellRef<'_> {
             Self::Alacritty(cell) => cell
                 .flags
                 .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+            Self::Core(cell) => cell.wide_character_spacer || cell.leading_wide_character_spacer,
             Self::Tmon(cell, _) => cell.wide_spacer() || cell.leading_wide_spacer(),
         }
     }
@@ -96,6 +129,7 @@ impl TerminalCellRef<'_> {
     pub(super) fn is_trailing_wide_spacer(self) -> bool {
         match self {
             Self::Alacritty(cell) => cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+            Self::Core(cell) => cell.wide_character_spacer,
             Self::Tmon(cell, _) => cell.wide_spacer(),
         }
     }
@@ -103,6 +137,7 @@ impl TerminalCellRef<'_> {
     pub(super) fn is_hidden(self) -> bool {
         match self {
             Self::Alacritty(cell) => cell.flags.contains(Flags::HIDDEN),
+            Self::Core(cell) => cell.hidden,
             Self::Tmon(cell, _) => cell.attributes.hidden(),
         }
     }
@@ -110,6 +145,13 @@ impl TerminalCellRef<'_> {
     pub(super) fn combining(self) -> Option<SharedString> {
         match self {
             Self::Alacritty(_) => None,
+            Self::Core(cell) => cell
+                .text
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .filter(|&start| start < cell.text.len())
+                .map(|start| SharedString::from(cell.text[start..].to_string())),
             Self::Tmon(_, combining) => combining
                 .map(tmon::Combining::to_owned_string)
                 .map(SharedString::from),
@@ -119,6 +161,13 @@ impl TerminalCellRef<'_> {
     pub(super) fn append_combining_to(self, text: &mut String) {
         match self {
             Self::Alacritty(_) => {}
+            Self::Core(cell) => {
+                if let Some(start) = cell.text.chars().next().map(char::len_utf8)
+                    && start < cell.text.len()
+                {
+                    text.push_str(&cell.text[start..]);
+                }
+            }
             Self::Tmon(_, combining) => {
                 if let Some(combining) = combining {
                     combining.append_to(text);

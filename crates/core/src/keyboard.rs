@@ -1,5 +1,3 @@
-use alacritty_terminal::term::TermMode;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TermyModifiers {
     pub control: bool,
@@ -45,17 +43,6 @@ impl TerminalKeyboardMode {
             report_alternate_keys,
             report_all_keys_as_esc,
             report_associated_text,
-        }
-    }
-
-    pub fn from_term_mode(mode: TermMode) -> Self {
-        Self {
-            application_cursor_keys: mode.contains(TermMode::APP_CURSOR),
-            disambiguate_escape_codes: mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
-            report_event_types: mode.contains(TermMode::REPORT_EVENT_TYPES),
-            report_alternate_keys: mode.contains(TermMode::REPORT_ALTERNATE_KEYS),
-            report_all_keys_as_esc: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
-            report_associated_text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
         }
     }
 

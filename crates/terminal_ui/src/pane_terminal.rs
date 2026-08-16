@@ -13,10 +13,10 @@ use termy_core::{
 
 use termy_core::{
     KittyGraphicsCursorTracker, TerminalCursorState, TerminalDamageSnapshot, TerminalKeyboardMode,
-    TerminalMouseMode, TerminalOptions, TerminalSize, advance_kitty_graphics_cursor,
-    advance_kitty_graphics_text, cursor_position_from_term, cursor_state_from_term,
-    take_term_damage_snapshot, termmode_to_terminal_mouse_mode,
+    TerminalMouseMode, TerminalOptions, TerminalSize,
 };
+
+use crate::alacritty_bridge;
 
 struct PaneTerminalInner {
     term: Arc<FairMutex<Term<VoidListener>>>,
@@ -44,7 +44,7 @@ impl PaneTerminal {
 
     pub fn new(size: TerminalSize, options: TerminalOptions) -> Self {
         let size = Self::normalized_size(size);
-        let config = options.term_config();
+        let config = alacritty_bridge::term_config(options);
 
         let term = Arc::new(FairMutex::new(Term::new(config, &size, VoidListener)));
         Self {
@@ -74,17 +74,16 @@ impl PaneTerminal {
         for item in interceptor.process(bytes) {
             match item {
                 KittyGraphicsItem::Text(text) => {
-                    let track_scrolls = self.kitty_graphics.lock().has_placements();
-                    let effects = advance_kitty_graphics_text(
+                    let mut graphics = self.kitty_graphics.lock();
+                    let track_scrolls = graphics.has_placements();
+                    alacritty_bridge::advance_graphics_text(
                         &mut cursor_tracker,
                         &mut parser,
                         &mut term,
                         &text,
                         track_scrolls,
+                        &mut graphics,
                     );
-                    if !effects.is_empty() {
-                        effects.apply_to(&mut self.kitty_graphics.lock());
-                    }
                 }
                 KittyGraphicsItem::Command(command) => {
                     let cursor = term.grid().cursor.point;
@@ -104,8 +103,8 @@ impl PaneTerminal {
                     if result.cursor_advance_screen == Some(screen)
                         && let Some((cols, rows)) = result.cursor_advance
                     {
-                        let untracked_scroll = advance_kitty_graphics_cursor(
-                            &mut *term,
+                        let untracked_scroll = alacritty_bridge::advance_graphics_cursor(
+                            &mut term,
                             cols,
                             rows,
                             full_screen_scroll_region,
@@ -164,7 +163,7 @@ impl PaneTerminal {
     }
 
     pub fn take_damage_snapshot(&self) -> TerminalDamageSnapshot {
-        self.with_term_mut(|term, _inner| take_term_damage_snapshot(term))
+        self.with_term_mut(|term, _inner| alacritty_bridge::take_damage_snapshot(term))
     }
 
     pub fn scroll_display(&self, delta_lines: i32) -> bool {
@@ -200,18 +199,18 @@ impl PaneTerminal {
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
         let term = self.cloned_term_arc();
         let term = term.lock();
-        cursor_state_from_term(&term)
+        alacritty_bridge::cursor_state(&term)
     }
 
     /// Returns the cursor position regardless of visibility (for IME positioning).
     pub fn cursor_position(&self) -> (usize, usize) {
         let term = self.cloned_term_arc();
         let term = term.lock();
-        cursor_position_from_term(&term)
+        alacritty_bridge::cursor_position(&term)
     }
 
     pub fn set_term_options(&self, options: TerminalOptions) {
-        self.with_term_mut(|term, _inner| term.set_options(options.term_config()));
+        self.with_term_mut(|term, _inner| term.set_options(alacritty_bridge::term_config(options)));
     }
 
     pub fn bracketed_paste_mode(&self) -> bool {
@@ -222,12 +221,12 @@ impl PaneTerminal {
     pub fn mouse_mode(&self) -> TerminalMouseMode {
         let term = self.cloned_term_arc();
         let mode = *term.lock().mode();
-        termmode_to_terminal_mouse_mode(mode)
+        alacritty_bridge::mouse_mode(mode)
     }
 
     pub fn keyboard_mode(&self) -> TerminalKeyboardMode {
         let term = self.cloned_term_arc();
-        TerminalKeyboardMode::from_term_mode(*term.lock().mode())
+        alacritty_bridge::keyboard_mode(*term.lock().mode())
     }
 
     pub fn alternate_screen_mode(&self) -> bool {

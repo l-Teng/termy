@@ -11,9 +11,17 @@ use alacritty_terminal::{
 };
 
 use crate::{
+    backend,
     protocol::TerminalQueryColors,
-    runtime::{TerminalCursorState, TerminalDamageSnapshot, TerminalSize, cursor_state_from_term},
+    runtime::{TerminalCursorState, TerminalDamageSnapshot, TerminalSize},
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TermyColor {
@@ -21,6 +29,98 @@ pub struct TermyColor {
     pub g: u8,
     pub b: u8,
     pub a: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalRenderColor {
+    #[default]
+    DefaultForeground,
+    DefaultBackground,
+    Cursor,
+    Indexed(u8),
+    DimIndexed(u8),
+    BrightForeground,
+    DimForeground,
+    Rgb(TerminalColor),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalUnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalRenderCell {
+    pub text: String,
+    pub foreground: TerminalRenderColor,
+    pub background: TerminalRenderColor,
+    pub underline_color: Option<TerminalRenderColor>,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub underline_style: TerminalUnderlineStyle,
+    pub inverse: bool,
+    pub hidden: bool,
+    pub strikethrough: bool,
+    pub hyperlink: bool,
+    pub wide_character_spacer: bool,
+    pub leading_wide_character_spacer: bool,
+    pub line_wrapped: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalViewportScrollDirection {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalViewportScroll {
+    pub top: usize,
+    pub bottom: usize,
+    pub count: usize,
+    pub direction: TerminalViewportScrollDirection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRenderDamageSnapshot {
+    pub damage: TerminalDamageSnapshot,
+    pub scrolls: Vec<TerminalViewportScroll>,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalViewportMetadata {
+    pub cols: u16,
+    pub rows: u16,
+    pub cursor: Option<TerminalCursorState>,
+    pub display_offset: usize,
+    pub history_size: usize,
+    pub palette_revision: u64,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalPalette {
+    pub indexed: [Option<TerminalColor>; 256],
+    pub foreground: Option<TerminalColor>,
+    pub background: Option<TerminalColor>,
+    pub cursor: Option<TerminalColor>,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRenderRead {
+    pub metadata: TerminalViewportMetadata,
+    pub palette: TerminalPalette,
+    pub cells: Vec<TerminalRenderCell>,
+    pub update: TerminalRenderDamageSnapshot,
 }
 
 /// One viewport cell. Carries no position: full frames are row-major
@@ -80,11 +180,14 @@ fn color_to_rgba(
         AnsiColor::Spec(rgb) => rgba(rgb),
         AnsiColor::Indexed(index) => query_colors
             .resolve_color(live_colors, usize::from(index))
-            .map(rgba)
+            .map(|color| rgba(backend::ansi_rgb(color)))
             .unwrap_or_default(),
         AnsiColor::Named(name) => query_colors
             .resolve_color(live_colors, name as usize)
-            .map_or_else(|| rgba(query_colors.foreground), rgba),
+            .map_or_else(
+                || rgba(backend::ansi_rgb(query_colors.foreground)),
+                |color| rgba(backend::ansi_rgb(color)),
+            ),
     }
 }
 
@@ -176,7 +279,7 @@ pub(crate) fn snapshot_from_term<T: EventListener>(
         cols: size.cols,
         rows: size.rows,
         cells,
-        cursor: cursor_state_from_term(term),
+        cursor: backend::cursor_state(term),
         display_offset: grid.display_offset(),
         history_size: grid.history_size(),
     }
@@ -238,7 +341,7 @@ pub(crate) fn snapshot_update_from_term<T: EventListener>(
         cols: size.cols,
         rows: size.rows,
         cells,
-        cursor: cursor_state_from_term(term),
+        cursor: backend::cursor_state(term),
         display_offset: grid.display_offset(),
         history_size: grid.history_size(),
         damage,
@@ -248,7 +351,7 @@ pub(crate) fn snapshot_update_from_term<T: EventListener>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::TerminalDirtySpan;
+    use crate::TerminalDirtySpan;
     use alacritty_terminal::{event::VoidListener, term::Config as TermConfig, vte::ansi};
 
     #[test]
@@ -270,6 +373,29 @@ mod tests {
         assert_eq!(frame.cells[0].char, 'o');
         assert_eq!(frame.cells[1].char, 'k');
         assert_eq!(frame.cells.len(), 8);
+    }
+
+    #[test]
+    fn legacy_snapshot_keeps_single_codepoint_and_wide_spacer_semantics() {
+        let size = TerminalSize {
+            cols: 4,
+            rows: 2,
+            cell_width: 9.0,
+            cell_height: 18.0,
+        };
+        let mut term = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, "e\u{301}界".as_bytes());
+
+        let frame = snapshot_from_term(&term, size, TerminalQueryColors::default());
+
+        assert_eq!(frame.cells.len(), 8);
+        assert_eq!(frame.cells[0].char, 'e');
+        assert!(frame.cells[0].render_text);
+        assert_eq!(frame.cells[1].char, '界');
+        assert!(frame.cells[1].render_text);
+        assert!(frame.cells[2].wide_character_spacer);
+        assert!(!frame.cells[2].render_text);
     }
 
     #[test]

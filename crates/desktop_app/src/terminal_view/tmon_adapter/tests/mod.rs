@@ -1,10 +1,5 @@
 use super::*;
-use alacritty_terminal::{
-    grid::Dimensions,
-    index::Line,
-    term::cell::{Cell as AlacrittyCell, Flags},
-    vte::ansi::{Color as AlacrittyColor, NamedColor, Rgb as AlacrittyRgb},
-};
+use termy_core::{TerminalColor, TerminalRenderCell, TerminalRenderColor, TerminalUnderlineStyle};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RawColor {
@@ -84,18 +79,17 @@ fn semantic_event(event: TerminalEvent) -> Option<SemanticEvent> {
     })
 }
 
-fn alacritty_color(color: AlacrittyColor) -> RawColor {
+fn core_color(color: TerminalRenderColor) -> RawColor {
     match color {
-        AlacrittyColor::Spec(rgb) => RawColor::Rgb(rgb.r, rgb.g, rgb.b),
-        AlacrittyColor::Indexed(index) => RawColor::Indexed(index),
-        AlacrittyColor::Named(name) if (name as usize) < 16 => RawColor::Indexed(name as u8),
-        AlacrittyColor::Named(
-            NamedColor::Foreground
-            | NamedColor::Background
-            | NamedColor::BrightForeground
-            | NamedColor::DimForeground,
-        ) => RawColor::Default,
-        AlacrittyColor::Named(name) => panic!("unexpected named cell color {name:?}"),
+        TerminalRenderColor::Indexed(index) | TerminalRenderColor::DimIndexed(index) => {
+            RawColor::Indexed(index)
+        }
+        TerminalRenderColor::Rgb(color) => RawColor::Rgb(color.r, color.g, color.b),
+        TerminalRenderColor::DefaultForeground
+        | TerminalRenderColor::DefaultBackground
+        | TerminalRenderColor::Cursor
+        | TerminalRenderColor::BrightForeground
+        | TerminalRenderColor::DimForeground => RawColor::Default,
     }
 }
 
@@ -107,33 +101,30 @@ fn tmon_color(color: tmon::Color) -> RawColor {
     }
 }
 
-fn native_underline_style(flags: Flags) -> tmon::UnderlineStyle {
-    if flags.contains(Flags::DOUBLE_UNDERLINE) {
-        tmon::UnderlineStyle::Double
-    } else if flags.contains(Flags::UNDERCURL) {
-        tmon::UnderlineStyle::Curly
-    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
-        tmon::UnderlineStyle::Dotted
-    } else if flags.contains(Flags::DASHED_UNDERLINE) {
-        tmon::UnderlineStyle::Dashed
-    } else if flags.contains(Flags::UNDERLINE) {
-        tmon::UnderlineStyle::Single
-    } else {
-        tmon::UnderlineStyle::None
+fn native_underline_style(style: TerminalUnderlineStyle) -> tmon::UnderlineStyle {
+    match style {
+        TerminalUnderlineStyle::None => tmon::UnderlineStyle::None,
+        TerminalUnderlineStyle::Single => tmon::UnderlineStyle::Single,
+        TerminalUnderlineStyle::Double => tmon::UnderlineStyle::Double,
+        TerminalUnderlineStyle::Curly => tmon::UnderlineStyle::Curly,
+        TerminalUnderlineStyle::Dotted => tmon::UnderlineStyle::Dotted,
+        TerminalUnderlineStyle::Dashed => tmon::UnderlineStyle::Dashed,
     }
 }
 
 fn native_palette(terminal: &termy_core::Terminal) -> SemanticPalette {
-    terminal.with_term(|term| {
-        let colors = term.colors();
-        let tuple = |color: alacritty_terminal::vte::ansi::Rgb| (color.r, color.g, color.b);
-        SemanticPalette {
-            indexed: (0..=255).map(|index| colors[index].map(tuple)).collect(),
-            foreground: colors[NamedColor::Foreground as usize].map(tuple),
-            background: colors[NamedColor::Background as usize].map(tuple),
-            cursor: colors[NamedColor::Cursor as usize].map(tuple),
-        }
-    })
+    let colors = terminal.palette();
+    let tuple = |color: TerminalColor| (color.r, color.g, color.b);
+    SemanticPalette {
+        indexed: colors
+            .indexed
+            .into_iter()
+            .map(|color| color.map(tuple))
+            .collect(),
+        foreground: colors.foreground.map(tuple),
+        background: colors.background.map(tuple),
+        cursor: colors.cursor.map(tuple),
+    }
 }
 
 fn tmon_palette(terminal: &tmon::Terminal) -> SemanticPalette {
@@ -162,25 +153,25 @@ fn semantic_placement(placement: &KittyGraphicsRenderPlacement) -> SemanticPlace
     }
 }
 
-fn native_cell(cell: &AlacrittyCell) -> SemanticCell {
+fn native_cell(cell: &TerminalRenderCell) -> SemanticCell {
+    let mut chars = cell.text.chars();
+    let character = chars.next().unwrap_or('\0');
     SemanticCell {
-        character: cell.c,
-        combining: cell.zerowidth().into_iter().flatten().collect::<String>(),
-        foreground: alacritty_color(cell.fg),
-        background: alacritty_color(cell.bg),
-        underline_color: cell.underline_color().map(alacritty_color),
-        bold: cell.flags.contains(Flags::BOLD),
-        dim: cell.flags.contains(Flags::DIM),
-        italic: cell.flags.contains(Flags::ITALIC),
-        underline: native_underline_style(cell.flags),
-        inverse: cell.flags.contains(Flags::INVERSE),
-        hidden: cell.flags.contains(Flags::HIDDEN),
-        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
-        hyperlink: cell.hyperlink().is_some(),
-        wide_spacer: cell
-            .flags
-            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-        wrapped: cell.flags.contains(Flags::WRAPLINE),
+        character,
+        combining: chars.collect(),
+        foreground: core_color(cell.foreground),
+        background: core_color(cell.background),
+        underline_color: cell.underline_color.map(core_color),
+        bold: cell.bold,
+        dim: cell.dim,
+        italic: cell.italic,
+        underline: native_underline_style(cell.underline_style),
+        inverse: cell.inverse,
+        hidden: cell.hidden,
+        strikethrough: cell.strikethrough,
+        hyperlink: cell.hyperlink,
+        wide_spacer: cell.wide_character_spacer || cell.leading_wide_character_spacer,
+        wrapped: cell.line_wrapped,
     }
 }
 
@@ -205,12 +196,12 @@ fn tmon_cell(cell: &tmon::Cell, combining: Option<tmon::Combining<'_>>) -> Seman
 }
 
 fn native_cells(terminal: &termy_core::Terminal) -> Vec<SemanticCell> {
-    terminal.with_term(|term| {
-        term.renderable_content()
-            .display_iter
-            .map(|indexed| native_cell(indexed.cell))
-            .collect()
-    })
+    terminal
+        .render_read(true)
+        .cells
+        .iter()
+        .map(native_cell)
+        .collect()
 }
 
 fn tmon_cells(terminal: &tmon::Terminal) -> Vec<SemanticCell> {
@@ -222,14 +213,16 @@ fn tmon_cells(terminal: &tmon::Terminal) -> Vec<SemanticCell> {
 }
 
 fn native_grid_lines(terminal: &termy_core::Terminal) -> Vec<Vec<SemanticCell>> {
-    terminal.with_term(|term| {
-        let grid = term.grid();
-        let first = -(grid.history_size() as i32);
-        let last = grid.screen_lines() as i32;
-        (first..last)
-            .map(|line| (&grid[Line(line)]).into_iter().map(native_cell).collect())
-            .collect()
-    })
+    let (first, last) = terminal.line_bounds();
+    (first..=last)
+        .map(|line| {
+            let mut cells = Vec::new();
+            terminal.visit_line_cells(line, line, |_, _, _, cell| {
+                cells.push(native_cell(cell));
+            });
+            cells
+        })
+        .collect()
 }
 
 fn tmon_grid_lines(terminal: &tmon::Terminal) -> Vec<Vec<SemanticCell>> {
@@ -257,10 +250,10 @@ fn test_size(cols: u16, rows: u16) -> TerminalSize {
 #[test]
 fn config_preserves_initial_query_colors_and_native_child_environment() {
     let colors = TerminalQueryColors {
-        ansi: [AlacrittyRgb { r: 1, g: 2, b: 3 }; 16],
-        foreground: AlacrittyRgb { r: 4, g: 5, b: 6 },
-        background: AlacrittyRgb { r: 7, g: 8, b: 9 },
-        cursor: Some(AlacrittyRgb {
+        ansi: [TerminalColor { r: 1, g: 2, b: 3 }; 16],
+        foreground: TerminalColor { r: 4, g: 5, b: 6 },
+        background: TerminalColor { r: 7, g: 8, b: 9 },
+        cursor: Some(TerminalColor {
             r: 10,
             g: 11,
             b: 12,
@@ -295,7 +288,7 @@ fn config_and_options_match_the_native_scrollback_cap() {
 
     assert_eq!(
         options(terminal_options).scrollback_history,
-        terminal_options.term_config().scrolling_history
+        MAX_TERMINAL_SCROLLBACK_HISTORY
     );
     assert_eq!(
         config(None, None, Some(&runtime_config), None)

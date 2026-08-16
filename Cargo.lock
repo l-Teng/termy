@@ -7939,6 +7939,7 @@ dependencies = [
  "rustix-openpty",
  "termy_core",
  "termy_tmux_control_core",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

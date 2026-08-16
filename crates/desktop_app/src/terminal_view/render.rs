@@ -212,6 +212,11 @@ fn cell_text_attributes(flags: Flags) -> CellTextAttributes {
 fn terminal_cell_text_attributes(cell: TerminalCellRef<'_>) -> CellTextAttributes {
     match cell {
         TerminalCellRef::Alacritty(cell) => cell_text_attributes(cell.flags),
+        TerminalCellRef::Core(cell) => CellTextAttributes {
+            bold: cell.bold,
+            italic: cell.italic,
+            strikethrough: cell.strikethrough,
+        },
         TerminalCellRef::Tmon(cell, _) => CellTextAttributes {
             bold: cell.attributes.bold(),
             italic: cell.attributes.italic(),
@@ -248,6 +253,12 @@ fn terminal_cell_underline(
                 color: None,
             },
         ),
+        TerminalCellRef::Core(cell) => (cell.underline_style
+            != termy_core::TerminalUnderlineStyle::None)
+            .then_some(termy_terminal_ui::TerminalUnderline {
+                style: termy_terminal_ui::TerminalUnderlineStyle::Single,
+                color: None,
+            }),
         TerminalCellRef::Tmon(cell, _) => {
             let style = tmon_terminal_underline_style(cell.attributes.underline_style())?;
             let color = cell.underline_color.map(|color| {
@@ -484,6 +495,7 @@ fn paint_damage_from_scrolls_and_spans(
 #[derive(Clone, Copy)]
 struct PaneCellBuildContext<'a> {
     colors: &'a TerminalColors,
+    core_palette: Option<&'a TerminalPalette>,
     tmon_palette: Option<&'a tmon::Palette>,
     effective_background_opacity: f32,
     background_opacity_cells: bool,
@@ -503,6 +515,44 @@ struct ResolvedCellColors {
 
 fn uses_terminal_default_background(color: AnsiColor) -> bool {
     matches!(color, AnsiColor::Named(NamedColor::Background))
+}
+
+fn resolve_core_color(
+    color: termy_core::TerminalRenderColor,
+    default: gpui::Rgba,
+    colors: &TerminalColors,
+    palette: Option<&TerminalPalette>,
+) -> gpui::Rgba {
+    let from_core = |color: TerminalColor| gpui::Rgba {
+        r: f32::from(color.r) / 255.0,
+        g: f32::from(color.g) / 255.0,
+        b: f32::from(color.b) / 255.0,
+        a: 1.0,
+    };
+    match color {
+        termy_core::TerminalRenderColor::DefaultForeground => palette
+            .and_then(|palette| palette.foreground)
+            .map_or(default, from_core),
+        termy_core::TerminalRenderColor::DefaultBackground => palette
+            .and_then(|palette| palette.background)
+            .map_or(default, from_core),
+        termy_core::TerminalRenderColor::Cursor => palette
+            .and_then(|palette| palette.cursor)
+            .map_or(colors.cursor, from_core),
+        termy_core::TerminalRenderColor::Indexed(index) => palette
+            .and_then(|palette| palette.indexed[usize::from(index)])
+            .map_or_else(|| colors.indexed_color(index), from_core),
+        termy_core::TerminalRenderColor::DimIndexed(index) => palette
+            .and_then(|palette| palette.indexed[usize::from(index)])
+            .map_or_else(|| colors.indexed_color(index), from_core),
+        termy_core::TerminalRenderColor::BrightForeground => palette
+            .and_then(|palette| palette.foreground)
+            .map_or(colors.foreground, from_core),
+        termy_core::TerminalRenderColor::DimForeground => palette
+            .and_then(|palette| palette.foreground)
+            .map_or(colors.foreground, from_core),
+        termy_core::TerminalRenderColor::Rgb(color) => from_core(color),
+    }
 }
 
 fn uses_block_element_background(c: char) -> bool {
@@ -539,6 +589,33 @@ fn resolve_cell_colors<'a>(
                 uses_terminal_default_background(bg_source),
                 cell.flags.contains(Flags::DIM),
                 cell.c,
+            )
+        }
+        TerminalCellRef::Core(cell) => {
+            let mut fg_source = cell.foreground;
+            let mut bg_source = cell.background;
+            if cell.inverse {
+                std::mem::swap(&mut fg_source, &mut bg_source);
+            }
+            (
+                resolve_core_color(
+                    fg_source,
+                    context.colors.foreground,
+                    context.colors,
+                    context.core_palette,
+                ),
+                resolve_core_color(
+                    bg_source,
+                    context.colors.background,
+                    context.colors,
+                    context.core_palette,
+                ),
+                matches!(
+                    bg_source,
+                    termy_core::TerminalRenderColor::DefaultBackground
+                ),
+                cell.dim,
+                cell.text.chars().next().unwrap_or('\0'),
             )
         }
         TerminalCellRef::Tmon(cell, _) => {
@@ -873,7 +950,7 @@ impl TerminalView {
         search_active: bool,
         cell_color_transform: CellColorTransform,
         effective_background_opacity: f32,
-        tmon_palette_revision: Option<u64>,
+        palette_revision: Option<u64>,
     ) -> TerminalPaneRenderCacheKey {
         let (search_results_revision, search_position) = if search_active && is_active_pane {
             let results = self.search_state.results();
@@ -891,7 +968,7 @@ impl TerminalView {
             selection_range: is_active_pane.then(|| self.selection_range()).flatten(),
             search_results_revision,
             search_position,
-            tmon_palette_revision,
+            tmon_palette_revision: palette_revision,
             effective_background_opacity_bits: effective_background_opacity.to_bits(),
             background_opacity_cells: self.background_opacity_cells,
             color_transform: TerminalPaneCellColorTransformKey {
@@ -3241,14 +3318,19 @@ impl Render for TerminalView {
                 // Sample once before consuming damage. If a palette mutation races after
                 // this point, its newer revision invalidates the next frame even when this
                 // frame consumed the mutation's full-damage marker.
+                let core_palette = terminal.core_palette();
                 let tmon_palette = terminal.tmon_palette();
+                let palette_revision = core_palette
+                    .as_ref()
+                    .map(|palette| palette.revision)
+                    .or_else(|| tmon_palette.as_ref().map(tmon::Palette::revision));
                 let pane_cache_key = self.pane_render_cache_key(
                     is_active_pane,
                     alternate_screen_mode,
                     search_active,
                     cell_color_transform,
                     effective_background_opacity,
-                    tmon_palette.as_ref().map(tmon::Palette::revision),
+                    palette_revision,
                 );
                 let (pane_display_offset, _) = terminal.scroll_state();
                 let pane_search_results = if search_active && is_active_pane {
@@ -3258,6 +3340,7 @@ impl Render for TerminalView {
                 };
                 let pane_build_context = PaneCellBuildContext {
                     colors: &colors,
+                    core_palette: core_palette.as_ref(),
                     tmon_palette: tmon_palette.as_ref(),
                     effective_background_opacity,
                     background_opacity_cells: self.background_opacity_cells,
@@ -3331,10 +3414,22 @@ impl Render for TerminalView {
                     cols,
                     rows,
                     &colors,
-                    tmon_palette
+                    core_palette
                         .as_ref()
-                        .and_then(tmon::Palette::cursor)
-                        .map_or(colors.cursor, tmon_rgb_to_rgba),
+                        .and_then(|palette| palette.cursor)
+                        .map(|color| gpui::Rgba {
+                            r: f32::from(color.r) / 255.0,
+                            g: f32::from(color.g) / 255.0,
+                            b: f32::from(color.b) / 255.0,
+                            a: 1.0,
+                        })
+                        .or_else(|| {
+                            tmon_palette
+                                .as_ref()
+                                .and_then(tmon::Palette::cursor)
+                                .map(tmon_rgb_to_rgba)
+                        })
+                        .unwrap_or(colors.cursor),
                     hovered_link_range,
                     font_family.clone(),
                     pane_font_size,
@@ -4230,6 +4325,7 @@ mod tests {
             std::sync::LazyLock::new(TerminalColors::default);
         PaneCellBuildContext {
             colors: &COLORS,
+            core_palette: None,
             tmon_palette: None,
             effective_background_opacity: opacity,
             background_opacity_cells,
@@ -4251,6 +4347,7 @@ mod tests {
             std::sync::LazyLock::new(TerminalColors::default);
         PaneCellBuildContext {
             colors: &COLORS,
+            core_palette: None,
             tmon_palette: None,
             effective_background_opacity: opacity,
             background_opacity_cells: false,

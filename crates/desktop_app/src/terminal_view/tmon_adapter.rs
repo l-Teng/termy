@@ -3,10 +3,11 @@ use super::{
 };
 use termy_core::{
     KittyGraphicsRenderPlacement, MAX_TERMINAL_SCROLLBACK_HISTORY, ProgressState,
-    TabTitleShellIntegration, TerminalClipboardTarget, TerminalCursorState, TerminalCursorStyle,
-    TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalKeyboardMode, TerminalLaunch,
-    TerminalMouseMode, TerminalOptions, TerminalQueryColors, TerminalRuntimeConfig, TerminalSize,
-    resolve_launch_working_directory, resolve_terminal_launch, terminal_environment_overrides,
+    TabTitleShellIntegration, TerminalClipboardTarget, TerminalColor, TerminalCursorState,
+    TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent,
+    TerminalKeyboardMode, TerminalLaunch, TerminalMouseMode, TerminalOptions, TerminalQueryColors,
+    TerminalRuntimeConfig, TerminalSize, resolve_launch_working_directory, resolve_terminal_launch,
+    terminal_environment_overrides,
 };
 
 pub(super) fn size(size: TerminalSize) -> tmon::Size {
@@ -59,7 +60,7 @@ pub(super) fn options(options: TerminalOptions) -> tmon::TerminalOptions {
 }
 
 pub(super) fn query_colors(colors: TerminalQueryColors) -> tmon::QueryColors {
-    let rgb = |color: alacritty_terminal::vte::ansi::Rgb| tmon::Rgb {
+    let rgb = |color: TerminalColor| tmon::Rgb {
         r: color.r,
         g: color.g,
         b: color.b,

@@ -1282,7 +1282,7 @@ mod tests {
     fn non_empty_grid_lines(terminal: &Terminal) -> Vec<(i32, String)> {
         let mut lines = Vec::new();
         let cols = usize::from(terminal.size().cols);
-        let _ = terminal.with_grid(|grid| {
+        let _ = terminal.with_tmux_grid(|grid| {
             let Some((min_line, max_line)) = terminal_line_bounds(grid) else {
                 return;
             };
@@ -1616,7 +1616,7 @@ mod tests {
         terminal.feed_output("你好".as_bytes());
 
         let line = terminal
-            .with_grid(|grid| grid_line_text(grid, 0, 10))
+            .with_tmux_grid(|grid| grid_line_text(grid, 0, 10))
             .flatten()
             .expect("line 0 should exist");
 
@@ -1648,7 +1648,7 @@ mod tests {
         terminal.feed_output("src/文".as_bytes());
 
         let line0 = terminal
-            .with_grid(|grid| grid_line_text(grid, 0, 5))
+            .with_tmux_grid(|grid| grid_line_text(grid, 0, 5))
             .flatten()
             .expect("line 0");
         assert_eq!(
@@ -1658,7 +1658,7 @@ mod tests {
         );
 
         let line1 = terminal
-            .with_grid(|grid| grid_line_text(grid, 1, 5))
+            .with_tmux_grid(|grid| grid_line_text(grid, 1, 5))
             .flatten()
             .expect("line 1");
         assert_eq!(line1[0], Some('文'));

@@ -44,7 +44,7 @@ pub(crate) fn reply_bytes_for_event(
         AlacEvent::PtyWrite(text) => Some(text.as_bytes().to_vec()),
         AlacEvent::ColorRequest(index, formatter) => query_colors
             .resolve_color(live_colors, *index)
-            .map(|color| formatter(color).into_bytes()),
+            .map(|color| formatter(crate::backend::ansi_rgb(color)).into_bytes()),
         AlacEvent::TextAreaSizeRequest(formatter) => {
             Some(formatter(WindowSize::from(size)).into_bytes())
         }

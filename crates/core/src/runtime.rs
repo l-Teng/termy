@@ -1,4 +1,8 @@
-use crate::frame::{TermyFrame, TermyFrameUpdate, snapshot_from_term, snapshot_update_from_term};
+use crate::backend;
+use crate::frame::{
+    TerminalRenderDamageSnapshot, TerminalRenderRead, TerminalViewportMetadata, TermyFrame,
+    TermyFrameUpdate, snapshot_from_term, snapshot_update_from_term,
+};
 use crate::keyboard::TerminalKeyboardMode;
 use crate::kitty_graphics::{
     KittyGraphicsInterceptor, KittyGraphicsItem, KittyGraphicsRenderPlacement, KittyGraphicsScreen,
@@ -17,16 +21,13 @@ use crate::search::{
 use crate::shell_integration::ProgressState;
 use alacritty_terminal::{
     event::{Event as AlacEvent, EventListener, OnResize, WindowSize},
-    grid::{Dimensions, Scroll},
+    grid::Dimensions,
     index::{Column, Line},
     sync::FairMutex,
-    term::{Config as TermConfig, LineDamageBounds, Term, TermDamage, TermMode, cell::Flags},
+    term::{Term, TermMode, cell::Flags},
     thread,
     tty::{self, EventedPty, EventedReadWrite, Options as PtyOptions, Shell},
-    vte::ansi::{
-        self, CursorShape, CursorStyle as AlacrittyCursorStyle, Handler, NamedPrivateMode,
-        PrivateMode,
-    },
+    vte::ansi::{self, Handler, NamedPrivateMode, PrivateMode},
 };
 use flume::{Receiver, Sender, unbounded};
 use polling::{Event as PollingEvent, Events, PollMode, Poller};
@@ -186,24 +187,6 @@ impl TerminalRuntimeConfig {
 }
 
 impl TerminalOptions {
-    pub fn term_config(&self) -> TermConfig {
-        let shape = match self.default_cursor_style {
-            TerminalCursorStyle::Line => CursorShape::Beam,
-            TerminalCursorStyle::Block => CursorShape::Block,
-        };
-        TermConfig {
-            // Every terminal build and live option change flows through here, so
-            // clamping once bounds the config, runtime-setter, and FFI paths.
-            scrolling_history: self.scrollback_history.min(MAX_TERMINAL_SCROLLBACK_HISTORY),
-            default_cursor_style: AlacrittyCursorStyle {
-                shape,
-                blinking: false,
-            },
-            kitty_keyboard: true,
-            ..TermConfig::default()
-        }
-    }
-
     pub fn with_scrollback_history(self, scrollback_history: usize) -> Self {
         Self {
             scrollback_history,
@@ -219,33 +202,6 @@ impl TerminalRuntimeConfig {
             default_cursor_style: self.default_cursor_style,
         }
     }
-}
-
-fn terminal_cursor_style_from_shape(shape: CursorShape) -> Option<TerminalCursorStyle> {
-    match shape {
-        CursorShape::Hidden => None,
-        // Collapse shapes we do not render distinctly yet onto the existing
-        // two-style renderer rather than reintroducing a fake app-level cursor.
-        CursorShape::Block | CursorShape::HollowBlock => Some(TerminalCursorStyle::Block),
-        CursorShape::Underline | CursorShape::Beam => Some(TerminalCursorStyle::Line),
-    }
-}
-
-pub fn cursor_state_from_term<T: EventListener>(term: &Term<T>) -> Option<TerminalCursorState> {
-    let cursor = term.renderable_content().cursor;
-    let style = terminal_cursor_style_from_shape(cursor.shape)?;
-    let row = usize::try_from(cursor.point.line.0).ok()?;
-    Some(TerminalCursorState {
-        col: cursor.point.column.0,
-        row,
-        style,
-    })
-}
-
-pub fn cursor_position_from_term<T: EventListener>(term: &Term<T>) -> (usize, usize) {
-    let cursor = term.renderable_content().cursor;
-    let row = usize::try_from(cursor.point.line.0).ok().unwrap_or(0);
-    (cursor.point.column.0, row)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -304,6 +260,10 @@ impl KittyGraphicsCursorTracker {
 
     pub fn reset_scroll_region(&mut self) {
         self.region.reset();
+    }
+
+    pub fn set_scroll_region(&mut self, top: usize, bottom: Option<usize>, screen_lines: usize) {
+        self.region.set(top, bottom, screen_lines);
     }
 }
 
@@ -677,21 +637,6 @@ impl<T: EventListener> Handler for KittyGraphicsTrackingHandler<'_, T> {
     }
 }
 
-/// Parse ordinary terminal text while observing full-screen row rotation that
-/// is not represented by scrollback growth.
-///
-/// A forwarding handler observes the live terminal at the exact callback that
-/// mutates it, including callbacks replayed by synchronized updates.
-pub fn advance_kitty_graphics_text<T: EventListener>(
-    tracker: &mut KittyGraphicsCursorTracker,
-    parser: &mut ansi::Processor,
-    term: &mut Term<T>,
-    bytes: &[u8],
-    track_scrolls: bool,
-) -> KittyGraphicsTextEffects {
-    advance_terminal_text(tracker, parser, term, bytes, track_scrolls, None)
-}
-
 fn advance_terminal_text<T: EventListener>(
     tracker: &mut KittyGraphicsCursorTracker,
     parser: &mut ansi::Processor,
@@ -723,50 +668,6 @@ fn advance_terminal_text<T: EventListener>(
 /// Returns the number of scrolled lines that were not represented by history
 /// growth, so graphics anchors can follow alternate-screen, zero-history, and
 /// full-history row rotation.
-pub fn advance_kitty_graphics_cursor<T: EventListener>(
-    term: &mut Term<T>,
-    cols: u32,
-    rows: u32,
-    full_screen_scroll_region: bool,
-) -> usize {
-    let cols = usize::try_from(cols)
-        .unwrap_or(usize::MAX)
-        .min(term.grid().columns());
-    Handler::move_forward(term, cols);
-
-    // Cursor positioning outside the screen is implementation-defined by the
-    // protocol. Bound the work so a hostile `r=u32::MAX` cannot force billions
-    // of linefeed operations.
-    let rows = usize::try_from(rows)
-        .unwrap_or(usize::MAX)
-        .min(term.grid().screen_lines());
-    if !full_screen_scroll_region {
-        Handler::move_down(term, rows);
-        return 0;
-    }
-
-    let history_before = term.grid().history_size();
-    let mut scrolled_lines = 0usize;
-    for _ in 0..rows {
-        let line_before = term.grid().cursor.point.line;
-        Handler::linefeed(term);
-        scrolled_lines += usize::from(term.grid().cursor.point.line == line_before);
-    }
-    let history_growth = term.grid().history_size().saturating_sub(history_before);
-    scrolled_lines.saturating_sub(history_growth)
-}
-
-pub fn termmode_to_terminal_mouse_mode(mode: TermMode) -> TerminalMouseMode {
-    TerminalMouseMode {
-        enabled: mode.intersects(TermMode::MOUSE_MODE) && !mode.contains(TermMode::VI),
-        report_click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
-        report_drag: mode.contains(TermMode::MOUSE_DRAG),
-        report_motion: mode.contains(TermMode::MOUSE_MOTION),
-        sgr_encoding: mode.contains(TermMode::SGR_MOUSE),
-        utf8_encoding: mode.contains(TermMode::UTF8_MOUSE),
-    }
-}
-
 /// On Windows, `CreateProcessW` splits `lpCommandLine` on spaces to find the
 /// executable name when `lpApplicationName` is `NULL`.  A shell path that contains
 /// spaces (e.g. `C:\Program Files\PowerShell\7\pwsh.exe`) must therefore be
@@ -1323,32 +1224,6 @@ pub enum TerminalDamageSnapshot {
     Partial(Vec<TerminalDirtySpan>),
 }
 
-fn normalized_dirty_span(
-    damage: LineDamageBounds,
-    rows: usize,
-    cols: usize,
-) -> Option<TerminalDirtySpan> {
-    // Alacritty line damage can straddle wide characters. Expand by one column
-    // on both sides so partial updates never split a multi-cell glyph and
-    // leave stale spacer artifacts.
-    if rows == 0 || cols == 0 {
-        return None;
-    }
-    if damage.line >= rows {
-        return None;
-    }
-    let left_col = damage.left.saturating_sub(1).min(cols.saturating_sub(1));
-    let right_col = damage.right.saturating_add(1).min(cols.saturating_sub(1));
-    if left_col > right_col {
-        return None;
-    }
-    Some(TerminalDirtySpan {
-        row: damage.line,
-        left_col,
-        right_col,
-    })
-}
-
 fn search_term_buffer<T: EventListener>(
     term: &Term<T>,
     query: &str,
@@ -1395,36 +1270,6 @@ fn searchable_grid_line<T: EventListener>(term: &Term<T>, line: Line, cols: usiz
     let trimmed_len = text.trim_end().len();
     text.truncate(trimmed_len);
     text
-}
-
-pub fn take_term_damage_snapshot<T: EventListener>(term: &mut Term<T>) -> TerminalDamageSnapshot {
-    let rows = term.grid().screen_lines();
-    let cols = term.grid().columns();
-    let snapshot = match term.damage() {
-        TermDamage::Full => TerminalDamageSnapshot::Full,
-        TermDamage::Partial(damage_iter) => {
-            // Alacritty reports partial damage in viewport coordinates with
-            // off-viewport lines already filtered out (`TermDamageIterator`
-            // shifts live-grid rows by `display_offset` and slices away the
-            // rest), and it marks the whole terminal damaged for any
-            // content-shifting scroll. The spans are therefore valid as-is
-            // even while scrolled into history — collapsing them to a full
-            // rebuild would force a whole-grid repaint for every cursor or
-            // cell update during scrollback viewing.
-            // No-damage partial snapshots are common during UI-only redraws.
-            // Start empty so they remain allocation-free; damaged rows grow
-            // this vector only when there is actual cell work to describe.
-            let mut spans = Vec::new();
-            for damage in damage_iter {
-                if let Some(span) = normalized_dirty_span(damage, rows, cols) {
-                    spans.push(span);
-                }
-            }
-            TerminalDamageSnapshot::Partial(spans)
-        }
-    };
-    term.reset_damage();
-    snapshot
 }
 
 /// Event listener that forwards alacritty events to our channel
@@ -1728,12 +1573,19 @@ impl NativeEventLoopState {
     }
 }
 
+struct NativeRenderState {
+    terminal: Arc<FairMutex<Term<JsonEventListener>>>,
+    generation: Arc<AtomicU64>,
+    palette_revision: Arc<AtomicU64>,
+    palette_snapshot: Arc<FairMutex<crate::TerminalPalette>>,
+}
+
 struct NativeEventLoop {
     poll: Arc<Poller>,
     pty: tty::Pty,
     rx: PeekableReceiver<EventLoopMsg>,
     tx: StdSender<EventLoopMsg>,
-    terminal: Arc<FairMutex<Term<JsonEventListener>>>,
+    render_state: NativeRenderState,
     kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
     kitty_graphics_revision: Arc<AtomicU64>,
     resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
@@ -1744,7 +1596,7 @@ struct NativeEventLoop {
 
 impl NativeEventLoop {
     fn new(
-        terminal: Arc<FairMutex<Term<JsonEventListener>>>,
+        render_state: NativeRenderState,
         kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
         kitty_graphics_revision: Arc<AtomicU64>,
         resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
@@ -1759,7 +1611,7 @@ impl NativeEventLoop {
             pty,
             rx: PeekableReceiver::new(rx),
             tx,
-            terminal,
+            render_state,
             kitty_graphics,
             kitty_graphics_revision,
             resize_anchor_state,
@@ -1805,7 +1657,7 @@ impl NativeEventLoop {
         let mut unprocessed = 0usize;
         let mut graphics_changed = false;
 
-        let _terminal_lease = Some(self.terminal.lease());
+        let _terminal_lease = Some(self.render_state.terminal.lease());
         let mut terminal = None;
 
         loop {
@@ -1831,11 +1683,11 @@ impl NativeEventLoop {
 
             let terminal = match &mut terminal {
                 Some(terminal) => terminal,
-                None => terminal.insert(match self.terminal.try_lock_unfair() {
+                None => terminal.insert(match self.render_state.terminal.try_lock_unfair() {
                     None if !read_progressed
                         || unprocessed >= NATIVE_EVENT_LOOP_READ_BUFFER_SIZE =>
                     {
-                        self.terminal.lock_unfair()
+                        self.render_state.terminal.lock_unfair()
                     }
                     None => continue,
                     Some(terminal) => terminal,
@@ -1889,7 +1741,7 @@ impl NativeEventLoop {
                         if result.cursor_advance_screen == Some(screen)
                             && let Some((cols, rows)) = result.cursor_advance
                         {
-                            let untracked_scroll = advance_kitty_graphics_cursor(
+                            let untracked_scroll = backend::move_graphics_cursor(
                                 &mut **terminal,
                                 cols,
                                 rows,
@@ -1914,6 +1766,20 @@ impl NativeEventLoop {
 
         if graphics_changed {
             self.kitty_graphics_revision.fetch_add(1, Ordering::Relaxed);
+        }
+        if parsed > 0 {
+            self.render_state.generation.fetch_add(1, Ordering::Relaxed);
+            if let Some(terminal) = terminal.as_deref() {
+                let mut palette_snapshot = self.render_state.palette_snapshot.lock();
+                if backend::palette_changed(terminal, &palette_snapshot) {
+                    let revision = self
+                        .render_state
+                        .palette_revision
+                        .fetch_add(1, Ordering::Relaxed)
+                        .wrapping_add(1);
+                    *palette_snapshot = backend::palette(terminal, revision);
+                }
+            }
         }
         if graphics_changed || (state.parser.sync_bytes_count() < parsed && parsed > 0) {
             self.event_proxy.send_event(AlacEvent::Wakeup);
@@ -1986,7 +1852,9 @@ impl NativeEventLoop {
                 }
 
                 if events.is_empty() && self.rx.peek().is_none() {
-                    state.parser.stop_sync(&mut *self.terminal.lock());
+                    state
+                        .parser
+                        .stop_sync(&mut *self.render_state.terminal.lock());
                     self.event_proxy.send_event(AlacEvent::Wakeup);
                     continue;
                 }
@@ -2002,7 +1870,7 @@ impl NativeEventLoop {
                                 if self.drain_on_exit {
                                     let _ = self.pty_read(&mut state, &mut buf);
                                 }
-                                self.terminal.lock().exit();
+                                self.render_state.terminal.lock().exit();
                                 self.event_proxy.send_event(AlacEvent::Wakeup);
                                 break 'event_loop;
                             }
@@ -2132,6 +2000,9 @@ pub struct Terminal {
     kitty_graphics_cursor_tracker: FairMutex<KittyGraphicsCursorTracker>,
     kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
     kitty_graphics_revision: Arc<AtomicU64>,
+    render_generation: Arc<AtomicU64>,
+    palette_revision: Arc<AtomicU64>,
+    palette_snapshot: Arc<FairMutex<crate::TerminalPalette>>,
     resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
     graphics_size: Arc<FairMutex<TerminalSize>>,
     /// Channel to send input to the PTY. `None` for display-only terminals
@@ -2228,13 +2099,17 @@ impl Terminal {
             escape_args: true,
         };
 
-        let term_config = runtime_config.term_options().term_config();
+        let term_config = backend::term_config(runtime_config.term_options());
 
         let listener = JsonEventListener::new_with_wakeup_notifier(events_tx, wakeup_notifier);
         let term = Term::new(term_config, &size, listener.clone());
+        let palette_snapshot = backend::palette(&term, 0);
         let term = Arc::new(FairMutex::new(term));
         let kitty_graphics = Arc::new(FairMutex::new(KittyGraphicsState::default()));
         let kitty_graphics_revision = Arc::new(AtomicU64::new(0));
+        let render_generation = Arc::new(AtomicU64::new(0));
+        let palette_revision = Arc::new(AtomicU64::new(0));
+        let palette_snapshot = Arc::new(FairMutex::new(palette_snapshot));
         let resize_anchor_state = Arc::new(crate::resize_anchor::ResizeAnchorState::default());
         let graphics_size = Arc::new(FairMutex::new(size));
 
@@ -2246,7 +2121,12 @@ impl Terminal {
         let child_pid = pty_child_pid(&pty);
 
         let event_loop = NativeEventLoop::new(
-            term.clone(),
+            NativeRenderState {
+                terminal: term.clone(),
+                generation: render_generation.clone(),
+                palette_revision: palette_revision.clone(),
+                palette_snapshot: palette_snapshot.clone(),
+            },
             kitty_graphics.clone(),
             kitty_graphics_revision.clone(),
             resize_anchor_state.clone(),
@@ -2269,6 +2149,9 @@ impl Terminal {
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics,
             kitty_graphics_revision,
+            render_generation,
+            palette_revision,
+            palette_snapshot,
             resize_anchor_state,
             graphics_size,
             pty_tx: Some(pty_tx),
@@ -2288,12 +2171,16 @@ impl Terminal {
         let size = size.clamped();
         let (events_tx, events_rx) = unbounded();
         let runtime_config = runtime_config.cloned().unwrap_or_default();
-        let term_config = runtime_config.term_options().term_config();
+        let term_config = backend::term_config(runtime_config.term_options());
         let listener = JsonEventListener::new(events_tx, None);
         let term = Term::new(term_config, &size, listener.clone());
+        let palette_snapshot = backend::palette(&term, 0);
         let term = Arc::new(FairMutex::new(term));
         let kitty_graphics = Arc::new(FairMutex::new(KittyGraphicsState::default()));
         let kitty_graphics_revision = Arc::new(AtomicU64::new(0));
+        let render_generation = Arc::new(AtomicU64::new(0));
+        let palette_revision = Arc::new(AtomicU64::new(0));
+        let palette_snapshot = Arc::new(FairMutex::new(palette_snapshot));
         let resize_anchor_state = Arc::new(crate::resize_anchor::ResizeAnchorState::default());
 
         Self {
@@ -2304,6 +2191,9 @@ impl Terminal {
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics,
             kitty_graphics_revision,
+            render_generation,
+            palette_revision,
+            palette_snapshot,
             resize_anchor_state,
             graphics_size: Arc::new(FairMutex::new(size)),
             pty_tx: None,
@@ -2401,7 +2291,7 @@ impl Terminal {
                     if result.cursor_advance_screen == Some(screen)
                         && let Some((cols, rows)) = result.cursor_advance
                     {
-                        let untracked_scroll = advance_kitty_graphics_cursor(
+                        let untracked_scroll = backend::move_graphics_cursor(
                             &mut *term,
                             cols,
                             rows,
@@ -2420,6 +2310,8 @@ impl Terminal {
         if graphics_changed {
             self.kitty_graphics_revision.fetch_add(1, Ordering::Relaxed);
         }
+        self.bump_render_generation();
+        self.refresh_palette_revision(&term);
     }
 
     /// Write a string to the PTY
@@ -2451,6 +2343,7 @@ impl Terminal {
         if self.resize_anchor_state.allows_restore() {
             crate::resize_anchor::restore_bottom_anchor(&mut term, new_size);
         }
+        self.bump_render_generation();
     }
 
     /// Re-send the current size to the PTY without touching the term grid.
@@ -2533,6 +2426,27 @@ impl Terminal {
         self.query_colors = query_colors;
     }
 
+    fn bump_render_generation(&self) {
+        self.render_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn refresh_palette_revision<T: EventListener>(&self, term: &Term<T>) {
+        let mut snapshot = self.palette_snapshot.lock();
+        if backend::palette_changed(term, &snapshot) {
+            let revision = self
+                .palette_revision
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            *snapshot = backend::palette(term, revision);
+        }
+    }
+
+    pub fn palette(&self) -> crate::TerminalPalette {
+        let term = self.term.lock();
+        self.refresh_palette_revision(&term);
+        self.palette_snapshot.lock().clone()
+    }
+
     /// Capture a renderer-neutral snapshot of the visible terminal frame.
     pub fn snapshot(&self) -> TermyFrame {
         self.with_term(|term| snapshot_from_term(term, self.size, self.query_colors))
@@ -2545,10 +2459,113 @@ impl Terminal {
                 term.reset_damage();
                 TerminalDamageSnapshot::Full
             } else {
-                take_term_damage_snapshot(term)
+                backend::take_damage_snapshot(term)
             };
             snapshot_update_from_term(term, self.size, self.query_colors, damage)
         })
+    }
+
+    /// Consume renderer-neutral damage with a generation for coherent partial reads.
+    pub fn take_render_damage_snapshot(&self) -> TerminalRenderDamageSnapshot {
+        let mut term = self.term.lock();
+        let damage = backend::take_damage_snapshot(&mut term);
+        let generation = self.render_generation.load(Ordering::Relaxed);
+        TerminalRenderDamageSnapshot {
+            damage,
+            scrolls: Vec::new(),
+            generation,
+        }
+    }
+
+    /// Capture a coherent rich viewport read without exposing engine types.
+    pub fn render_read(&self, force_full: bool) -> TerminalRenderRead {
+        let mut term = self.term.lock();
+        self.refresh_palette_revision(&term);
+        let damage = if force_full {
+            term.reset_damage();
+            TerminalDamageSnapshot::Full
+        } else {
+            backend::take_damage_snapshot(&mut term)
+        };
+        let generation = self.render_generation.load(Ordering::Relaxed);
+        let cells = backend::visible_render_cells(&term);
+        let (display_offset, history_size) = backend::scroll_state(&term);
+        TerminalRenderRead {
+            metadata: TerminalViewportMetadata {
+                cols: self.size.cols,
+                rows: self.size.rows,
+                cursor: backend::cursor_state(&term),
+                display_offset,
+                history_size,
+                palette_revision: self.palette_revision.load(Ordering::Relaxed),
+                generation,
+            },
+            palette: self.palette_snapshot.lock().clone(),
+            cells,
+            update: TerminalRenderDamageSnapshot {
+                damage,
+                scrolls: Vec::new(),
+                generation,
+            },
+        }
+    }
+
+    /// Visit visible rich cells and return coherent viewport metadata.
+    pub fn visit_viewport_cells(
+        &self,
+        mut visitor: impl FnMut(usize, i32, usize, &crate::TerminalRenderCell),
+    ) -> TerminalViewportMetadata {
+        let term = self.term.lock();
+        self.refresh_palette_revision(&term);
+        let generation = self.render_generation.load(Ordering::Relaxed);
+        for (display_offset, line, col, cell) in backend::viewport_cells(&term) {
+            visitor(display_offset, line, col, &cell);
+        }
+        let (display_offset, history_size) = backend::scroll_state(&term);
+        TerminalViewportMetadata {
+            cols: self.size.cols,
+            rows: self.size.rows,
+            cursor: backend::cursor_state(&term),
+            display_offset,
+            history_size,
+            palette_revision: self.palette_revision.load(Ordering::Relaxed),
+            generation,
+        }
+    }
+
+    pub fn visit_viewport_ranges_at_generation(
+        &self,
+        generation: u64,
+        spans: &[TerminalDirtySpan],
+        mut visitor: impl FnMut(usize, usize, i32, usize, &crate::TerminalRenderCell),
+    ) -> bool {
+        let term = self.term.lock();
+        if self.render_generation.load(Ordering::Relaxed) != generation {
+            return false;
+        }
+        for (row, display_offset, line, col, cell) in backend::viewport_ranges(&term, spans) {
+            visitor(row, display_offset, line, col, &cell);
+        }
+        true
+    }
+
+    pub fn line_bounds(&self) -> (i32, i32) {
+        let term = self.term.lock();
+        backend::line_bounds(&term)
+    }
+
+    pub fn visit_line_cells(
+        &self,
+        requested_first: i32,
+        requested_last: i32,
+        mut visitor: impl FnMut((i32, i32, usize), i32, usize, &crate::TerminalRenderCell),
+    ) -> (i32, i32, usize) {
+        let term = self.term.lock();
+        let (range, cells) = backend::line_cells(&term, requested_first, requested_last);
+        for (line, col, cell) in cells {
+            visitor(range, line, col, &cell);
+        }
+        range
     }
 
     /// Search the full terminal buffer and return match ranges in scrollback-relative rows.
@@ -2583,17 +2600,16 @@ impl Terminal {
     /// The OSC 8 hyperlink under the given viewport cell, if any, expanded to
     /// the contiguous same-link run on that row.
     pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<crate::links::DetectedLink> {
-        self.with_term(|term| crate::links::hyperlink_at_viewport_cell(term, row, col))
+        self.with_term(|term| backend::hyperlink_at(term, row, col))
     }
 
     /// The OSC 8 or detected text link under the given viewport cell,
     /// including links spanning soft-wrapped rows.
     pub fn link_at(&self, row: usize, col: usize) -> Option<crate::links::DetectedViewportLink> {
-        self.with_term(|term| crate::links::link_at_viewport_cell(term, row, col))
+        self.with_term(|term| backend::link_at(term, row, col))
     }
 
-    /// Access the terminal for reading cell content
-    pub fn with_term<R>(&self, f: impl FnOnce(&Term<JsonEventListener>) -> R) -> R {
+    fn with_term<R>(&self, f: impl FnOnce(&Term<JsonEventListener>) -> R) -> R {
         let term = self.term.lock();
         f(&term)
     }
@@ -2606,62 +2622,58 @@ impl Terminal {
 
     /// Consume and normalize terminal damage spans for incremental rendering.
     pub fn take_damage_snapshot(&self) -> TerminalDamageSnapshot {
-        self.with_term_mut(take_term_damage_snapshot)
+        self.with_term_mut(backend::take_damage_snapshot)
     }
 
     /// Scroll the displayed viewport through scrollback history.
     /// Positive deltas move up into history, negative deltas move down toward live output.
     pub fn scroll_display(&self, delta_lines: i32) -> bool {
-        if delta_lines == 0 {
-            return false;
-        }
-
         let mut term = self.term.lock();
-        let old_offset = term.grid().display_offset();
-        term.scroll_display(Scroll::Delta(delta_lines));
-        term.grid().display_offset() != old_offset
+        let changed = backend::scroll_display(&mut term, delta_lines);
+        if changed {
+            self.bump_render_generation();
+        }
+        changed
     }
 
     /// Scroll the displayed viewport to the bottom (live output) atomically.
     /// Returns true if the scroll position changed.
     pub fn scroll_to_bottom(&self) -> bool {
         let mut term = self.term.lock();
-        let old_offset = term.grid().display_offset();
-        if old_offset == 0 {
-            return false;
+        let changed = backend::scroll_to_bottom(&mut term);
+        if changed {
+            self.bump_render_generation();
         }
-        term.scroll_display(Scroll::Bottom);
-        true
+        changed
     }
 
     /// Purge scrollback history and snap the viewport back to live output.
     /// Returns true if there was any history or scroll offset to clear.
     pub fn clear_scrollback(&self) -> bool {
         let mut term = self.term.lock();
-        if term.grid().history_size() == 0 && term.grid().display_offset() == 0 {
-            return false;
+        let changed = backend::clear_scrollback(&mut term);
+        if changed {
+            self.bump_render_generation();
         }
-        term.grid_mut().clear_history();
-        true
+        changed
     }
 
     /// Return `(display_offset, history_size)` for viewport scrollbar rendering.
     pub fn scroll_state(&self) -> (usize, usize) {
         let term = self.term.lock();
-        let grid = term.grid();
-        (grid.display_offset(), grid.history_size())
+        backend::scroll_state(&term)
     }
 
     /// Get the cursor state the terminal currently intends to render.
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
         let term = self.term.lock();
-        cursor_state_from_term(&term)
+        backend::cursor_state(&term)
     }
 
     /// Returns the cursor position regardless of visibility (for IME positioning).
     pub fn cursor_position(&self) -> (usize, usize) {
         let term = self.term.lock();
-        cursor_position_from_term(&term)
+        backend::cursor_position(&term)
     }
 
     /// Check if there are pending events
@@ -2672,7 +2684,8 @@ impl Terminal {
 
     /// Sync live term options derived from the current runtime configuration.
     pub fn set_term_options(&self, options: TerminalOptions) {
-        self.with_term_mut(|term| apply_term_config(term, options.term_config()));
+        self.with_term_mut(|term| backend::apply_term_options(term, options));
+        self.bump_render_generation();
     }
 
     /// Change only the live scrollback cap, preserving cursor defaults.
@@ -2686,36 +2699,24 @@ impl Terminal {
     /// Check if bracketed paste mode is enabled
     pub fn bracketed_paste_mode(&self) -> bool {
         let term = self.term.lock();
-        term.mode().contains(TermMode::BRACKETED_PASTE)
+        backend::bracketed_paste_mode(&term)
     }
 
     /// Return current xterm mouse-reporting mode bits.
     pub fn mouse_mode(&self) -> TerminalMouseMode {
         let term = self.term.lock();
-        termmode_to_terminal_mouse_mode(*term.mode())
+        backend::mouse_mode(*term.mode())
     }
 
     pub fn keyboard_mode(&self) -> TerminalKeyboardMode {
         let term = self.term.lock();
-        TerminalKeyboardMode::from_term_mode(*term.mode())
+        backend::keyboard_mode(*term.mode())
     }
 
     /// Check if the terminal is currently in alternate screen mode
     pub fn alternate_screen_mode(&self) -> bool {
         let term = self.term.lock();
-        term.mode().contains(TermMode::ALT_SCREEN)
-    }
-}
-
-/// Apply a new term config, releasing the memory of any scrollback rows the
-/// new cap evicts. alacritty's history shrink keeps up to 1000 spare rows
-/// allocated (`Storage::MAX_CACHE_SIZE`), so lowering the cap — e.g. the
-/// inactive-tab scrollback limit — would otherwise free nothing.
-fn apply_term_config<L: EventListener>(term: &mut Term<L>, config: TermConfig) {
-    let shrinks_history = config.scrolling_history < term.grid().history_size();
-    term.set_options(config);
-    if shrinks_history {
-        term.grid_mut().truncate();
+        backend::alternate_screen_mode(&term)
     }
 }
 
@@ -2843,19 +2844,17 @@ mod tests {
         TERMY_TERM_PROGRAM, Terminal, TerminalCursorState, TerminalCursorStyle,
         TerminalDamageSnapshot, TerminalEvent, TerminalLaunch, TerminalOptions,
         TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
-        WorkingDirFallback, advance_kitty_graphics_cursor, advance_kitty_graphics_text,
-        advance_terminal_text, apply_term_config, cursor_position_from_term,
-        cursor_state_from_term, drain_runtime_events, normalize_working_directory_candidate,
-        resolve_launch_working_directory, resolve_shell_path, resolve_terminal_launch,
-        search_term_buffer, should_drop_event, take_term_damage_snapshot,
-        terminal_environment_overrides, terminal_event_from_osc, termmode_to_terminal_mouse_mode,
-        user_home_dir,
+        WorkingDirFallback, advance_terminal_text, drain_runtime_events,
+        normalize_working_directory_candidate, resolve_launch_working_directory,
+        resolve_shell_path, resolve_terminal_launch, search_term_buffer, should_drop_event,
+        terminal_environment_overrides, terminal_event_from_osc, user_home_dir,
     };
     #[cfg(target_os = "windows")]
     use super::{
         default_shell_launch, quote_shell_program_if_needed, windows_cmd_path,
         windows_git_bash_path,
     };
+    use crate::backend;
     use crate::keyboard::{
         Keystroke, Modifiers, TerminalKeyEventKind, TerminalKeyboardMode, keystroke_to_input,
     };
@@ -2864,9 +2863,9 @@ mod tests {
     use crate::search::TermySearchOptions;
     use alacritty_terminal::{
         event::{Event as AlacEvent, EventListener, VoidListener, WindowSize},
-        grid::{Dimensions, Scroll},
+        grid::Dimensions,
         sync::FairMutex,
-        term::{ClipboardType, Config as TermConfig, LineDamageBounds, Term, TermMode},
+        term::{ClipboardType, Config as TermConfig, Term, TermMode},
         vte::ansi::{self, CursorShape, NamedColor},
     };
     use flume::unbounded;
@@ -3084,18 +3083,33 @@ mod tests {
         let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
         let mut parser = ansi::Processor::new();
         let mut tracker = KittyGraphicsCursorTracker::default();
-        advance_kitty_graphics_text(&mut tracker, &mut parser, &mut term, b"\x1b[2;3r", false);
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1b[2;3r",
+            false,
+            None,
+        );
         assert!(!tracker.region_covers_full_screen(4));
 
-        advance_kitty_graphics_text(&mut tracker, &mut parser, &mut term, b"\x1b[?3h", false);
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1b[?3h",
+            false,
+            None,
+        );
         assert!(tracker.region_covers_full_screen(4));
 
-        advance_kitty_graphics_text(
+        advance_terminal_text(
             &mut tracker,
             &mut parser,
             &mut term,
             b"\x1b[2;3r\x1b[?3l",
             false,
+            None,
         );
         assert!(tracker.region_covers_full_screen(4));
     }
@@ -3202,10 +3216,24 @@ mod tests {
         let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
         let mut parser = ansi::Processor::new();
         let mut tracker = KittyGraphicsCursorTracker::default();
-        advance_kitty_graphics_text(&mut tracker, &mut parser, &mut term, b"\x1b[2;3r", false);
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1b[2;3r",
+            false,
+            None,
+        );
         assert!(!tracker.region_covers_full_screen(4));
 
-        advance_kitty_graphics_text(&mut tracker, &mut parser, &mut term, b"\x1b[99r", false);
+        advance_terminal_text(
+            &mut tracker,
+            &mut parser,
+            &mut term,
+            b"\x1b[99r",
+            false,
+            None,
+        );
 
         assert!(!tracker.region_covers_full_screen(4));
     }
@@ -3300,7 +3328,7 @@ mod tests {
         let mut parser: ansi::Processor = ansi::Processor::new();
         parser.advance(&mut term, b"\x1b[4;1H");
 
-        let untracked_scroll = advance_kitty_graphics_cursor(&mut term, u32::MAX, u32::MAX, true);
+        let untracked_scroll = backend::move_graphics_cursor(&mut term, u32::MAX, u32::MAX, true);
 
         assert_eq!(untracked_scroll, 0);
         assert_eq!(term.grid().history_size(), size.rows as usize);
@@ -3378,24 +3406,30 @@ mod tests {
     }
 
     #[test]
-    fn term_config_clamps_scrollback_history() {
-        let options = TerminalOptions {
+    fn terminal_options_clamp_scrollback_history() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        terminal.set_term_options(TerminalOptions {
             scrollback_history: 10_000_000,
             default_cursor_style: TerminalCursorStyle::Block,
-        };
-        assert_eq!(
-            options.term_config().scrolling_history,
-            MAX_TERMINAL_SCROLLBACK_HISTORY
+        });
+        terminal.feed_output(
+            &(0..MAX_TERMINAL_SCROLLBACK_HISTORY.saturating_add(100))
+                .map(|_| "x\r\n")
+                .collect::<String>()
+                .into_bytes(),
         );
+        assert!(terminal.scroll_state().1 <= MAX_TERMINAL_SCROLLBACK_HISTORY);
     }
 
     #[test]
-    fn term_config_preserves_in_range_scrollback_history() {
-        let options = TerminalOptions {
-            scrollback_history: 5_000,
+    fn terminal_options_preserve_in_range_scrollback_history() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        terminal.set_term_options(TerminalOptions {
+            scrollback_history: 5,
             default_cursor_style: TerminalCursorStyle::Block,
-        };
-        assert_eq!(options.term_config().scrolling_history, 5_000);
+        });
+        terminal.feed_output(&(0..20).map(|_| "x\r\n").collect::<String>().into_bytes());
+        assert_eq!(terminal.scroll_state().1, 5);
     }
 
     #[test]
@@ -3481,31 +3515,21 @@ mod tests {
         input: &[u8],
         runtime_config: TerminalRuntimeConfig,
     ) -> Option<TerminalCursorState> {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(
-            runtime_config.term_options().term_config(),
-            &size,
-            VoidListener,
-        );
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, input);
-        cursor_state_from_term(&term)
+        let terminal = Terminal::new_display(test_terminal_size(), Some(&runtime_config));
+        terminal.feed_output(input);
+        terminal.cursor_state()
     }
 
     fn cursor_position_after_bytes(input: &[u8]) -> (usize, usize) {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, input);
-        cursor_position_from_term(&term)
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        terminal.feed_output(input);
+        terminal.cursor_position()
     }
 
     fn mouse_mode_after_bytes(input: &[u8]) -> crate::mouse_protocol::TerminalMouseMode {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, input);
-        termmode_to_terminal_mouse_mode(*term.mode())
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        terminal.feed_output(input);
+        terminal.mouse_mode()
     }
 
     fn keystroke(key: &str, modifiers: Modifiers) -> Keystroke {
@@ -3521,7 +3545,7 @@ mod tests {
     }
 
     fn keyboard_mode(flags: TermMode) -> TerminalKeyboardMode {
-        TerminalKeyboardMode::from_term_mode(flags)
+        backend::keyboard_mode(flags)
     }
 
     #[derive(Default)]
@@ -3993,105 +4017,68 @@ mod tests {
     }
 
     #[test]
-    fn take_term_damage_snapshot_is_full_for_new_term() {
-        let size = TerminalSize {
-            cols: 12,
-            rows: 4,
-            cell_width: 9.0,
-            cell_height: 18.0,
-        };
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
+    fn terminal_damage_snapshot_is_full_for_new_terminal() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
         assert!(matches!(
-            take_term_damage_snapshot(&mut term),
+            terminal.take_damage_snapshot(),
             TerminalDamageSnapshot::Full
         ));
     }
 
     #[test]
-    fn take_term_damage_snapshot_resets_damage_after_read() {
-        let size = TerminalSize {
-            cols: 12,
-            rows: 4,
-            cell_width: 9.0,
-            cell_height: 18.0,
-        };
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let _ = take_term_damage_snapshot(&mut term);
-        let second = take_term_damage_snapshot(&mut term);
-        let third = take_term_damage_snapshot(&mut term);
+    fn terminal_damage_snapshot_resets_damage_after_read() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        let _ = terminal.take_damage_snapshot();
+        let second = terminal.take_damage_snapshot();
+        let third = terminal.take_damage_snapshot();
         assert!(matches!(second, TerminalDamageSnapshot::Partial(_)));
         assert_eq!(second, third);
     }
 
     #[test]
-    fn take_term_damage_snapshot_returns_partial_spans_for_output() {
-        let size = TerminalSize {
-            cols: 12,
-            rows: 4,
-            cell_width: 9.0,
-            cell_height: 18.0,
-        };
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let _ = take_term_damage_snapshot(&mut term);
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, b"abc");
+    fn terminal_damage_snapshot_returns_partial_spans_for_output() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        let _ = terminal.take_damage_snapshot();
+        terminal.feed_output(b"abc");
         assert!(matches!(
-            take_term_damage_snapshot(&mut term),
+            terminal.take_damage_snapshot(),
             TerminalDamageSnapshot::Partial(spans) if !spans.is_empty()
         ));
     }
 
     #[test]
-    fn take_term_damage_snapshot_while_scrolled_returns_empty_partial_without_damage() {
-        let size = TerminalSize {
-            cols: 12,
-            rows: 4,
-            cell_width: 9.0,
-            cell_height: 18.0,
-        };
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let _ = take_term_damage_snapshot(&mut term);
+    fn terminal_damage_snapshot_while_scrolled_returns_empty_partial_without_damage() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        let _ = terminal.take_damage_snapshot();
+        terminal.feed_output(b"1\n2\n3\n4\n5\n6\n");
+        let _ = terminal.take_damage_snapshot();
 
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, b"1\n2\n3\n4\n5\n6\n");
-        let _ = take_term_damage_snapshot(&mut term);
-
-        term.scroll_display(Scroll::Delta(1));
-        assert!(term.grid().display_offset() > 0);
+        assert!(terminal.scroll_display(1));
+        assert!(terminal.scroll_state().0 > 0);
 
         assert!(matches!(
-            take_term_damage_snapshot(&mut term),
+            terminal.take_damage_snapshot(),
             TerminalDamageSnapshot::Full
         ));
         assert_eq!(
-            take_term_damage_snapshot(&mut term),
+            terminal.take_damage_snapshot(),
             TerminalDamageSnapshot::Partial(Vec::new())
         );
     }
 
     #[test]
-    fn take_term_damage_snapshot_while_scrolled_maps_damage_to_viewport_rows() {
-        let size = TerminalSize {
-            cols: 12,
-            rows: 4,
-            cell_width: 9.0,
-            cell_height: 18.0,
-        };
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let _ = take_term_damage_snapshot(&mut term);
+    fn terminal_damage_snapshot_while_scrolled_maps_damage_to_viewport_rows() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        let _ = terminal.take_damage_snapshot();
+        terminal.feed_output(b"1\n2\n3\n4\n5\n6\n");
+        let _ = terminal.take_damage_snapshot();
 
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, b"1\n2\n3\n4\n5\n6\n");
-        let _ = take_term_damage_snapshot(&mut term);
+        assert!(terminal.scroll_display(1));
+        let _ = terminal.take_damage_snapshot();
+        let _ = terminal.take_damage_snapshot();
 
-        term.scroll_display(Scroll::Delta(1));
-        let _ = take_term_damage_snapshot(&mut term);
-        let _ = take_term_damage_snapshot(&mut term);
-
-        // Damage on live row 0 must surface shifted down by the display
-        // offset (viewport row 1), as a partial span — not a full rebuild.
-        ansi::Handler::goto(&mut term, 0, 0);
-        match take_term_damage_snapshot(&mut term) {
+        terminal.feed_output(b"\x1b[1;1H");
+        match terminal.take_damage_snapshot() {
             TerminalDamageSnapshot::Partial(spans) => {
                 assert!(spans.iter().any(|span| span.row == 1), "spans: {spans:?}");
                 assert!(spans.iter().all(|span| span.row < 4), "spans: {spans:?}");
@@ -4103,28 +4090,18 @@ mod tests {
     }
 
     #[test]
-    fn take_term_damage_snapshot_while_scrolled_drops_damage_below_viewport() {
-        let size = TerminalSize {
-            cols: 12,
-            rows: 4,
-            cell_width: 9.0,
-            cell_height: 18.0,
-        };
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let _ = take_term_damage_snapshot(&mut term);
+    fn terminal_damage_snapshot_while_scrolled_drops_damage_below_viewport() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        let _ = terminal.take_damage_snapshot();
+        terminal.feed_output(b"1\n2\n3\n4\n5\n6\n");
+        let _ = terminal.take_damage_snapshot();
 
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, b"1\n2\n3\n4\n5\n6\n");
-        let _ = take_term_damage_snapshot(&mut term);
+        assert!(terminal.scroll_display(3));
+        let _ = terminal.take_damage_snapshot();
+        let _ = terminal.take_damage_snapshot();
 
-        term.scroll_display(Scroll::Delta(3));
-        let _ = take_term_damage_snapshot(&mut term);
-        let _ = take_term_damage_snapshot(&mut term);
-
-        // Writing on the bottom live row (shifted past the viewport by the
-        // offset) must not repaint anything the user can see.
-        parser.advance(&mut term, b"x");
-        match take_term_damage_snapshot(&mut term) {
+        terminal.feed_output(b"x");
+        match terminal.take_damage_snapshot() {
             TerminalDamageSnapshot::Partial(spans) => {
                 assert!(spans.iter().all(|span| span.row < 4), "spans: {spans:?}");
             }
@@ -4135,17 +4112,90 @@ mod tests {
     }
 
     #[test]
-    fn normalized_dirty_span_expands_and_clamps_column_bounds() {
-        let span = super::normalized_dirty_span(LineDamageBounds::new(1, 1, 2), 4, 4)
-            .expect("dirty span should normalize");
-        assert_eq!(span.row, 1);
-        assert_eq!(span.left_col, 0);
-        assert_eq!(span.right_col, 3);
+    fn rich_render_read_preserves_text_colors_attributes_and_metadata() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        terminal.feed_output(
+            "\x1b[38;2;1;2;3;48;5;4;4:3;58:2::7:8:9;1;2;3;7;8;9me\u{301}\x1b[0m 界".as_bytes(),
+        );
 
-        let span = super::normalized_dirty_span(LineDamageBounds::new(0, 0, 0), 4, 4)
-            .expect("left edge should clamp");
-        assert_eq!(span.left_col, 0);
-        assert_eq!(span.right_col, 1);
+        let read = terminal.render_read(true);
+        assert_eq!((read.metadata.cols, read.metadata.rows), (32, 4));
+        assert_eq!(read.metadata.generation, read.update.generation);
+        assert_eq!(read.metadata.palette_revision, read.palette.revision);
+        assert!(matches!(read.update.damage, TerminalDamageSnapshot::Full));
+        assert!(read.update.scrolls.is_empty());
+
+        let cell = &read.cells[0];
+        assert_eq!(cell.text, "e\u{301}");
+        assert_eq!(
+            cell.foreground,
+            crate::TerminalRenderColor::Rgb(crate::TerminalColor { r: 1, g: 2, b: 3 })
+        );
+        assert_eq!(cell.background, crate::TerminalRenderColor::Indexed(4));
+        assert_eq!(
+            cell.underline_color,
+            Some(crate::TerminalRenderColor::Rgb(crate::TerminalColor {
+                r: 7,
+                g: 8,
+                b: 9,
+            }))
+        );
+        assert_eq!(cell.underline_style, crate::TerminalUnderlineStyle::Curly);
+        assert!(cell.bold);
+        assert!(cell.dim);
+        assert!(cell.italic);
+        assert!(cell.inverse);
+        assert!(cell.hidden);
+        assert!(cell.strikethrough);
+        assert!(read.cells.iter().any(|cell| cell.wide_character_spacer));
+    }
+
+    #[test]
+    fn rich_render_read_reports_wrap_generation_palette_and_partial_cells() {
+        let terminal = Terminal::new_display(
+            TerminalSize {
+                cols: 4,
+                rows: 2,
+                ..test_terminal_size()
+            },
+            None,
+        );
+        let initial = terminal.render_read(true);
+        let _ = terminal.take_render_damage_snapshot();
+        terminal.feed_output(b"abcde");
+
+        let update = terminal.take_render_damage_snapshot();
+        assert!(update.generation > initial.metadata.generation);
+        assert!(matches!(
+            update.damage,
+            TerminalDamageSnapshot::Partial(ref spans) if !spans.is_empty()
+        ));
+        let spans = match &update.damage {
+            TerminalDamageSnapshot::Partial(spans) => spans,
+            TerminalDamageSnapshot::Full => unreachable!(),
+        };
+        let mut visited = Vec::new();
+        assert!(terminal.visit_viewport_ranges_at_generation(
+            update.generation,
+            spans,
+            |row, display_offset, line, col, cell| {
+                visited.push((row, display_offset, line, col, cell.text.clone()));
+            },
+        ));
+        assert!(!visited.is_empty());
+
+        terminal.feed_output(b"\x1b]4;1;#123456\x07");
+        let read = terminal.render_read(true);
+        assert!(read.cells[3].line_wrapped);
+        assert_eq!(
+            read.palette.indexed[1],
+            Some(crate::TerminalColor {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            })
+        );
+        assert!(read.metadata.palette_revision > initial.metadata.palette_revision);
     }
 
     #[cfg(target_os = "macos")]
@@ -4443,16 +4493,6 @@ mod tests {
                 true,
             ),
             Some(vec![0x1a])
-        );
-    }
-
-    #[test]
-    fn term_options_enable_kitty_keyboard_negotiation() {
-        assert!(
-            TerminalRuntimeConfig::default()
-                .term_options()
-                .term_config()
-                .kitty_keyboard
         );
     }
 
@@ -4882,14 +4922,17 @@ mod tests {
             default_cursor_style: TerminalCursorStyle::Line,
             ..TerminalRuntimeConfig::default()
         };
-        let mut term: Term<VoidListener> =
-            Term::new(initial.term_options().term_config(), &size, VoidListener);
+        let mut term: Term<VoidListener> = Term::new(
+            backend::term_config(initial.term_options()),
+            &size,
+            VoidListener,
+        );
 
         let updated = TerminalRuntimeConfig {
             scrollback_history: 8,
             ..initial
         };
-        term.set_options(updated.term_options().term_config());
+        term.set_options(backend::term_config(updated.term_options()));
         let mut parser: ansi::Processor = ansi::Processor::new();
         let output = (0..80)
             .map(|index| format!("line-{index}\r\n"))
@@ -4907,8 +4950,11 @@ mod tests {
             scrollback_history: 256,
             ..TerminalRuntimeConfig::default()
         };
-        let mut term: Term<VoidListener> =
-            Term::new(initial.term_options().term_config(), &size, VoidListener);
+        let mut term: Term<VoidListener> = Term::new(
+            backend::term_config(initial.term_options()),
+            &size,
+            VoidListener,
+        );
 
         let mut parser: ansi::Processor = ansi::Processor::new();
         let output = (0..300)
@@ -4922,11 +4968,11 @@ mod tests {
             scrollback_history: 16,
             ..initial.clone()
         };
-        apply_term_config(&mut term, inactive.term_options().term_config());
+        backend::apply_term_options(&mut term, inactive.term_options());
         assert_eq!(term.grid().history_size(), 16);
 
         // Grow back (tab reactivated) and keep scrolling: storage must regrow.
-        apply_term_config(&mut term, initial.term_options().term_config());
+        backend::apply_term_options(&mut term, initial.term_options());
         parser.advance(&mut term, output.as_bytes());
         assert_eq!(term.grid().history_size(), 256);
     }
@@ -4938,14 +4984,17 @@ mod tests {
             scrollback_history: 8,
             ..TerminalRuntimeConfig::default()
         };
-        let mut term: Term<VoidListener> =
-            Term::new(initial.term_options().term_config(), &size, VoidListener);
+        let mut term: Term<VoidListener> = Term::new(
+            backend::term_config(initial.term_options()),
+            &size,
+            VoidListener,
+        );
 
         let updated = TerminalRuntimeConfig {
             default_cursor_style: TerminalCursorStyle::Line,
             ..initial
         };
-        term.set_options(updated.term_options().term_config());
+        term.set_options(backend::term_config(updated.term_options()));
         let mut parser: ansi::Processor = ansi::Processor::new();
         let output = (0..80)
             .map(|index| format!("line-{index}\r\n"))

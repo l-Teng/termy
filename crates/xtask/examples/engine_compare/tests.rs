@@ -209,12 +209,14 @@ fn normalized_cell_contract_distinguishes_wide_spacer_roles() {
     let tmon_trailing = normalized_tmon_cell(&tmon_trailing, None, &mut String::new());
     let tmon_leading = normalized_tmon_cell(&tmon_leading, None, &mut String::new());
 
-    let mut alacritty_trailing = AlacrittyCell::default();
-    alacritty_trailing.flags.insert(Flags::WIDE_CHAR_SPACER);
-    let mut alacritty_leading = AlacrittyCell::default();
-    alacritty_leading
-        .flags
-        .insert(Flags::LEADING_WIDE_CHAR_SPACER);
+    let alacritty_trailing = TerminalRenderCell {
+        wide_character_spacer: true,
+        ..TerminalRenderCell::default()
+    };
+    let alacritty_leading = TerminalRenderCell {
+        leading_wide_character_spacer: true,
+        ..TerminalRenderCell::default()
+    };
     let alacritty_trailing = normalized_alacritty_cell(&alacritty_trailing, &mut String::new());
     let alacritty_leading = normalized_alacritty_cell(&alacritty_leading, &mut String::new());
 

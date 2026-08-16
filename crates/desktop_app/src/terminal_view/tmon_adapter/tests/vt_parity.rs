@@ -309,12 +309,11 @@ fn extended_underline_styles_match_the_alacritty_engine() {
     native.feed_output(bytes);
     tmon.feed_output(bytes);
 
-    let native_styles = native.with_term(|term| {
-        (&term.grid()[Line(0)])
-            .into_iter()
-            .take(8)
-            .map(|cell| native_underline_style(cell.flags))
-            .collect::<Vec<_>>()
+    let mut native_styles = Vec::new();
+    native.visit_line_cells(0, 0, |_, _, _, cell| {
+        if native_styles.len() < 8 {
+            native_styles.push(native_underline_style(cell.underline_style));
+        }
     });
     let tmon_styles = tmon.snapshot().cells[..8]
         .iter()

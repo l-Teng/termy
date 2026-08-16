@@ -4,13 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::TermyColor;
 use crate::protocol::TerminalQueryColors;
 use crate::runtime::{
     TerminalCursorStyle, TerminalRuntimeConfig, WindowsShell as RuntimeWindowsShell,
     WorkingDirFallback as RuntimeWorkingDirFallback,
 };
-use alacritty_terminal::vte::ansi::Rgb as AnsiRgb;
+use crate::{TerminalColor, TermyColor};
 use termy_config_core::{
     AppConfig, ConfigDiagnostic, CursorStyle, SHELL_DECIDE_THEME_ID, SystemAppearance,
     WindowsShell, WorkingDirFallback, resolve_active_theme,
@@ -209,9 +208,9 @@ pub fn terminal_query_colors_from_resolved_theme(
     colors: &ResolvedThemeColors,
 ) -> TerminalQueryColors {
     TerminalQueryColors {
-        ansi: colors.ansi.map(ansi_rgb_from_term_color),
-        foreground: ansi_rgb_from_term_color(colors.foreground),
-        background: ansi_rgb_from_term_color(colors.background),
+        ansi: colors.ansi.map(terminal_color_from_term_color),
+        foreground: terminal_color_from_term_color(colors.foreground),
+        background: terminal_color_from_term_color(colors.background),
         cursor: None,
     }
 }
@@ -279,14 +278,14 @@ fn apply_custom_colors(colors: &mut ThemeColors, custom: &termy_config_core::Cus
 fn terminal_default_theme_colors() -> ThemeColors {
     let defaults = TerminalQueryColors::default();
     ThemeColors {
-        ansi: defaults.ansi.map(theme_rgb_from_ansi_rgb),
-        foreground: theme_rgb_from_ansi_rgb(defaults.foreground),
-        background: theme_rgb_from_ansi_rgb(defaults.background),
-        cursor: theme_rgb_from_ansi_rgb(defaults.foreground),
+        ansi: defaults.ansi.map(theme_rgb_from_terminal_color),
+        foreground: theme_rgb_from_terminal_color(defaults.foreground),
+        background: theme_rgb_from_terminal_color(defaults.background),
+        cursor: theme_rgb_from_terminal_color(defaults.foreground),
     }
 }
 
-fn theme_rgb_from_ansi_rgb(color: AnsiRgb) -> termy_themes::Rgb8 {
+fn theme_rgb_from_terminal_color(color: TerminalColor) -> termy_themes::Rgb8 {
     termy_themes::Rgb8::new(color.r, color.g, color.b)
 }
 
@@ -303,8 +302,8 @@ fn term_color_from_rgb(color: termy_themes::Rgb8) -> TermyColor {
     }
 }
 
-fn ansi_rgb_from_term_color(color: TermyColor) -> AnsiRgb {
-    AnsiRgb {
+fn terminal_color_from_term_color(color: TermyColor) -> TerminalColor {
+    TerminalColor {
         r: color.r,
         g: color.g,
         b: color.b,

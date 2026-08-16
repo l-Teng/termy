@@ -1,3 +1,4 @@
+mod backend;
 mod cell_metrics;
 mod config;
 mod frame;
@@ -23,7 +24,12 @@ pub use config::{
     runtime_config_from_app_config, runtime_config_from_app_config_with_query_colors,
     runtime_config_from_app_config_with_theme, terminal_query_colors_from_resolved_theme,
 };
-pub use frame::{TermyCell, TermyColor, TermyFrame, TermyFrameUpdate};
+pub use frame::{
+    TerminalColor, TerminalPalette, TerminalRenderCell, TerminalRenderColor,
+    TerminalRenderDamageSnapshot, TerminalRenderRead, TerminalUnderlineStyle,
+    TerminalViewportMetadata, TerminalViewportScroll, TerminalViewportScrollDirection, TermyCell,
+    TermyColor, TermyFrame, TermyFrameUpdate,
+};
 pub use keyboard::{
     Keystroke, Modifiers, TerminalKeyEventKind, TerminalKeyboardMode, TermyKeystroke,
     TermyModifiers, keystroke_to_input, keystroke_to_input_with_options,
@@ -60,10 +66,8 @@ pub use runtime::{
     ResolvedTerminalLaunch, TabTitleShellIntegration, Terminal, TerminalCursorState,
     TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalLaunch,
     TerminalOptions, TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
-    WorkingDirFallback, advance_kitty_graphics_cursor, advance_kitty_graphics_text,
-    cursor_position_from_term, cursor_state_from_term, normalize_working_directory_candidate,
-    resolve_launch_working_directory, resolve_terminal_launch, resolve_working_directory_path,
-    take_term_damage_snapshot, terminal_environment_overrides, termmode_to_terminal_mouse_mode,
+    WorkingDirFallback, normalize_working_directory_candidate, resolve_launch_working_directory,
+    resolve_terminal_launch, resolve_working_directory_path, terminal_environment_overrides,
 };
 pub use search::{
     TermySearchMatch, TermySearchOptions, TermySharedSearchMatch, search_frame,

@@ -255,18 +255,17 @@ fn allocation_sample(
     }
 }
 
-fn alacritty_color(color: AlacrittyColor) -> RawColor {
+fn alacritty_color(color: TerminalRenderColor) -> RawColor {
     match color {
-        AlacrittyColor::Spec(rgb) => RawColor::Rgb(rgb.r, rgb.g, rgb.b),
-        AlacrittyColor::Indexed(index) => RawColor::Indexed(index),
-        AlacrittyColor::Named(name) if (name as usize) < 16 => RawColor::Indexed(name as u8),
-        AlacrittyColor::Named(
-            NamedColor::Foreground
-            | NamedColor::Background
-            | NamedColor::BrightForeground
-            | NamedColor::DimForeground,
-        ) => RawColor::Default,
-        AlacrittyColor::Named(name) => panic!("unexpected named cell color {name:?}"),
+        TerminalRenderColor::Indexed(index) | TerminalRenderColor::DimIndexed(index) => {
+            RawColor::Indexed(index)
+        }
+        TerminalRenderColor::Rgb(color) => RawColor::Rgb(color.r, color.g, color.b),
+        TerminalRenderColor::DefaultForeground
+        | TerminalRenderColor::DefaultBackground
+        | TerminalRenderColor::Cursor
+        | TerminalRenderColor::BrightForeground
+        | TerminalRenderColor::DimForeground => RawColor::Default,
     }
 }
 
@@ -278,19 +277,14 @@ fn tmon_color(color: tmon::Color) -> RawColor {
     }
 }
 
-fn alacritty_underline_style(flags: Flags) -> RawUnderlineStyle {
-    if flags.contains(Flags::DOUBLE_UNDERLINE) {
-        RawUnderlineStyle::Double
-    } else if flags.contains(Flags::UNDERCURL) {
-        RawUnderlineStyle::Curly
-    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
-        RawUnderlineStyle::Dotted
-    } else if flags.contains(Flags::DASHED_UNDERLINE) {
-        RawUnderlineStyle::Dashed
-    } else if flags.contains(Flags::UNDERLINE) {
-        RawUnderlineStyle::Single
-    } else {
-        RawUnderlineStyle::None
+fn alacritty_underline_style(style: TerminalUnderlineStyle) -> RawUnderlineStyle {
+    match style {
+        TerminalUnderlineStyle::None => RawUnderlineStyle::None,
+        TerminalUnderlineStyle::Single => RawUnderlineStyle::Single,
+        TerminalUnderlineStyle::Double => RawUnderlineStyle::Double,
+        TerminalUnderlineStyle::Curly => RawUnderlineStyle::Curly,
+        TerminalUnderlineStyle::Dotted => RawUnderlineStyle::Dotted,
+        TerminalUnderlineStyle::Dashed => RawUnderlineStyle::Dashed,
     }
 }
 
@@ -305,25 +299,24 @@ const fn tmon_underline_style(style: TmonUnderlineStyle) -> RawUnderlineStyle {
     }
 }
 
-fn alacritty_cell(cell: &AlacrittyCell) -> SemanticCell {
+fn alacritty_cell(cell: &TerminalRenderCell) -> SemanticCell {
+    let mut chars = cell.text.chars();
     SemanticCell {
-        character: cell.c,
-        combining: cell.zerowidth().into_iter().flatten().collect(),
-        foreground: alacritty_color(cell.fg),
-        background: alacritty_color(cell.bg),
-        bold: cell.flags.contains(Flags::BOLD),
-        dim: cell.flags.contains(Flags::DIM),
-        italic: cell.flags.contains(Flags::ITALIC),
-        underline_style: alacritty_underline_style(cell.flags),
-        underline_color: cell.underline_color().map(alacritty_color),
-        inverse: cell.flags.contains(Flags::INVERSE),
-        hidden: cell.flags.contains(Flags::HIDDEN),
-        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
-        hyperlink: cell.hyperlink().is_some(),
-        wide_spacer: cell
-            .flags
-            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-        wrapped: cell.flags.contains(Flags::WRAPLINE),
+        character: chars.next().unwrap_or('\0'),
+        combining: chars.collect(),
+        foreground: alacritty_color(cell.foreground),
+        background: alacritty_color(cell.background),
+        bold: cell.bold,
+        dim: cell.dim,
+        italic: cell.italic,
+        underline_style: alacritty_underline_style(cell.underline_style),
+        underline_color: cell.underline_color.map(alacritty_color),
+        inverse: cell.inverse,
+        hidden: cell.hidden,
+        strikethrough: cell.strikethrough,
+        hyperlink: cell.hyperlink,
+        wide_spacer: cell.wide_character_spacer || cell.leading_wide_character_spacer,
+        wrapped: cell.line_wrapped,
     }
 }
 
@@ -369,37 +362,33 @@ fn normalized_combining_range(start: usize, end: usize) -> (u32, u32) {
     (start, len)
 }
 
-fn normalized_alacritty_cell(cell: &AlacrittyCell, combining: &mut String) -> NormalizedCell {
+fn normalized_alacritty_cell(cell: &TerminalRenderCell, combining: &mut String) -> NormalizedCell {
+    let mut chars = cell.text.chars();
+    let character = chars.next().unwrap_or('\0');
     let combining_start = combining.len();
-    combining.extend(cell.zerowidth().into_iter().flatten());
+    combining.extend(chars);
     let (combining_start, combining_len) =
         normalized_combining_range(combining_start, combining.len());
-    let flags = normalized_flag(cell.flags.contains(Flags::BOLD), NORMALIZED_BOLD)
-        | normalized_flag(cell.flags.contains(Flags::DIM), NORMALIZED_DIM)
-        | normalized_flag(cell.flags.contains(Flags::ITALIC), NORMALIZED_ITALIC)
-        | normalized_underline_flag(alacritty_underline_style(cell.flags))
-        | normalized_flag(cell.flags.contains(Flags::INVERSE), NORMALIZED_INVERSE)
-        | normalized_flag(cell.flags.contains(Flags::HIDDEN), NORMALIZED_HIDDEN)
+    let flags = normalized_flag(cell.bold, NORMALIZED_BOLD)
+        | normalized_flag(cell.dim, NORMALIZED_DIM)
+        | normalized_flag(cell.italic, NORMALIZED_ITALIC)
+        | normalized_underline_flag(alacritty_underline_style(cell.underline_style))
+        | normalized_flag(cell.inverse, NORMALIZED_INVERSE)
+        | normalized_flag(cell.hidden, NORMALIZED_HIDDEN)
+        | normalized_flag(cell.strikethrough, NORMALIZED_STRIKETHROUGH)
+        | normalized_flag(cell.hyperlink, NORMALIZED_HYPERLINK)
+        | normalized_flag(cell.wide_character_spacer, NORMALIZED_WIDE_SPACER)
         | normalized_flag(
-            cell.flags.contains(Flags::STRIKEOUT),
-            NORMALIZED_STRIKETHROUGH,
-        )
-        | normalized_flag(cell.hyperlink().is_some(), NORMALIZED_HYPERLINK)
-        | normalized_flag(
-            cell.flags.contains(Flags::WIDE_CHAR_SPACER),
-            NORMALIZED_WIDE_SPACER,
-        )
-        | normalized_flag(
-            cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER),
+            cell.leading_wide_character_spacer,
             NORMALIZED_LEADING_WIDE_SPACER,
         )
-        | normalized_flag(cell.flags.contains(Flags::WRAPLINE), NORMALIZED_WRAPPED);
+        | normalized_flag(cell.line_wrapped, NORMALIZED_WRAPPED);
 
     NormalizedCell {
-        character: cell.c,
-        foreground: alacritty_color(cell.fg),
-        background: alacritty_color(cell.bg),
-        underline_color: cell.underline_color().map(alacritty_color),
+        character,
+        foreground: alacritty_color(cell.foreground),
+        background: alacritty_color(cell.background),
+        underline_color: cell.underline_color.map(alacritty_color),
         combining_start,
         combining_len,
         flags,
@@ -662,43 +651,26 @@ fn assert_renderer_cache_preflight(fixture: &RendererCacheFixture) {
 }
 
 fn normalized_alacritty_frame(terminal: &AlacrittyTerminal) -> NormalizedFrame {
-    terminal.with_term(|term| {
-        let grid = term.grid();
-        let cols = grid.columns();
-        let rows = grid.screen_lines();
-        let history_size = grid.history_size();
-        let content = term.renderable_content();
-        let display_offset = content.display_offset;
-        let cursor_row = usize::try_from(content.cursor.point.line.0).ok();
-        let cursor = match (content.cursor.shape, cursor_row) {
-            (CursorShape::Hidden, _) | (_, None) => None,
-            (CursorShape::Block | CursorShape::HollowBlock, Some(row)) => Some(NormalizedCursor {
-                col: content.cursor.point.column.0,
-                row,
-                line_style: false,
-            }),
-            (CursorShape::Underline | CursorShape::Beam, Some(row)) => Some(NormalizedCursor {
-                col: content.cursor.point.column.0,
-                row,
-                line_style: true,
-            }),
-        };
-        let mut cells = Vec::with_capacity(cols.saturating_mul(rows));
-        let mut combining = String::new();
-        for indexed_cell in content.display_iter {
-            cells.push(normalized_alacritty_cell(indexed_cell.cell, &mut combining));
-        }
-        debug_assert_eq!(cells.len(), cols.saturating_mul(rows));
-        NormalizedFrame {
-            cols: u16::try_from(cols).expect("benchmark columns fit in u16"),
-            rows: u16::try_from(rows).expect("benchmark rows fit in u16"),
-            cells,
-            combining,
-            cursor,
-            display_offset,
-            history_size,
-        }
-    })
+    let read = terminal.render_read(true);
+    let mut cells = Vec::with_capacity(read.cells.len());
+    let mut combining = String::new();
+    for cell in &read.cells {
+        cells.push(normalized_alacritty_cell(cell, &mut combining));
+    }
+    let cursor = read.metadata.cursor.map(|cursor| NormalizedCursor {
+        col: cursor.col,
+        row: cursor.row,
+        line_style: matches!(cursor.style, TerminalCursorStyle::Line),
+    });
+    NormalizedFrame {
+        cols: read.metadata.cols,
+        rows: read.metadata.rows,
+        cells,
+        combining,
+        cursor,
+        display_offset: read.metadata.display_offset,
+        history_size: read.metadata.history_size,
+    }
 }
 
 fn normalized_snapshot_fixture() -> &'static str {
@@ -845,50 +817,46 @@ fn assert_workload_equivalence(workload: &Workload, validation_bytes: usize) {
     }
 
     let (tmon_first, tmon_last) = tmon.line_bounds();
-    alacritty.with_term(|term| {
-        let grid = term.grid();
-        let alacritty_first = -(grid.history_size() as i32);
-        let alacritty_last = grid.screen_lines() as i32 - 1;
-        assert_eq!(
-            (tmon_first, tmon_last),
-            (alacritty_first, alacritty_last),
-            "{}: full-grid bounds differ",
+    let (alacritty_first, alacritty_last) = alacritty.line_bounds();
+    assert_eq!(
+        (tmon_first, tmon_last),
+        (alacritty_first, alacritty_last),
+        "{}: full-grid bounds differ",
+        workload.name
+    );
+
+    for line in alacritty_first..=alacritty_last {
+        let mut alacritty_line = Vec::new();
+        alacritty.visit_line_cells(line, line, |_, _, _, cell| {
+            alacritty_line.push(alacritty_cell(cell));
+        });
+        let mut tmon_line = Vec::with_capacity(alacritty_line.len());
+        assert!(
+            tmon.for_each_line_cell(line, |_, cell, combining| {
+                tmon_line.push(tmon_cell(cell, combining));
+            }),
+            "{}: Tmon is missing grid line {line}",
             workload.name
         );
-
-        for line in alacritty_first..=alacritty_last {
-            let alacritty_line = (&grid[Line(line)])
-                .into_iter()
-                .map(alacritty_cell)
-                .collect::<Vec<_>>();
-            let mut tmon_line = Vec::with_capacity(alacritty_line.len());
-            assert!(
-                tmon.for_each_line_cell(line, |_, cell, combining| {
-                    tmon_line.push(tmon_cell(cell, combining));
-                }),
-                "{}: Tmon is missing grid line {line}",
+        assert_eq!(
+            tmon_line.len(),
+            alacritty_line.len(),
+            "{}: grid line {line} has a different width",
+            workload.name
+        );
+        if let Some((col, (tmon_cell, alacritty_cell))) = tmon_line
+            .iter()
+            .zip(&alacritty_line)
+            .enumerate()
+            .find(|(_, (tmon_cell, alacritty_cell))| tmon_cell != alacritty_cell)
+        {
+            panic!(
+                "{}: terminal state differs at line {line}, column {col}:\n\
+                 Tmon: {tmon_cell:?}\nAlacritty: {alacritty_cell:?}",
                 workload.name
             );
-            assert_eq!(
-                tmon_line.len(),
-                alacritty_line.len(),
-                "{}: grid line {line} has a different width",
-                workload.name
-            );
-            if let Some((col, (tmon_cell, alacritty_cell))) = tmon_line
-                .iter()
-                .zip(&alacritty_line)
-                .enumerate()
-                .find(|(_, (tmon_cell, alacritty_cell))| tmon_cell != alacritty_cell)
-            {
-                panic!(
-                    "{}: terminal state differs at line {line}, column {col}:\n\
-                     Tmon: {tmon_cell:?}\nAlacritty: {alacritty_cell:?}",
-                    workload.name
-                );
-            }
         }
-    });
+    }
 
     let tmon_cursor = tmon.cursor_state().map(|cursor| {
         (
