@@ -458,6 +458,11 @@ impl Grid {
         self.damage.take(display_offset)
     }
 
+    pub(crate) fn render_damage_snapshot(&self) -> (DamageSnapshot, Vec<ScrollDamage>) {
+        let display_offset = self.display_offset();
+        self.damage.render_snapshot(display_offset)
+    }
+
     pub(crate) fn take_render_damage(&mut self) -> (DamageSnapshot, Vec<ScrollDamage>) {
         let display_offset = self.display_offset();
         self.damage.take_render(display_offset)

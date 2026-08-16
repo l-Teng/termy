@@ -1400,20 +1400,33 @@ impl Damage {
         DamageSnapshot::Partial(self.take_spans(display_offset))
     }
 
-    fn take_render(&mut self, display_offset: usize) -> (DamageSnapshot, Vec<ScrollDamage>) {
-        if display_offset != 0 && !self.scrolls.is_empty() {
-            self.mark_full();
-        }
-        if self.full {
-            self.full = false;
-            self.rows.fill(None);
-            self.scrolls.clear();
+    fn render_snapshot(&self, display_offset: usize) -> (DamageSnapshot, Vec<ScrollDamage>) {
+        if self.full || (display_offset != 0 && !self.scrolls.is_empty()) {
             return (DamageSnapshot::Full, Vec::new());
         }
 
-        let spans = self.take_spans(display_offset);
-        let scrolls = std::mem::take(&mut self.scrolls);
-        (DamageSnapshot::Partial(spans), scrolls)
+        let viewport_rows = self.rows.len();
+        let spans = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(screen_row, bounds)| {
+                let (left_col, right_col) = bounds.as_ref().copied()?;
+                let row = screen_row.checked_add(display_offset)?;
+                (row < viewport_rows).then_some(DirtySpan {
+                    row,
+                    left_col,
+                    right_col,
+                })
+            })
+            .collect();
+        (DamageSnapshot::Partial(spans), self.scrolls.clone())
+    }
+
+    fn take_render(&mut self, display_offset: usize) -> (DamageSnapshot, Vec<ScrollDamage>) {
+        let snapshot = self.render_snapshot(display_offset);
+        self.clear();
+        snapshot
     }
 
     fn clear(&mut self) {

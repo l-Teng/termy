@@ -192,7 +192,7 @@ pub(crate) struct ApplyResult {
 
 impl GraphicsState {
     pub(crate) fn apply_grid_effect(&mut self, effect: GridEffect) -> bool {
-        let changed = match effect {
+        match effect {
             GridEffect::ScrollUp {
                 alternate,
                 top,
@@ -205,10 +205,12 @@ impl GraphicsState {
             } => {
                 if !alternate && recorded_history {
                     if full_screen_region {
+                        let history_mapping_changed =
+                            history_before != history_after && self.has_screen_placements(false);
                         let dropped = history_before
                             .saturating_add(count)
                             .saturating_sub(history_after);
-                        self.rebase_primary_history(dropped)
+                        self.rebase_primary_history(dropped) || history_mapping_changed
                     } else {
                         let history_growth = history_after.saturating_sub(history_before);
                         let preserved = self
@@ -229,8 +231,13 @@ impl GraphicsState {
                 count,
                 history_size,
             } => self.scroll_region_down(alternate, top, bottom, count, history_size),
-            GridEffect::EnteredAlternate => self.clear_screen_placements(true),
-            GridEffect::ExitedAlternate => false,
+            GridEffect::EnteredAlternate => {
+                let visible_changed = self.has_screen_placements(false);
+                visible_changed | self.clear_screen_placements(true)
+            }
+            GridEffect::ExitedAlternate => {
+                self.has_screen_placements(false) || self.has_screen_placements(true)
+            }
             GridEffect::ClearViewport {
                 alternate,
                 history_size,
@@ -243,9 +250,7 @@ impl GraphicsState {
                 let alternate = self.clear_screen_placements(true);
                 primary || alternate
             }
-        };
-        self.bump_revision();
-        changed
+        }
     }
 
     pub(crate) fn apply(
@@ -401,33 +406,28 @@ impl GraphicsState {
 
         let requested_id = command.u32_value('i').unwrap_or(0);
         let image_number = command.u32_value('I').filter(|number| *number != 0);
-        let image_id = if requested_id == 0 {
-            self.allocate_anonymous_id()
+        let (image_id, next_anonymous_id) = if requested_id == 0 {
+            let (image_id, next_id) = self.next_anonymous_image_id();
+            (image_id, Some(next_id))
         } else {
-            requested_id
+            (requested_id, None)
         };
-        self.remove_image(image_id);
-        self.next_generation = self.next_generation.wrapping_add(1).max(1);
-        let byte_len = png.len();
-        self.images.insert(
-            image_id,
-            StoredImage {
-                png: Arc::from(png),
-                width,
-                height,
-                number: image_number,
-                generation: self.next_generation,
-            },
-        );
-        self.insertion_order.push_back(image_id);
-        self.stored_bytes = self.stored_bytes.saturating_add(byte_len);
-        if !self.enforce_quota(Some(image_id)) {
-            self.remove_image(image_id);
+        let next_generation = self.next_generation.wrapping_add(1).max(1);
+        let image = StoredImage {
+            png: Arc::from(png),
+            width,
+            height,
+            number: image_number,
+            generation: next_generation,
+        };
+        let byte_len = image.png.len();
+        let Some(evictions) = self.quota_evictions_for_replacement(image_id, byte_len) else {
             return failure(&command, "ENOSPC:image storage quota exceeded");
-        }
+        };
 
-        if command.char_value('a').unwrap_or('t') == 'T' {
-            let advance = match self.add_placement(
+        let staged_placement = if command.char_value('a').unwrap_or('t') == 'T' {
+            match Self::placement_for_image(
+                &image,
                 image_id,
                 &command,
                 context.cursor_col,
@@ -435,13 +435,28 @@ impl GraphicsState {
                 context.history_size,
                 context.size,
                 context.alternate,
+                self.next_serial.wrapping_add(1).max(1),
             ) {
-                Ok(advance) => advance,
-                Err(error) => {
-                    self.remove_image(image_id);
-                    return failure(&command, &error);
-                }
-            };
+                Ok(placement) => Some(placement),
+                Err(error) => return failure(&command, &error),
+            }
+        } else {
+            None
+        };
+
+        for evicted_id in evictions {
+            self.remove_image(evicted_id);
+        }
+        self.remove_image(image_id);
+        self.next_generation = next_generation;
+        if let Some(next_anonymous_id) = next_anonymous_id {
+            self.next_anonymous_id = next_anonymous_id;
+        }
+        self.images.insert(image_id, image);
+        self.insertion_order.push_back(image_id);
+        self.stored_bytes = self.stored_bytes.saturating_add(byte_len);
+        if let Some((placement, advance)) = staged_placement {
+            self.commit_placement(placement);
             if context.alternate == grid.alternate_screen_mode()
                 && let Some((cols, rows)) = advance
             {
@@ -486,13 +501,41 @@ impl GraphicsState {
         size: Size,
         alternate: bool,
     ) -> Result<Option<(u32, u32)>, String> {
-        if command.u32_value('U').unwrap_or(0) == 1 {
-            return Err("EINVAL:Unicode placeholder placements are not supported".into());
-        }
+        let next_serial = self.next_serial.wrapping_add(1).max(1);
         let image = self
             .images
             .get(&image_id)
             .ok_or_else(|| "ENOENT:image id not found".to_string())?;
+        let (placement, advance) = Self::placement_for_image(
+            image,
+            image_id,
+            command,
+            cursor_col,
+            cursor_row,
+            history_size,
+            size,
+            alternate,
+            next_serial,
+        )?;
+        self.commit_placement(placement);
+        Ok(advance)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn placement_for_image(
+        image: &StoredImage,
+        image_id: u32,
+        command: &GraphicsCommand,
+        cursor_col: usize,
+        cursor_row: usize,
+        history_size: usize,
+        size: Size,
+        alternate: bool,
+        serial: u64,
+    ) -> Result<(Placement, Option<(u32, u32)>), String> {
+        if command.u32_value('U').unwrap_or(0) == 1 {
+            return Err("EINVAL:Unicode placeholder placements are not supported".into());
+        }
         let source_x = command.u32_value('x').unwrap_or(0).min(image.width);
         let source_y = command.u32_value('y').unwrap_or(0).min(image.height);
         let source_width = command
@@ -546,16 +589,8 @@ impl GraphicsState {
         let occupied_cols = display_cols.unwrap_or(1);
         let occupied_rows = display_rows.unwrap_or(1);
         let placement_id = command.u32_value('p').unwrap_or(0);
-        if placement_id != 0 {
-            self.placements.retain(|placement| {
-                placement.alternate != alternate
-                    || placement.image_id != image_id
-                    || placement.placement_id != placement_id
-            });
-        }
-        self.next_serial = self.next_serial.wrapping_add(1).max(1);
-        self.placements.push(Placement {
-            serial: self.next_serial,
+        let placement = Placement {
+            serial,
             alternate,
             image_id,
             placement_id,
@@ -578,12 +613,26 @@ impl GraphicsState {
             x_offset: command.u32_value('X').unwrap_or(0),
             y_offset: command.u32_value('Y').unwrap_or(0),
             z_index: command.i32_value('z').unwrap_or(0),
-        });
+        };
+        let advance =
+            (command.u32_value('C').unwrap_or(0) == 0).then_some((occupied_cols, occupied_rows));
+        Ok((placement, advance))
+    }
+
+    fn commit_placement(&mut self, placement: Placement) {
+        if placement.placement_id != 0 {
+            self.placements.retain(|existing| {
+                existing.alternate != placement.alternate
+                    || existing.image_id != placement.image_id
+                    || existing.placement_id != placement.placement_id
+            });
+        }
+        self.next_serial = placement.serial;
+        self.placements.push(placement);
         if self.placements.len() > MAX_PLACEMENTS {
             let overflow = self.placements.len() - MAX_PLACEMENTS;
             self.placements.drain(..overflow);
         }
-        Ok((command.u32_value('C').unwrap_or(0) == 0).then_some((occupied_cols, occupied_rows)))
     }
 
     fn delete(&mut self, command: &GraphicsCommand, grid: &Grid) -> ApplyResult {
@@ -744,6 +793,18 @@ impl GraphicsState {
 
     pub(crate) fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub(crate) fn has_placements(&self) -> bool {
+        !self.placements.is_empty()
+    }
+
+    pub(crate) fn has_primary_placements(&self) -> bool {
+        self.has_screen_placements(false)
+    }
+
+    pub(crate) fn clear_pending_upload(&mut self) {
+        self.pending = None;
     }
 
     pub(crate) fn render_placements(&self, grid: &Grid) -> Vec<GraphicsRenderPlacement> {
@@ -909,6 +970,12 @@ impl GraphicsState {
         changed
     }
 
+    fn has_screen_placements(&self, alternate: bool) -> bool {
+        self.placements
+            .iter()
+            .any(|placement| placement.alternate == alternate)
+    }
+
     fn clear_screen_placements(&mut self, alternate: bool) -> bool {
         let before = self.placements.len();
         self.placements
@@ -967,7 +1034,7 @@ impl GraphicsState {
             .map(|(image_id, _)| *image_id)
     }
 
-    fn allocate_anonymous_id(&mut self) -> u32 {
+    fn next_anonymous_image_id(&self) -> (u32, u32) {
         let mut candidate = if self.next_anonymous_id == 0 {
             u32::MAX
         } else {
@@ -975,8 +1042,7 @@ impl GraphicsState {
         };
         for _ in 0..=self.images.len() {
             if !self.images.contains_key(&candidate) {
-                self.next_anonymous_id = previous_image_id(candidate);
-                return candidate;
+                return (candidate, previous_image_id(candidate));
             }
             candidate = previous_image_id(candidate);
         }
@@ -984,6 +1050,54 @@ impl GraphicsState {
         unreachable!("the bounded image store always has a free image ID")
     }
 
+    #[cfg(test)]
+    fn allocate_anonymous_id(&mut self) -> u32 {
+        let (image_id, next_id) = self.next_anonymous_image_id();
+        self.next_anonymous_id = next_id;
+        image_id
+    }
+
+    fn quota_evictions_for_replacement(&self, image_id: u32, new_bytes: usize) -> Option<Vec<u32>> {
+        let old_bytes = self
+            .images
+            .get(&image_id)
+            .map_or(0, |image| image.png.len());
+        let mut stored_bytes = self
+            .stored_bytes
+            .saturating_sub(old_bytes)
+            .saturating_add(new_bytes);
+        let mut image_count = self.images.len() + usize::from(!self.images.contains_key(&image_id));
+        if stored_bytes <= MAX_STORED_IMAGE_BYTES && image_count <= MAX_STORED_IMAGES {
+            return Some(Vec::new());
+        }
+
+        let placed = self
+            .placements
+            .iter()
+            .map(|placement| placement.image_id)
+            .collect::<HashSet<_>>();
+        let mut evictions = Vec::new();
+        for candidate in self
+            .insertion_order
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != image_id && !placed.contains(candidate))
+        {
+            if stored_bytes <= MAX_STORED_IMAGE_BYTES && image_count <= MAX_STORED_IMAGES {
+                break;
+            }
+            let Some(image) = self.images.get(&candidate) else {
+                continue;
+            };
+            stored_bytes = stored_bytes.saturating_sub(image.png.len());
+            image_count = image_count.saturating_sub(1);
+            evictions.push(candidate);
+        }
+        (stored_bytes <= MAX_STORED_IMAGE_BYTES && image_count <= MAX_STORED_IMAGES)
+            .then_some(evictions)
+    }
+
+    #[cfg(test)]
     fn enforce_quota(&mut self, protected: Option<u32>) -> bool {
         if self.stored_bytes <= MAX_STORED_IMAGE_BYTES && self.images.len() <= MAX_STORED_IMAGES {
             return true;

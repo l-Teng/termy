@@ -321,6 +321,45 @@ fn stored_image_count_is_bounded_and_evicts_oldest_unplaced_image() {
 }
 
 #[test]
+fn failed_image_replacement_keeps_the_previous_image_and_placements() {
+    let size = test_size();
+    let mut state = GraphicsState::default();
+    let mut grid = Grid::new(size.cols, size.rows, 100, CursorStyle::Block);
+    let first = state.apply(
+        command("a=T,f=32,s=1,v=1,i=7,c=2,r=1,C=1,q=1", &[255, 0, 0, 255]),
+        &mut grid,
+        size,
+    );
+    assert!(first.changed);
+    let image = state.images.get(&7).unwrap().clone();
+    let placements = state.placements.clone();
+
+    let invalid = state.apply(
+        command("a=T,f=32,s=1,v=1,i=7,U=1,C=1,q=1", &[0, 255, 0, 255]),
+        &mut grid,
+        size,
+    );
+    assert!(!invalid.changed);
+    assert_eq!(state.images.get(&7).unwrap().png, image.png);
+    assert_eq!(state.placements.len(), placements.len());
+    assert_eq!(state.placements[0].serial, placements[0].serial);
+
+    state.stored_bytes = MAX_STORED_IMAGE_BYTES.saturating_add(image.png.len());
+    let quota = state.apply(
+        command("a=T,f=32,s=1,v=1,i=7,C=1,q=1", &[0, 0, 255, 255]),
+        &mut grid,
+        size,
+    );
+    assert!(!quota.changed);
+    assert!(
+        String::from_utf8_lossy(&quota.replies).contains("ENOSPC:image storage quota exceeded")
+    );
+    assert_eq!(state.images.get(&7).unwrap().png, image.png);
+    assert_eq!(state.placements.len(), placements.len());
+    assert_eq!(state.placements[0].serial, placements[0].serial);
+}
+
+#[test]
 fn anonymous_image_ids_wrap_without_stalling_at_one() {
     let mut state = GraphicsState {
         next_anonymous_id: 1,

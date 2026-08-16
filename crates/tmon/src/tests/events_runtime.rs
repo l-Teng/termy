@@ -350,6 +350,34 @@ fn kitty_graphics_are_placed_at_the_cursor_when_the_command_arrives() {
 }
 
 #[test]
+fn kitty_graphics_revision_does_not_churn_without_graphics() {
+    let terminal = graphics_test_terminal(8);
+    let revision = terminal.kitty_graphics_revision();
+
+    terminal.feed_output(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+    terminal.resize(Size {
+        cols: 6,
+        rows: 3,
+        ..terminal.size()
+    });
+    assert!(terminal.scroll_display(1));
+    assert!(terminal.scroll_to_bottom());
+
+    assert_eq!(terminal.kitty_graphics_revision(), revision);
+}
+
+#[test]
+fn kitty_graphics_revision_bumps_once_for_an_effect_batch() {
+    let terminal = graphics_test_terminal(8);
+    terminal.feed_output(b"\x1b[4;1H\x1b_Ga=T,f=32,s=1,v=1,i=30,c=2,r=1,C=1;AQID/w==\x1b\\");
+    let revision = terminal.kitty_graphics_revision();
+
+    terminal.feed_output(b"\x1b[4;1H\n\n");
+
+    assert_eq!(terminal.kitty_graphics_revision(), revision.wrapping_add(1));
+}
+
+#[test]
 fn kitty_graphics_revision_and_visible_placements_are_atomic() {
     let terminal = graphics_test_terminal(8);
     assert_eq!(terminal.kitty_graphics_snapshot(), (0, Vec::new()));
@@ -456,6 +484,60 @@ fn kitty_graphics_cursor_advance_tracks_bottom_scrolls() {
         assert_eq!(placements[0].viewport_row, 0);
         assert_eq!(terminal.cursor_position(), (2, 3));
     }
+}
+
+#[test]
+fn kitty_graphics_revision_tracks_resize_geometry_and_visibility() {
+    let terminal = graphics_test_terminal(8);
+    terminal.feed_output(b"\x1b[2;7H\x1b_Ga=T,f=32,s=1,v=1,i=18,C=1;AQID/w==\x1b\\");
+    let initial_revision = terminal.kitty_graphics_revision();
+
+    terminal.resize(Size {
+        cols: 6,
+        ..terminal.size()
+    });
+    let width_revision = terminal.kitty_graphics_revision();
+    assert_eq!(width_revision, initial_revision.wrapping_add(1));
+    assert!(terminal.kitty_graphics_placements().is_empty());
+
+    terminal.resize(Size {
+        cols: 8,
+        ..terminal.size()
+    });
+    let revealed_revision = terminal.kitty_graphics_revision();
+    assert_eq!(revealed_revision, width_revision.wrapping_add(1));
+    assert_eq!(terminal.kitty_graphics_placements().len(), 1);
+
+    terminal.resize(Size {
+        cell_width: 20.0,
+        cell_height: 40.0,
+        ..terminal.size()
+    });
+    assert_eq!(
+        terminal.kitty_graphics_revision(),
+        revealed_revision.wrapping_add(1)
+    );
+}
+
+#[test]
+fn kitty_graphics_revision_tracks_viewport_scrolling() {
+    let terminal = graphics_test_terminal(8);
+    terminal.feed_output(b"\x1b[2;1H\x1b_Ga=T,f=32,s=1,v=1,i=19,c=2,r=1,C=1;AQID/w==\x1b\\");
+    terminal.feed_output(b"\x1b[4;1H\n\n");
+    let revision = terminal.kitty_graphics_revision();
+    assert!(terminal.kitty_graphics_placements().is_empty());
+
+    assert!(terminal.scroll_display(1));
+    let scrolled_revision = terminal.kitty_graphics_revision();
+    assert_eq!(scrolled_revision, revision.wrapping_add(1));
+    assert_eq!(terminal.kitty_graphics_placements().len(), 1);
+
+    assert!(terminal.scroll_to_bottom());
+    assert_eq!(
+        terminal.kitty_graphics_revision(),
+        scrolled_revision.wrapping_add(1)
+    );
+    assert!(terminal.kitty_graphics_placements().is_empty());
 }
 
 #[test]

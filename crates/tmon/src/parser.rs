@@ -375,12 +375,25 @@ impl Parser {
         self.graphics.render_placements(grid)
     }
 
+    pub(crate) fn has_graphics_placements(&self) -> bool {
+        self.graphics.has_placements()
+    }
+
+    pub(crate) fn has_primary_graphics_placements(&self) -> bool {
+        self.graphics.has_primary_placements()
+    }
+
+    pub(crate) fn bump_graphics_revision(&mut self) {
+        self.graphics.bump_revision();
+    }
+
     pub(crate) fn sync_grid_effects(&mut self, grid: &mut Grid) -> bool {
         let mut changed = false;
         while let Some(effect) = grid.pop_effect() {
             changed |= self.graphics.apply_grid_effect(effect);
         }
         if changed {
+            self.graphics.bump_revision();
             grid.mark_full_damage();
         }
         changed
@@ -502,6 +515,7 @@ impl Parser {
         self.kitty.clear();
         self.kitty_oversized = false;
         self.kitty_payload_started = false;
+        self.graphics.clear_pending_upload();
         self.utf8.reset();
         self.last_printed = None;
         self.single_shift = None;

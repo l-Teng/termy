@@ -921,11 +921,15 @@ impl Terminal {
                 size: engine_size,
                 render_generation,
             } = &mut *engine;
+            let graphics_can_change = parser.has_graphics_placements();
             grid.resize(size.cols, size.rows);
             *engine_size = size;
             parser.set_size(size);
             grid.set_cell_metrics(size.cell_width, size.cell_height);
-            parser.sync_grid_effects(grid);
+            let graphics_changed = parser.sync_grid_effects(grid);
+            if graphics_can_change && !graphics_changed {
+                parser.bump_graphics_revision();
+            }
             *render_generation = render_generation.wrapping_add(1);
         }
         #[cfg(any(
@@ -1008,9 +1012,13 @@ impl Terminal {
             .engine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let graphics_can_change = engine.parser.has_primary_graphics_placements();
         let changed = engine.grid.scroll_display(delta_lines);
         if changed {
             engine.bump_render_generation();
+            if graphics_can_change {
+                engine.parser.bump_graphics_revision();
+            }
         }
         changed
     }
@@ -1020,9 +1028,13 @@ impl Terminal {
             .engine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let graphics_can_change = engine.parser.has_primary_graphics_placements();
         let changed = engine.grid.scroll_to_bottom();
         if changed {
             engine.bump_render_generation();
+            if graphics_can_change {
+                engine.parser.bump_graphics_revision();
+            }
         }
         changed
     }
@@ -1126,6 +1138,8 @@ impl Terminal {
     }
 
     /// Visit one coherent renderer update and consume only the represented damage.
+    ///
+    /// The callback runs under the engine lock and must not call back into this terminal.
     pub fn visit_frame_update(
         &self,
         mut visitor: impl FnMut(usize, usize, i32, usize, &Cell, Option<Combining<'_>>),
@@ -1144,10 +1158,9 @@ impl Terminal {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (damage, scrolls) = if force_full {
-            engine.grid.clear_damage();
             (DamageSnapshot::Full, Vec::new())
         } else {
-            engine.grid.take_render_damage()
+            engine.grid.render_damage_snapshot()
         };
         let ranges = match &damage {
             DamageSnapshot::Full => (0..usize::from(engine.size.rows))
@@ -1166,6 +1179,7 @@ impl Terminal {
             display_offset,
             history_size: engine.grid.history_size(),
         };
+        engine.grid.clear_damage();
         FrameUpdate {
             render: RenderDamageSnapshot {
                 damage,

@@ -380,6 +380,36 @@ fn coherent_frame_update_visits_and_clears_only_represented_damage() {
 }
 
 #[test]
+fn coherent_frame_update_preserves_damage_when_the_visitor_panics() {
+    let terminal = Terminal::new_display(
+        Size {
+            cols: 4,
+            rows: 2,
+            ..Size::default()
+        },
+        Config::default(),
+    );
+    let _ = terminal.visit_frame_update_with_options(true, |_, _, _, _, _, _| {});
+    terminal.feed_output(b"a\r\nb\r\nc");
+    let expected = terminal
+        .engine
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .grid
+        .render_damage_snapshot();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        terminal.visit_frame_update(|_, _, _, _, _, _| panic!("visitor failed"));
+    }));
+    assert!(result.is_err());
+
+    let mut visited = 0;
+    let retry = terminal.visit_frame_update(|_, _, _, _, _, _| visited += 1);
+    assert_eq!((retry.render.damage, retry.render.scrolls), expected);
+    assert!(visited > 0);
+}
+
+#[test]
 fn coherent_frame_update_holds_output_until_its_visit_finishes() {
     let terminal = Arc::new(Terminal::new_display(
         Size {
@@ -1016,6 +1046,32 @@ fn hydration_does_not_leak_incomplete_parser_state_into_live_output() {
 }
 
 #[test]
+fn hydration_discards_a_completed_multipart_kitty_prefix_before_live_output() {
+    let terminal = Terminal::new_display(
+        Size {
+            cols: 12,
+            rows: 2,
+            ..Size::default()
+        },
+        Config::default(),
+    );
+    terminal.hydrate_output(b"\x1b_Ga=t,f=32,s=1,v=1,i=90,m=1,q=1;AQI=\x1b\\");
+    assert_eq!(terminal.kitty_graphics_revision(), 0);
+
+    terminal.feed_output(b"\x1b_Ga=T,f=32,s=1,v=1,i=91,C=1;AQID/w==\x1b\\");
+    let (revision, placements) = terminal.kitty_graphics_snapshot();
+
+    assert_eq!(revision, 1);
+    assert_eq!(placements.len(), 1);
+    assert_eq!(placements[0].image_id, 91);
+    assert!(
+        terminal
+            .drain_protocol_replies()
+            .ends_with(b"\x1b_Gi=91;OK\x1b\\")
+    );
+}
+
+#[test]
 fn hydration_keeps_completed_style_charset_title_and_graphics_state() {
     let terminal = Terminal::new_display(
         Size {
@@ -1028,12 +1084,14 @@ fn hydration_keeps_completed_style_charset_title_and_graphics_state() {
     terminal.hydrate_output(
         b"\x1b[31m\x1b)0\x0e\x1b]2;saved\x07\x1b_Ga=T,f=32,s=1,v=1,i=91,C=1;/wAA/w==\x1b\\",
     );
+    let hydrated_graphics = terminal.kitty_graphics_snapshot();
     terminal.feed_output(b"q\x1b[22t\x1b]2;temporary\x07\x1b[23t");
 
     let snapshot = terminal.snapshot();
     assert_eq!(snapshot.cells[0].character, '\u{2500}');
     assert_eq!(snapshot.cells[0].foreground, Color::Indexed(1));
-    assert_eq!(terminal.kitty_graphics_placements().len(), 1);
+    assert_eq!(terminal.kitty_graphics_snapshot(), hydrated_graphics);
+    assert_eq!(hydrated_graphics.1.len(), 1);
     assert!(
         terminal
             .drain_events()
