@@ -15,7 +15,7 @@ shared domain data, depend on the smallest domain crate that owns that data.
 
 ```sh
 cargo test -p xtask
-cargo test -p xtask --example engine_compare
+TERMY_CORE_TEST_BACKEND=alacritty cargo test -p xtask --example engine_compare
 cargo run -p xtask -- generate-keybindings-doc --check
 cargo run -p xtask -- generate-config-doc --check
 cargo run -p xtask -- check-dependency-policy

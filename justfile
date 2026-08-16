@@ -15,7 +15,7 @@ benchmark-tmon:
     {
       rustc --version
       echo
-      cargo run --locked --quiet -p xtask --release --example engine_compare
+      TERMY_CORE_TEST_BACKEND=alacritty cargo run --locked --quiet -p xtask --release --example engine_compare
     } 2>&1 | tee "$report"
     gate_status=0
     set +e
@@ -27,7 +27,7 @@ benchmark-tmon:
     set -e
     {
       echo
-      TMON_BENCH_ALLOCATIONS_ONLY=1 cargo run --locked --quiet -p xtask --release --example engine_compare --features benchmark-allocations
+      TERMY_CORE_TEST_BACKEND=alacritty TMON_BENCH_ALLOCATIONS_ONLY=1 cargo run --locked --quiet -p xtask --release --example engine_compare --features benchmark-allocations
     } 2>&1 | tee -a "$report"
     exit "$gate_status"
 

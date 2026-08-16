@@ -2873,6 +2873,12 @@ mod alacritty_backend {
 }
 
 impl Terminal {
+    /// The active engine name for diagnostics. Do not branch application
+    /// behavior on this value; construction policy remains owned by core.
+    pub fn engine_label(&self) -> &'static str {
+        self.backend.engine_label()
+    }
+
     /// Create a new terminal with the given size.
     pub fn new(
         size: TerminalSize,

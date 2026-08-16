@@ -7,17 +7,11 @@ use std::ops::Deref;
 pub(super) enum Terminal {
     Tmux(PaneTerminal),
     Native(NativeTerminalInstance),
-    Tmon(TmonTerminalInstance),
 }
 
 pub(super) struct NativeTerminalInstance {
     pub(super) wakeup_id: NativeTerminalWakeupId,
     pub(super) terminal: Mutex<NativeTerminal>,
-}
-
-pub(super) struct TmonTerminalInstance {
-    pub(super) wakeup_id: NativeTerminalWakeupId,
-    pub(super) terminal: tmon::Terminal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,117 +81,87 @@ impl TerminalRenderDamageSnapshot {
 
 #[derive(Clone, Copy)]
 pub(super) enum TerminalCellRef<'a> {
-    Alacritty(&'a alacritty_terminal::term::cell::Cell),
-    Core(&'a termy_core::TerminalRenderCell),
-    Tmon(&'a tmon::Cell, Option<tmon::Combining<'a>>),
+    Tmux(&'a alacritty_terminal::term::cell::Cell),
+    Native(&'a termy_core::TerminalRenderCell),
 }
 
 impl<'a> From<&'a alacritty_terminal::term::cell::Cell> for TerminalCellRef<'a> {
     fn from(cell: &'a alacritty_terminal::term::cell::Cell) -> Self {
-        Self::Alacritty(cell)
+        Self::Tmux(cell)
     }
 }
 
 impl<'a> From<&'a termy_core::TerminalRenderCell> for TerminalCellRef<'a> {
     fn from(cell: &'a termy_core::TerminalRenderCell) -> Self {
-        Self::Core(cell)
-    }
-}
-
-impl<'a> From<&'a tmon::Cell> for TerminalCellRef<'a> {
-    fn from(cell: &'a tmon::Cell) -> Self {
-        Self::Tmon(cell, None)
+        Self::Native(cell)
     }
 }
 
 impl TerminalCellRef<'_> {
     pub(super) fn character(self) -> char {
         match self {
-            Self::Alacritty(cell) => cell.c,
-            Self::Core(cell) => cell.text.chars().next().unwrap_or('\0'),
-            Self::Tmon(cell, _) => cell.character,
+            Self::Tmux(cell) => cell.c,
+            Self::Native(cell) => cell.text.chars().next().unwrap_or('\0'),
         }
     }
 
     pub(super) fn is_wide_spacer(self) -> bool {
         match self {
-            Self::Alacritty(cell) => cell
+            Self::Tmux(cell) => cell
                 .flags
                 .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-            Self::Core(cell) => cell.wide_character_spacer || cell.leading_wide_character_spacer,
-            Self::Tmon(cell, _) => cell.wide_spacer() || cell.leading_wide_spacer(),
+            Self::Native(cell) => cell.wide_character_spacer || cell.leading_wide_character_spacer,
         }
     }
 
     pub(super) fn is_trailing_wide_spacer(self) -> bool {
         match self {
-            Self::Alacritty(cell) => cell.flags.contains(Flags::WIDE_CHAR_SPACER),
-            Self::Core(cell) => cell.wide_character_spacer,
-            Self::Tmon(cell, _) => cell.wide_spacer(),
+            Self::Tmux(cell) => cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+            Self::Native(cell) => cell.wide_character_spacer,
         }
     }
 
     pub(super) fn is_hidden(self) -> bool {
         match self {
-            Self::Alacritty(cell) => cell.flags.contains(Flags::HIDDEN),
-            Self::Core(cell) => cell.hidden,
-            Self::Tmon(cell, _) => cell.attributes.hidden(),
+            Self::Tmux(cell) => cell.flags.contains(Flags::HIDDEN),
+            Self::Native(cell) => cell.hidden,
         }
     }
 
     pub(super) fn combining(self) -> Option<SharedString> {
         match self {
-            // Native core terminals still represent the legacy Alacritty path
-            // during this rollout stage. Keep its historical desktop behavior
-            // until both native engines converge on the core render contract.
-            Self::Alacritty(_) | Self::Core(_) => None,
-            Self::Tmon(_, combining) => combining
-                .map(tmon::Combining::to_owned_string)
+            Self::Tmux(_) => None,
+            Self::Native(cell) => cell_text_suffix(cell)
+                .map(str::to_owned)
                 .map(SharedString::from),
         }
     }
 
     pub(super) fn append_combining_to(self, text: &mut String) {
         match self {
-            Self::Alacritty(_) | Self::Core(_) => {}
-            Self::Tmon(_, combining) => {
-                if let Some(combining) = combining {
-                    combining.append_to(text);
+            Self::Tmux(_) => {}
+            Self::Native(cell) => {
+                if let Some(suffix) = cell_text_suffix(cell) {
+                    text.push_str(suffix);
                 }
             }
         }
     }
 }
 
-pub(super) fn tmon_engine_requested(value: Option<&std::ffi::OsStr>) -> bool {
-    value.is_some_and(|value| value == "1")
-}
-
-pub(super) fn tmon_engine_available() -> bool {
-    tmon::native_pty_available()
-}
-
-pub(super) fn tmon_engine_enabled_for(value: Option<&std::ffi::OsStr>, available: bool) -> bool {
-    tmon_engine_requested(value) && available
-}
-
-pub(super) fn tmon_engine_enabled(value: Option<&std::ffi::OsStr>) -> bool {
-    tmon_engine_enabled_for(value, tmon_engine_available())
+fn cell_text_suffix(cell: &termy_core::TerminalRenderCell) -> Option<&str> {
+    let text = cell.text.as_str();
+    let suffix_start = text.chars().next().map_or(0, char::len_utf8);
+    text.get(suffix_start..).filter(|suffix| !suffix.is_empty())
 }
 
 pub(super) fn terminal_engine_label(terminal: Option<&Terminal>) -> &'static str {
     match terminal {
-        Some(Terminal::Tmon(_)) => "tmon",
-        Some(Terminal::Native(_) | Terminal::Tmux(_)) => "alacritty",
+        Some(Terminal::Native(terminal)) => terminal
+            .lock()
+            .map_or("unknown", |terminal| terminal.engine_label()),
+        Some(Terminal::Tmux(_)) => "alacritty",
         None => "-",
-    }
-}
-
-impl Deref for TmonTerminalInstance {
-    type Target = tmon::Terminal;
-
-    fn deref(&self) -> &Self::Target {
-        &self.terminal
     }
 }
 
@@ -256,19 +220,22 @@ mod tests {
     use super::TerminalCellRef;
 
     #[test]
-    fn core_cells_keep_legacy_native_combining_policy_until_convergence() {
+    fn core_cells_preserve_native_combining_text_after_convergence() {
         let terminal = termy_core::Terminal::new_display(termy_core::TerminalSize::default(), None);
         terminal.feed_output("e\u{301}".as_bytes());
 
         let mut observed = false;
         terminal.visit_viewport_cells(|_, _, _, cell| {
-            let cell = TerminalCellRef::Core(cell);
+            let cell = TerminalCellRef::Native(cell);
             if cell.character() == 'e' {
                 observed = true;
-                assert!(cell.combining().is_none());
+                assert_eq!(
+                    cell.combining().map(|text| text.to_string()).as_deref(),
+                    Some("\u{301}")
+                );
                 let mut suffix = String::new();
                 cell.append_combining_to(&mut suffix);
-                assert!(suffix.is_empty());
+                assert_eq!(suffix, "\u{301}");
             }
         });
         assert!(observed);

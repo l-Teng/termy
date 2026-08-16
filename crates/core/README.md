@@ -16,10 +16,11 @@ TERMY_CORE_TEST_BACKEND=alacritty cargo test -p termy_core
 TERMY_CORE_TEST_BACKEND=tmon cargo test -p termy_core
 ```
 
-Display-only terminals use Tmon; native terminals retain Alacritty during the
-migration window. The two explicit commands force the semantic suite through
-one private backend at a time. The selector is test-only plumbing, not a
-supported embedder or desktop configuration surface.
+Display-only terminals use Tmon. Native terminals retain Alacritty unless the
+desktop rollout's exact `TERMY_EXPERIMENTAL_TMON_ENGINE=1` opt-in is present.
+The two explicit commands force the semantic suite through one private backend
+at a time. `TERMY_CORE_TEST_BACKEND` is test-only plumbing, not a supported
+embedder or desktop configuration surface.
 
 ## Forbidden Dependencies
 

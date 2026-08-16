@@ -8,7 +8,7 @@ This crate owns the GPUI app shell, windows, titlebar/chrome, menus, settings, o
 
 Important internal areas:
 
-- `src/terminal_view/`: terminal surface, tabs, panes, search, command palette, input, rendering, persistence, and runtime coordination. `session.rs` owns coherent tab/workspace/pane state; `backend.rs` owns the Alacritty/Tmon/tmux facade and low-level render adapters.
+- `src/terminal_view/`: terminal surface, tabs, panes, search, command palette, input, rendering, persistence, and runtime coordination. `session.rs` owns coherent tab/workspace/pane state; `backend.rs` owns the core-native/tmux facade and the source-specific cell presentation policy.
 - `src/settings_view/`: settings UI and state application.
 - `src/onboarding/`: first-run and import flows.
 - `src/config/`: app-owned config I/O and mutation.

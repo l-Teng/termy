@@ -196,21 +196,6 @@ struct InspectorTerminalState {
 
 impl Terminal {
     fn inspector_state_snapshot(&self) -> InspectorTerminalState {
-        if let Self::Tmon(terminal) = self {
-            let state = terminal.state_snapshot();
-            return InspectorTerminalState {
-                size: tmon_adapter::terminal_size(state.size),
-                display_offset: state.display_offset,
-                history_size: state.history_size,
-                alternate_screen: state.alternate_screen_mode,
-                bracketed_paste: state.bracketed_paste_mode,
-                mouse_mode: tmon_adapter::mouse_mode(state.mouse_mode),
-                keyboard_mode: tmon_adapter::keyboard_mode(state.keyboard_mode),
-                cursor_state: state.cursor_state.map(tmon_adapter::cursor_state),
-                child_pid: state.child_pid,
-            };
-        }
-
         let size = self.size();
         let (display_offset, history_size) = self.scroll_state();
         InspectorTerminalState {

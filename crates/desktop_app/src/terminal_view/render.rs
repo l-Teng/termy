@@ -211,30 +211,35 @@ fn cell_text_attributes(flags: Flags) -> CellTextAttributes {
 
 fn terminal_cell_text_attributes(cell: TerminalCellRef<'_>) -> CellTextAttributes {
     match cell {
-        TerminalCellRef::Alacritty(cell) => cell_text_attributes(cell.flags),
-        TerminalCellRef::Core(cell) => CellTextAttributes {
+        TerminalCellRef::Tmux(cell) => cell_text_attributes(cell.flags),
+        TerminalCellRef::Native(cell) => CellTextAttributes {
             bold: cell.bold,
             italic: cell.italic,
             strikethrough: cell.strikethrough,
         },
-        TerminalCellRef::Tmon(cell, _) => CellTextAttributes {
-            bold: cell.attributes.bold(),
-            italic: cell.attributes.italic(),
-            strikethrough: cell.attributes.strikethrough(),
-        },
     }
 }
 
-fn tmon_terminal_underline_style(
-    style: tmon::UnderlineStyle,
+fn core_terminal_underline_style(
+    style: termy_core::TerminalUnderlineStyle,
 ) -> Option<termy_terminal_ui::TerminalUnderlineStyle> {
     Some(match style {
-        tmon::UnderlineStyle::None => return None,
-        tmon::UnderlineStyle::Single => termy_terminal_ui::TerminalUnderlineStyle::Single,
-        tmon::UnderlineStyle::Double => termy_terminal_ui::TerminalUnderlineStyle::Double,
-        tmon::UnderlineStyle::Curly => termy_terminal_ui::TerminalUnderlineStyle::Curly,
-        tmon::UnderlineStyle::Dotted => termy_terminal_ui::TerminalUnderlineStyle::Dotted,
-        tmon::UnderlineStyle::Dashed => termy_terminal_ui::TerminalUnderlineStyle::Dashed,
+        termy_core::TerminalUnderlineStyle::None => return None,
+        termy_core::TerminalUnderlineStyle::Single => {
+            termy_terminal_ui::TerminalUnderlineStyle::Single
+        }
+        termy_core::TerminalUnderlineStyle::Double => {
+            termy_terminal_ui::TerminalUnderlineStyle::Double
+        }
+        termy_core::TerminalUnderlineStyle::Curly => {
+            termy_terminal_ui::TerminalUnderlineStyle::Curly
+        }
+        termy_core::TerminalUnderlineStyle::Dotted => {
+            termy_terminal_ui::TerminalUnderlineStyle::Dotted
+        }
+        termy_core::TerminalUnderlineStyle::Dashed => {
+            termy_terminal_ui::TerminalUnderlineStyle::Dashed
+        }
     })
 }
 
@@ -243,31 +248,23 @@ fn terminal_cell_underline(
     context: PaneCellBuildContext<'_>,
 ) -> Option<termy_terminal_ui::TerminalUnderline> {
     match cell {
-        // Preserve the existing native/tmux rendering contract: every
-        // Alacritty underline variant is painted as a single underline using
-        // the effective foreground. Native underline colors intentionally
-        // remain outside this adapter boundary for now.
-        TerminalCellRef::Alacritty(cell) => cell.flags.intersects(Flags::ALL_UNDERLINES).then_some(
+        // Preserve the existing tmux presentation policy until PaneTerminal
+        // moves behind core: every underline variant is painted as a single
+        // underline using the effective foreground.
+        TerminalCellRef::Tmux(cell) => cell.flags.intersects(Flags::ALL_UNDERLINES).then_some(
             termy_terminal_ui::TerminalUnderline {
                 style: termy_terminal_ui::TerminalUnderlineStyle::Single,
                 color: None,
             },
         ),
-        TerminalCellRef::Core(cell) => (cell.underline_style
-            != termy_core::TerminalUnderlineStyle::None)
-            .then_some(termy_terminal_ui::TerminalUnderline {
-                style: termy_terminal_ui::TerminalUnderlineStyle::Single,
-                color: None,
-            }),
-        TerminalCellRef::Tmon(cell, _) => {
-            let style = tmon_terminal_underline_style(cell.attributes.underline_style())?;
+        TerminalCellRef::Native(cell) => {
+            let style = core_terminal_underline_style(cell.underline_style)?;
             let color = cell.underline_color.map(|color| {
-                resolve_tmon_color(
+                resolve_core_color(
                     color,
                     context.colors.foreground,
                     context.colors,
-                    context.tmon_palette,
-                    context.tmon_palette.and_then(tmon::Palette::foreground),
+                    context.core_palette,
                 )
                 .into()
             });
@@ -503,7 +500,6 @@ fn paint_damage_from_scrolls_and_spans(
 struct PaneCellBuildContext<'a> {
     colors: &'a TerminalColors,
     core_palette: Option<&'a TerminalPalette>,
-    tmon_palette: Option<&'a tmon::Palette>,
     effective_background_opacity: f32,
     background_opacity_cells: bool,
     cell_color_transform: CellColorTransform,
@@ -584,7 +580,7 @@ fn resolve_cell_colors<'a>(
 ) -> ResolvedCellColors {
     let cell_content = cell_content.into();
     let (mut fg, mut bg, uses_terminal_default_bg, dim, character) = match cell_content {
-        TerminalCellRef::Alacritty(cell) => {
+        TerminalCellRef::Tmux(cell) => {
             let mut fg_source = cell.fg;
             let mut bg_source = cell.bg;
             if cell.flags.contains(Flags::INVERSE) {
@@ -598,7 +594,7 @@ fn resolve_cell_colors<'a>(
                 cell.c,
             )
         }
-        TerminalCellRef::Core(cell) => {
+        TerminalCellRef::Native(cell) => {
             let mut fg_source = cell.foreground;
             let mut bg_source = cell.background;
             if cell.inverse {
@@ -619,42 +615,11 @@ fn resolve_cell_colors<'a>(
                 ),
                 matches!(
                     bg_source,
-                    termy_core::TerminalRenderColor::DefaultBackground
+                    termy_core::TerminalRenderColor::DefaultForeground
+                        | termy_core::TerminalRenderColor::DefaultBackground
                 ),
                 cell.dim,
                 cell.text.chars().next().unwrap_or('\0'),
-            )
-        }
-        TerminalCellRef::Tmon(cell, _) => {
-            let inverse = cell.attributes.inverse();
-            let uses_terminal_default_bg = if inverse {
-                matches!(cell.foreground, tmon::Color::Default)
-            } else {
-                matches!(cell.background, tmon::Color::Default)
-            };
-            let mut fg = resolve_tmon_color(
-                cell.foreground,
-                context.colors.foreground,
-                context.colors,
-                context.tmon_palette,
-                context.tmon_palette.and_then(tmon::Palette::foreground),
-            );
-            let mut bg = resolve_tmon_color(
-                cell.background,
-                context.colors.background,
-                context.colors,
-                context.tmon_palette,
-                context.tmon_palette.and_then(tmon::Palette::background),
-            );
-            if inverse {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            (
-                fg,
-                bg,
-                uses_terminal_default_bg,
-                cell.attributes.dim(),
-                cell.character,
             )
         }
     };
@@ -685,31 +650,6 @@ fn resolve_cell_colors<'a>(
         fg,
         bg,
         uses_terminal_default_bg,
-    }
-}
-
-fn resolve_tmon_color(
-    color: tmon::Color,
-    default: gpui::Rgba,
-    colors: &TerminalColors,
-    palette: Option<&tmon::Palette>,
-    default_override: Option<tmon::Rgb>,
-) -> gpui::Rgba {
-    match color {
-        tmon::Color::Default => default_override.map_or(default, tmon_rgb_to_rgba),
-        tmon::Color::Indexed(index) => palette
-            .and_then(|palette| palette.indexed(index))
-            .map_or_else(|| colors.indexed_color(index), tmon_rgb_to_rgba),
-        tmon::Color::Rgb { r, g, b } => tmon_rgb_to_rgba(tmon::Rgb { r, g, b }),
-    }
-}
-
-fn tmon_rgb_to_rgba(color: tmon::Rgb) -> gpui::Rgba {
-    gpui::Rgba {
-        r: f32::from(color.r) / 255.0,
-        g: f32::from(color.g) / 255.0,
-        b: f32::from(color.b) / 255.0,
-        a: 1.0,
     }
 }
 
@@ -3329,11 +3269,7 @@ impl Render for TerminalView {
                 let alternate_screen_mode = pane.last_alternate_screen.get();
                 let damage = terminal.take_render_damage_snapshot();
                 let core_palette = terminal.core_palette();
-                let tmon_palette = terminal.tmon_palette();
-                let palette_revision = core_palette
-                    .as_ref()
-                    .map(|palette| palette.revision)
-                    .or_else(|| tmon_palette.as_ref().map(tmon::Palette::revision));
+                let palette_revision = core_palette.as_ref().map(|palette| palette.revision);
                 let pane_cache_key = self.pane_render_cache_key(
                     is_active_pane,
                     alternate_screen_mode,
@@ -3351,7 +3287,6 @@ impl Render for TerminalView {
                 let pane_build_context = PaneCellBuildContext {
                     colors: &colors,
                     core_palette: core_palette.as_ref(),
-                    tmon_palette: tmon_palette.as_ref(),
                     effective_background_opacity,
                     background_opacity_cells: self.background_opacity_cells,
                     cell_color_transform,
@@ -3428,19 +3363,12 @@ impl Render for TerminalView {
                     core_palette
                         .as_ref()
                         .and_then(|palette| palette.cursor)
-                        .map(|color| gpui::Rgba {
+                        .map_or(colors.cursor, |color| gpui::Rgba {
                             r: f32::from(color.r) / 255.0,
                             g: f32::from(color.g) / 255.0,
                             b: f32::from(color.b) / 255.0,
                             a: 1.0,
-                        })
-                        .or_else(|| {
-                            tmon_palette
-                                .as_ref()
-                                .and_then(tmon::Palette::cursor)
-                                .map(tmon_rgb_to_rgba)
-                        })
-                        .unwrap_or(colors.cursor),
+                        }),
                     hovered_link_range,
                     font_family.clone(),
                     pane_font_size,
@@ -4337,7 +4265,6 @@ mod tests {
         PaneCellBuildContext {
             colors: &COLORS,
             core_palette: None,
-            tmon_palette: None,
             effective_background_opacity: opacity,
             background_opacity_cells,
             cell_color_transform: CellColorTransform::default(),
@@ -4359,7 +4286,6 @@ mod tests {
         PaneCellBuildContext {
             colors: &COLORS,
             core_palette: None,
-            tmon_palette: None,
             effective_background_opacity: opacity,
             background_opacity_cells: false,
             cell_color_transform,
@@ -4426,94 +4352,101 @@ mod tests {
     }
 
     #[test]
-    fn tmon_underline_preserves_style_and_resolves_explicit_color() {
+    fn core_underline_preserves_style_and_resolves_explicit_color() {
         let context = test_build_context(1.0);
         let cases = [
             (
-                tmon::UnderlineStyle::Single,
+                termy_core::TerminalUnderlineStyle::Single,
                 termy_terminal_ui::TerminalUnderlineStyle::Single,
             ),
             (
-                tmon::UnderlineStyle::Double,
+                termy_core::TerminalUnderlineStyle::Double,
                 termy_terminal_ui::TerminalUnderlineStyle::Double,
             ),
             (
-                tmon::UnderlineStyle::Curly,
+                termy_core::TerminalUnderlineStyle::Curly,
                 termy_terminal_ui::TerminalUnderlineStyle::Curly,
             ),
             (
-                tmon::UnderlineStyle::Dotted,
+                termy_core::TerminalUnderlineStyle::Dotted,
                 termy_terminal_ui::TerminalUnderlineStyle::Dotted,
             ),
             (
-                tmon::UnderlineStyle::Dashed,
+                termy_core::TerminalUnderlineStyle::Dashed,
                 termy_terminal_ui::TerminalUnderlineStyle::Dashed,
             ),
         ];
 
-        for (tmon_style, expected_style) in cases {
-            let mut cell = tmon::Cell::default();
-            cell.attributes = tmon::Attributes::default().with_underline_style(tmon_style);
-            cell.underline_color = Some(tmon::Color::Indexed(1));
+        for (core_style, expected_style) in cases {
+            let cell = termy_core::TerminalRenderCell {
+                underline_style: core_style,
+                underline_color: Some(termy_core::TerminalRenderColor::Indexed(1)),
+                ..termy_core::TerminalRenderCell::default()
+            };
 
             let underline = terminal_cell_underline((&cell).into(), context)
-                .expect("Tmon underline style should render");
+                .expect("core underline style should render");
             assert_eq!(underline.style, expected_style);
             assert_eq!(underline.color, Some(context.colors.ansi[1].into()));
         }
 
-        let mut implicit = tmon::Cell::default();
-        implicit.attributes =
-            tmon::Attributes::default().with_underline_style(tmon::UnderlineStyle::Single);
+        let mut implicit = termy_core::TerminalRenderCell {
+            underline_style: termy_core::TerminalUnderlineStyle::Single,
+            ..termy_core::TerminalRenderCell::default()
+        };
         let underline = terminal_cell_underline((&implicit).into(), context)
-            .expect("implicit Tmon underline should render");
+            .expect("implicit core underline should render");
         assert_eq!(underline.color, None);
 
-        let none = tmon::Cell::default();
+        implicit.underline_style = termy_core::TerminalUnderlineStyle::None;
+        let none = implicit;
         assert_eq!(terminal_cell_underline((&none).into(), context), None);
     }
 
     #[test]
-    fn tmon_underline_color_uses_rgb_and_live_palette_conversion() {
-        let terminal = tmon::Terminal::new_display(tmon::Size::default(), tmon::Config::default());
+    fn core_underline_color_uses_rgb_and_live_palette_conversion() {
+        let terminal = NativeTerminal::new_display(TerminalSize::default(), None);
         terminal.hydrate_output(b"\x1b]4;7;#123456\x07");
         let palette = terminal.palette();
         let mut context = test_build_context(1.0);
-        context.tmon_palette = Some(&palette);
+        context.core_palette = Some(&palette);
 
-        let mut cell = tmon::Cell::default();
-        cell.attributes =
-            tmon::Attributes::default().with_underline_style(tmon::UnderlineStyle::Single);
-        cell.underline_color = Some(tmon::Color::Indexed(7));
+        let mut cell = termy_core::TerminalRenderCell {
+            underline_style: termy_core::TerminalUnderlineStyle::Single,
+            underline_color: Some(termy_core::TerminalRenderColor::Indexed(7)),
+            ..termy_core::TerminalRenderCell::default()
+        };
         let indexed = terminal_cell_underline((&cell).into(), context)
-            .expect("indexed Tmon underline should render");
+            .expect("indexed core underline should render");
         assert_eq!(
             indexed.color,
             Some(
-                tmon_rgb_to_rgba(tmon::Rgb {
-                    r: 0x12,
-                    g: 0x34,
-                    b: 0x56,
-                })
+                gpui::Rgba {
+                    r: f32::from(0x12_u8) / 255.0,
+                    g: f32::from(0x34_u8) / 255.0,
+                    b: f32::from(0x56_u8) / 255.0,
+                    a: 1.0,
+                }
                 .into()
             )
         );
 
-        cell.underline_color = Some(tmon::Color::Rgb {
+        cell.underline_color = Some(termy_core::TerminalRenderColor::Rgb(TerminalColor {
             r: 0xab,
             g: 0xcd,
             b: 0xef,
-        });
+        }));
         let rgb = terminal_cell_underline((&cell).into(), context)
-            .expect("RGB Tmon underline should render");
+            .expect("RGB core underline should render");
         assert_eq!(
             rgb.color,
             Some(
-                tmon_rgb_to_rgba(tmon::Rgb {
-                    r: 0xab,
-                    g: 0xcd,
-                    b: 0xef,
-                })
+                gpui::Rgba {
+                    r: f32::from(0xab_u8) / 255.0,
+                    g: f32::from(0xcd_u8) / 255.0,
+                    b: f32::from(0xef_u8) / 255.0,
+                    a: 1.0,
+                }
                 .into()
             )
         );
@@ -4781,25 +4714,25 @@ mod tests {
     }
 
     #[test]
-    fn tmon_incremental_scroll_damage_matches_fresh_snapshots() {
-        let terminal = tmon::Terminal::new_display(
-            tmon::Size {
+    fn core_incremental_scroll_damage_matches_fresh_snapshots() {
+        let terminal = NativeTerminal::new_display(
+            TerminalSize {
                 cols: 8,
                 rows: 4,
-                ..tmon::Size::default()
+                ..TerminalSize::default()
             },
-            tmon::Config::default(),
+            None,
         );
         let _ = terminal.take_render_damage_snapshot();
         terminal.feed_output(b"row0\r\nrow1\r\nrow2\r\nrow3");
         let _ = terminal.take_render_damage_snapshot();
 
-        let snapshot_rows = |terminal: &tmon::Terminal| {
-            terminal
-                .snapshot()
-                .cells
+        let snapshot_rows = |terminal: &NativeTerminal| {
+            let mut cells = Vec::new();
+            terminal.visit_viewport_cells(|_, _, _, cell| cells.push(cell.clone()));
+            cells
                 .chunks(8)
-                .map(<[tmon::Cell]>::to_vec)
+                .map(<[termy_core::TerminalRenderCell]>::to_vec)
                 .collect::<Vec<_>>()
         };
         let mut incremental = snapshot_rows(&terminal);
@@ -4813,24 +4746,19 @@ mod tests {
             b"\x1b[2S\x1b[1T",
         ] {
             terminal.feed_output(output);
-            let update = tmon_adapter::render_damage(terminal.take_render_damage_snapshot());
+            let update =
+                TerminalRenderDamageSnapshot::from_core(terminal.take_render_damage_snapshot());
             match update.damage {
                 TerminalDamageSnapshot::Full => incremental = snapshot_rows(&terminal),
                 TerminalDamageSnapshot::Partial(spans) => {
                     replayed_scrolls = replayed_scrolls.saturating_add(update.scrolls.len());
                     assert!(replay_viewport_scrolls(&mut incremental, &update.scrolls));
-                    let generation = update.generation.expect("Tmon render generation");
-                    assert!(
-                        terminal
-                            .for_each_viewport_range_at_generation(
-                                generation,
-                                spans
-                                    .iter()
-                                    .map(|span| { (span.row, span.left_col, span.right_col) }),
-                                |row, _, _, col, cell, _| incremental[row][col] = *cell,
-                            )
-                            .is_some()
-                    );
+                    let generation = update.generation.expect("core render generation");
+                    assert!(terminal.visit_viewport_ranges_at_generation(
+                        generation,
+                        &spans,
+                        |row, _, _, col, cell| incremental[row][col] = cell.clone(),
+                    ));
                 }
             }
             assert_eq!(incremental, snapshot_rows(&terminal), "output {output:?}");
@@ -5018,57 +4946,53 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cell_colors_accepts_tmon_palette_and_attributes() {
+    fn resolve_cell_colors_accepts_core_palette_and_attributes() {
         let context = test_build_context(0.25);
-        let mut cell = tmon::Cell::default();
-        cell.character = 'x';
-        cell.foreground = tmon::Color::Indexed(1);
-        cell.attributes = tmon::Attributes::default().with_bold(true);
+        let cell = termy_core::TerminalRenderCell {
+            foreground: termy_core::TerminalRenderColor::Indexed(1),
+            background: termy_core::TerminalRenderColor::DefaultBackground,
+            bold: true,
+            ..termy_core::TerminalRenderCell::default()
+        };
 
-        let resolved = resolve_cell_colors(&cell, context);
+        let resolved = resolve_cell_colors(TerminalCellRef::Native(&cell), context);
         assert_eq!(resolved.fg, context.colors.ansi[1]);
         assert!(resolved.uses_terminal_default_bg);
         assert!((resolved.bg.a - 0.25).abs() <= f32::EPSILON);
-        assert!(terminal_cell_text_attributes((&cell).into()).bold);
+        assert!(terminal_cell_text_attributes(TerminalCellRef::Native(&cell)).bold);
     }
 
     #[test]
-    fn resolve_cell_colors_uses_tmon_live_palette_overrides() {
-        let terminal = tmon::Terminal::new_display(tmon::Size::default(), tmon::Config::default());
+    fn resolve_cell_colors_uses_core_live_palette_overrides() {
+        let terminal = NativeTerminal::new_display(TerminalSize::default(), None);
         terminal.hydrate_output(b"\x1b]4;1;#123456\x07\x1b]10;#abcdef\x07\x1b]11;#010203\x07");
         let palette = terminal.palette();
         let mut context = test_build_context(1.0);
-        context.tmon_palette = Some(&palette);
+        context.core_palette = Some(&palette);
 
-        let mut indexed = tmon::Cell::default();
-        indexed.foreground = tmon::Color::Indexed(1);
-        let defaults = tmon::Cell::default();
+        let indexed = termy_core::TerminalRenderCell {
+            foreground: termy_core::TerminalRenderColor::Indexed(1),
+            background: termy_core::TerminalRenderColor::DefaultBackground,
+            ..termy_core::TerminalRenderCell::default()
+        };
+        let defaults = termy_core::TerminalRenderCell {
+            background: termy_core::TerminalRenderColor::DefaultBackground,
+            ..termy_core::TerminalRenderCell::default()
+        };
+        let rgb = |r: u8, g: u8, b: u8| gpui::Rgba {
+            r: f32::from(r) / 255.0,
+            g: f32::from(g) / 255.0,
+            b: f32::from(b) / 255.0,
+            a: 1.0,
+        };
 
         assert_eq!(
-            resolve_cell_colors(&indexed, context).fg,
-            tmon_rgb_to_rgba(tmon::Rgb {
-                r: 0x12,
-                g: 0x34,
-                b: 0x56
-            })
+            resolve_cell_colors(TerminalCellRef::Native(&indexed), context).fg,
+            rgb(0x12, 0x34, 0x56)
         );
-        let resolved_defaults = resolve_cell_colors(&defaults, context);
-        assert_eq!(
-            resolved_defaults.fg,
-            tmon_rgb_to_rgba(tmon::Rgb {
-                r: 0xab,
-                g: 0xcd,
-                b: 0xef
-            })
-        );
-        assert_eq!(
-            resolved_defaults.bg,
-            tmon_rgb_to_rgba(tmon::Rgb {
-                r: 0x01,
-                g: 0x02,
-                b: 0x03
-            })
-        );
+        let resolved_defaults = resolve_cell_colors(TerminalCellRef::Native(&defaults), context);
+        assert_eq!(resolved_defaults.fg, rgb(0xab, 0xcd, 0xef));
+        assert_eq!(resolved_defaults.bg, rgb(0x01, 0x02, 0x03));
     }
 
     #[test]
@@ -5146,20 +5070,28 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tmon_cell_colors_classifies_inverse_background_after_swap() {
+    fn resolve_core_cell_colors_classifies_inverse_background_after_swap() {
         let context = test_build_context(0.2);
-        let mut inverse_default_background = tmon::Cell::default();
-        inverse_default_background.background = tmon::Color::Indexed(4);
-        inverse_default_background.attributes = tmon::Attributes::default().with_inverse(true);
+        let mut inverse_default_background = termy_core::TerminalRenderCell {
+            background: termy_core::TerminalRenderColor::Indexed(4),
+            inverse: true,
+            ..termy_core::TerminalRenderCell::default()
+        };
 
-        let resolved = resolve_cell_colors(&inverse_default_background, context);
+        let resolved = resolve_cell_colors(
+            TerminalCellRef::Native(&inverse_default_background),
+            context,
+        );
 
         assert!(resolved.uses_terminal_default_bg);
         assert!((resolved.bg.a - 0.2).abs() <= f32::EPSILON);
 
-        inverse_default_background.foreground = tmon::Color::Indexed(2);
-        inverse_default_background.background = tmon::Color::Default;
-        let explicit = resolve_cell_colors(&inverse_default_background, context);
+        inverse_default_background.foreground = termy_core::TerminalRenderColor::Indexed(2);
+        inverse_default_background.background = termy_core::TerminalRenderColor::DefaultBackground;
+        let explicit = resolve_cell_colors(
+            TerminalCellRef::Native(&inverse_default_background),
+            context,
+        );
         assert!(!explicit.uses_terminal_default_bg);
         assert!((explicit.bg.a - 1.0).abs() <= f32::EPSILON);
     }

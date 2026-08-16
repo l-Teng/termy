@@ -179,14 +179,20 @@ fn alacritty_terminal() -> AlacrittyTerminal {
         scrollback_history: SCROLLBACK,
         ..TerminalRuntimeConfig::default()
     };
-    AlacrittyTerminal::new_display(
+    let terminal = AlacrittyTerminal::new_display(
         AlacrittySize {
             cols: COLS,
             rows: ROWS,
             ..AlacrittySize::default()
         },
         Some(&config),
-    )
+    );
+    assert_eq!(
+        terminal.engine_label(),
+        "alacritty",
+        "engine comparison requires TERMY_CORE_TEST_BACKEND=alacritty"
+    );
+    terminal
 }
 
 #[cfg(feature = "benchmark-allocations")]

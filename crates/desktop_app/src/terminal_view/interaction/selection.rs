@@ -1330,13 +1330,7 @@ mod tests {
             rows: 4,
             ..TerminalSize::default()
         };
-        let terminal = Terminal::Tmon(TmonTerminalInstance {
-            wakeup_id: 0,
-            terminal: tmon::Terminal::new_display(
-                tmon_adapter::size(size),
-                tmon::Config::default(),
-            ),
-        });
+        let terminal = Terminal::new_test_display(size);
         terminal.hydrate_output(b"go https://example.com/path");
 
         for (row, col) in [(0, 4), (1, 5), (2, 4)] {
@@ -1348,16 +1342,10 @@ mod tests {
             assert_eq!(link.target, "https://example.com/path");
         }
 
-        let osc8 = Terminal::Tmon(TmonTerminalInstance {
-            wakeup_id: 0,
-            terminal: tmon::Terminal::new_display(
-                tmon_adapter::size(TerminalSize {
-                    cols: 5,
-                    rows: 3,
-                    ..TerminalSize::default()
-                }),
-                tmon::Config::default(),
-            ),
+        let osc8 = Terminal::new_test_display(TerminalSize {
+            cols: 5,
+            rows: 3,
+            ..TerminalSize::default()
         });
         osc8.hydrate_output(b"\x1b]8;;https://example.com\x1b\\read-more\x1b]8;;\x1b\\");
         let link = osc8
@@ -1455,35 +1443,23 @@ mod tests {
         let rendered_native_row: String = native_row.iter().filter_map(|c| *c).collect();
         assert!(rendered_native_row.contains(expected_native_token));
 
-        let tmon = Terminal::Tmon(TmonTerminalInstance {
-            wakeup_id: 0,
-            terminal: tmon::Terminal::new_display(
-                tmon_adapter::size(size),
-                tmon::Config::default(),
-            ),
-        });
-        tmon.hydrate_output(b"tmon-row-adapter");
-        let tmon_row = row_text_from_terminal(&tmon, 0, usize::from(size.cols));
-        let rendered_tmon_row: String =
-            tmon_row.iter().filter_map(|character| *character).collect();
-        assert!(rendered_tmon_row.contains("tmon-row"));
+        let core_display = Terminal::new_test_display(size);
+        core_display.hydrate_output(b"core-row-adapter");
+        let core_row = row_text_from_terminal(&core_display, 0, usize::from(size.cols));
+        let rendered_core_row: String =
+            core_row.iter().filter_map(|character| *character).collect();
+        assert!(rendered_core_row.contains("core-row"));
     }
 
     #[test]
-    fn selected_text_reads_tmon_cells_without_an_alacritty_grid() {
+    fn selected_text_reads_core_cells_without_a_tmux_grid() {
         let size = TerminalSize {
             cols: 12,
             rows: 2,
             ..TerminalSize::default()
         };
-        let terminal = Terminal::Tmon(TmonTerminalInstance {
-            wakeup_id: 0,
-            terminal: tmon::Terminal::new_display(
-                tmon_adapter::size(size),
-                tmon::Config::default(),
-            ),
-        });
-        terminal.hydrate_output(b"hello tmon");
+        let terminal = Terminal::new_test_display(size);
+        terminal.hydrate_output(b"hello core");
 
         assert_eq!(
             selected_text_from_terminal(
@@ -1491,24 +1467,18 @@ mod tests {
                 SelectionPos { col: 0, line: 0 },
                 SelectionPos { col: 9, line: 0 },
             ),
-            Some("hello tmon".to_string())
+            Some("hello core".to_string())
         );
     }
 
     #[test]
-    fn selected_text_preserves_tmon_combining_characters_in_history() {
+    fn selected_text_preserves_core_combining_characters_in_history() {
         let size = TerminalSize {
             cols: 4,
             rows: 2,
             ..TerminalSize::default()
         };
-        let terminal = Terminal::Tmon(TmonTerminalInstance {
-            wakeup_id: 0,
-            terminal: tmon::Terminal::new_display(
-                tmon_adapter::size(size),
-                tmon::Config::default(),
-            ),
-        });
+        let terminal = Terminal::new_test_display(size);
         terminal.hydrate_output("e\u{301}\r\nmid\r\nnew".as_bytes());
 
         assert_eq!(

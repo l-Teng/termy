@@ -900,7 +900,7 @@ fn run_allocation_mode() {
     println!("Tmon runtime: {TMON_RUNTIME_DESCRIPTION}");
     println!("Alacritty runtime: {ALACRITTY_RUNTIME_DESCRIPTION}");
     println!(
-        "Engine selection: explicit benchmark constructors; desktop engine environment is ignored"
+        "Engine selection: direct Tmon plus forced core Alacritty comparison; desktop engine environment is ignored"
     );
     println!("Grid: {COLS}x{ROWS}, scrollback: {SCROLLBACK} lines");
     println!("Parse target per engine/workload: {target_bytes} bytes ({target_mib} MiB)");
@@ -995,7 +995,7 @@ fn run_timed_mode() {
     println!("Tmon runtime: {TMON_RUNTIME_DESCRIPTION}");
     println!("Alacritty runtime: {ALACRITTY_RUNTIME_DESCRIPTION}");
     println!(
-        "Engine selection: explicit benchmark constructors; desktop engine environment is ignored"
+        "Engine selection: direct Tmon plus forced core Alacritty comparison; desktop engine environment is ignored"
     );
     println!("Grid: {COLS}x{ROWS}, scrollback: {SCROLLBACK} lines");
     println!("Samples: {sample_count}, parse target: {target_mib} MiB/sample");

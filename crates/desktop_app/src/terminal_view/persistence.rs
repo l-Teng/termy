@@ -1343,27 +1343,18 @@ impl TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PersistedNativeLayoutNode, Terminal, TerminalSize, TerminalView, TmonTerminalInstance,
-        tmon_adapter,
-    };
+    use super::{PersistedNativeLayoutNode, Terminal, TerminalSize, TerminalView};
     use crate::terminal_view::PaneResizeAxis;
     use crate::workspace_store::{StoredPane, StoredTab, StoredWorkspace};
 
     #[test]
-    fn persisted_tmon_buffer_preserves_combining_characters_in_history() {
+    fn persisted_core_buffer_preserves_combining_characters_in_history() {
         let size = TerminalSize {
             cols: 4,
             rows: 2,
             ..TerminalSize::default()
         };
-        let terminal = Terminal::Tmon(TmonTerminalInstance {
-            wakeup_id: 0,
-            terminal: tmon::Terminal::new_display(
-                tmon_adapter::size(size),
-                tmon::Config::default(),
-            ),
-        });
+        let terminal = Terminal::new_test_display(size);
         terminal.hydrate_output("e\u{301}\r\nmid\r\nnew".as_bytes());
 
         assert_eq!(

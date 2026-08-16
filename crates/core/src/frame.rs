@@ -109,7 +109,7 @@ impl PartialEq<&str> for TerminalRenderText {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalRenderCell {
     pub text: TerminalRenderText,
     pub foreground: TerminalRenderColor,
@@ -126,6 +126,28 @@ pub struct TerminalRenderCell {
     pub wide_character_spacer: bool,
     pub leading_wide_character_spacer: bool,
     pub line_wrapped: bool,
+}
+
+impl Default for TerminalRenderCell {
+    fn default() -> Self {
+        Self {
+            text: TerminalRenderText::default(),
+            foreground: TerminalRenderColor::DefaultForeground,
+            background: TerminalRenderColor::DefaultBackground,
+            underline_color: None,
+            bold: false,
+            dim: false,
+            italic: false,
+            underline_style: TerminalUnderlineStyle::None,
+            inverse: false,
+            hidden: false,
+            strikethrough: false,
+            hyperlink: false,
+            wide_character_spacer: false,
+            leading_wide_character_spacer: false,
+            line_wrapped: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -408,6 +430,13 @@ mod tests {
     use super::*;
     use crate::TerminalDirtySpan;
     use alacritty_terminal::{event::VoidListener, term::Config as TermConfig, vte::ansi};
+
+    #[test]
+    fn default_render_cell_uses_role_correct_terminal_colors() {
+        let cell = TerminalRenderCell::default();
+        assert_eq!(cell.foreground, TerminalRenderColor::DefaultForeground);
+        assert_eq!(cell.background, TerminalRenderColor::DefaultBackground);
+    }
 
     #[test]
     fn snapshot_contains_visible_output() {

@@ -7748,7 +7748,6 @@ dependencies = [
  "termy_terminal_ui",
  "termy_themes",
  "termy_ui",
- "tmon",
  "tokio",
  "ureq",
  "url",

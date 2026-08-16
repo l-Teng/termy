@@ -1,6 +1,7 @@
 use super::*;
 
 const TEST_BACKEND_ENV: &str = "TERMY_CORE_TEST_BACKEND";
+const EXPERIMENTAL_TMON_ENV: &str = "TERMY_EXPERIMENTAL_TMON_ENGINE";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum BackendChoice {
@@ -11,18 +12,41 @@ enum BackendChoice {
 
 impl BackendChoice {
     fn native() -> Self {
-        Self::from_value(env::var_os(TEST_BACKEND_ENV).as_deref(), Self::Alacritty)
+        if let Some(choice) = Self::from_test_value(env::var_os(TEST_BACKEND_ENV).as_deref()) {
+            return choice;
+        }
+        let requested = env::var_os(EXPERIMENTAL_TMON_ENV);
+        let available = tmon::native_pty_available();
+        if requested.as_deref() == Some(std::ffi::OsStr::new("1")) && !available {
+            log::warn!(
+                "TERMY_EXPERIMENTAL_TMON_ENGINE=1 requested, but Tmon's native PTY is unavailable; \
+                 falling back to the native Alacritty terminal engine"
+            );
+        }
+        let choice = Self::from_experimental_value(requested.as_deref(), available);
+        if choice == Self::Tmon {
+            log::info!("using experimental Tmon terminal engine");
+        }
+        choice
     }
 
     fn display() -> Self {
-        Self::from_value(env::var_os(TEST_BACKEND_ENV).as_deref(), Self::Tmon)
+        Self::from_test_value(env::var_os(TEST_BACKEND_ENV).as_deref()).unwrap_or(Self::Tmon)
     }
 
-    fn from_value(value: Option<&std::ffi::OsStr>, default: Self) -> Self {
+    fn from_test_value(value: Option<&std::ffi::OsStr>) -> Option<Self> {
         match value.and_then(std::ffi::OsStr::to_str) {
-            Some("alacritty") => Self::Alacritty,
-            Some("tmon") => Self::Tmon,
-            _ => default,
+            Some("alacritty") => Some(Self::Alacritty),
+            Some("tmon") => Some(Self::Tmon),
+            _ => None,
+        }
+    }
+
+    fn from_experimental_value(value: Option<&std::ffi::OsStr>, available: bool) -> Self {
+        if value == Some(std::ffi::OsStr::new("1")) && available {
+            Self::Tmon
+        } else {
+            Self::Alacritty
         }
     }
 }
@@ -33,6 +57,13 @@ pub(super) enum Backend {
 }
 
 impl Backend {
+    pub(super) fn engine_label(&self) -> &'static str {
+        match self {
+            Self::Alacritty(_) => "alacritty",
+            Self::Tmon(_) => "tmon",
+        }
+    }
+
     pub(super) fn new(
         size: TerminalSize,
         configured_working_dir: Option<&str>,
@@ -554,29 +585,44 @@ mod tests {
 
     #[test]
     fn backend_selector_only_accepts_exact_private_values() {
+        assert_eq!(BackendChoice::from_test_value(None), None);
         assert_eq!(
-            BackendChoice::from_value(None, BackendChoice::Alacritty),
+            BackendChoice::from_test_value(Some(std::ffi::OsStr::new("alacritty"))),
+            Some(BackendChoice::Alacritty)
+        );
+        assert_eq!(
+            BackendChoice::from_test_value(Some(std::ffi::OsStr::new("tmon"))),
+            Some(BackendChoice::Tmon)
+        );
+        assert_eq!(
+            BackendChoice::from_test_value(Some(std::ffi::OsStr::new("1"))),
+            None
+        );
+        assert_eq!(
+            BackendChoice::from_test_value(Some(std::ffi::OsStr::new("TMON"))),
+            None
+        );
+    }
+
+    #[test]
+    fn experimental_native_selector_requires_exact_opt_in_and_availability() {
+        assert_eq!(
+            BackendChoice::from_experimental_value(Some(std::ffi::OsStr::new("1")), true),
+            BackendChoice::Tmon
+        );
+        for value in [
+            None,
+            Some(std::ffi::OsStr::new("0")),
+            Some(std::ffi::OsStr::new("true")),
+        ] {
+            assert_eq!(
+                BackendChoice::from_experimental_value(value, true),
+                BackendChoice::Alacritty
+            );
+        }
+        assert_eq!(
+            BackendChoice::from_experimental_value(Some(std::ffi::OsStr::new("1")), false),
             BackendChoice::Alacritty
-        );
-        assert_eq!(
-            BackendChoice::from_value(None, BackendChoice::Tmon),
-            BackendChoice::Tmon
-        );
-        assert_eq!(
-            BackendChoice::from_value(Some(std::ffi::OsStr::new("alacritty")), BackendChoice::Tmon,),
-            BackendChoice::Alacritty
-        );
-        assert_eq!(
-            BackendChoice::from_value(Some(std::ffi::OsStr::new("tmon")), BackendChoice::Alacritty,),
-            BackendChoice::Tmon
-        );
-        assert_eq!(
-            BackendChoice::from_value(Some(std::ffi::OsStr::new("1")), BackendChoice::Tmon),
-            BackendChoice::Tmon
-        );
-        assert_eq!(
-            BackendChoice::from_value(Some(std::ffi::OsStr::new("TMON")), BackendChoice::Tmon),
-            BackendChoice::Tmon
         );
     }
 }

@@ -783,19 +783,13 @@ mod tests {
     }
 
     #[test]
-    fn terminal_read_adapter_preserves_tmon_combining_characters_in_history() {
+    fn terminal_read_adapter_preserves_core_combining_characters_in_history() {
         let size = TerminalSize {
             cols: 4,
             rows: 2,
             ..TerminalSize::default()
         };
-        let terminal = Terminal::Tmon(TmonTerminalInstance {
-            wakeup_id: 0,
-            terminal: tmon::Terminal::new_display(
-                tmon_adapter::size(size),
-                tmon::Config::default(),
-            ),
-        });
+        let terminal = Terminal::new_test_display(size);
         terminal.hydrate_output("e\u{301}\r\nmid\r\nnew".as_bytes());
 
         let lines = collect_search_line_texts(&terminal, -1, -1);
