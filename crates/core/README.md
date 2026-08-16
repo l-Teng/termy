@@ -12,11 +12,14 @@ Use this crate when behavior should be available to FFI, WASM, JS, or non-GPUI h
 
 ```sh
 cargo test -p termy_core
+TERMY_CORE_TEST_BACKEND=alacritty cargo test -p termy_core
 TERMY_CORE_TEST_BACKEND=tmon cargo test -p termy_core
 ```
 
-The second command exercises the private migration backend. The selector is
-test-only plumbing, not a supported embedder or desktop configuration surface.
+Display-only terminals use Tmon; native terminals retain Alacritty during the
+migration window. The two explicit commands force the semantic suite through
+one private backend at a time. The selector is test-only plumbing, not a
+supported embedder or desktop configuration surface.
 
 ## Forbidden Dependencies
 

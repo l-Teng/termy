@@ -10,15 +10,19 @@ enum BackendChoice {
 }
 
 impl BackendChoice {
-    fn from_test_environment() -> Self {
-        Self::from_value(env::var_os(TEST_BACKEND_ENV).as_deref())
+    fn native() -> Self {
+        Self::from_value(env::var_os(TEST_BACKEND_ENV).as_deref(), Self::Alacritty)
     }
 
-    fn from_value(value: Option<&std::ffi::OsStr>) -> Self {
-        if value == Some(std::ffi::OsStr::new("tmon")) {
-            Self::Tmon
-        } else {
-            Self::Alacritty
+    fn display() -> Self {
+        Self::from_value(env::var_os(TEST_BACKEND_ENV).as_deref(), Self::Tmon)
+    }
+
+    fn from_value(value: Option<&std::ffi::OsStr>, default: Self) -> Self {
+        match value.and_then(std::ffi::OsStr::to_str) {
+            Some("alacritty") => Self::Alacritty,
+            Some("tmon") => Self::Tmon,
+            _ => default,
         }
     }
 }
@@ -37,7 +41,7 @@ impl Backend {
         runtime_config: Option<&TerminalRuntimeConfig>,
         startup_command: Option<&str>,
     ) -> anyhow::Result<Self> {
-        match BackendChoice::from_test_environment() {
+        match BackendChoice::native() {
             BackendChoice::Alacritty => super::alacritty_backend::AlacrittyBackend::new(
                 size,
                 configured_working_dir,
@@ -69,7 +73,7 @@ impl Backend {
         runtime_config: Option<&TerminalRuntimeConfig>,
         startup_command: Option<&str>,
     ) -> anyhow::Result<Self> {
-        match BackendChoice::from_test_environment() {
+        match BackendChoice::native() {
             BackendChoice::Alacritty => {
                 super::alacritty_backend::AlacrittyBackend::new_with_wakeup_notifier(
                     size,
@@ -103,7 +107,7 @@ impl Backend {
         runtime_config: Option<&TerminalRuntimeConfig>,
         launch: Option<&TerminalLaunch>,
     ) -> anyhow::Result<Self> {
-        match BackendChoice::from_test_environment() {
+        match BackendChoice::native() {
             BackendChoice::Alacritty => {
                 super::alacritty_backend::AlacrittyBackend::new_with_launch_and_wakeup_notifier(
                     size,
@@ -135,12 +139,28 @@ impl Backend {
         size: TerminalSize,
         runtime_config: Option<&TerminalRuntimeConfig>,
     ) -> Self {
-        match BackendChoice::from_test_environment() {
+        Self::new_display_with_wakeup_notifier(size, runtime_config, None)
+    }
+
+    pub(super) fn new_display_with_wakeup_notifier(
+        size: TerminalSize,
+        runtime_config: Option<&TerminalRuntimeConfig>,
+        wakeup_notifier: Option<TerminalWakeupNotifier>,
+    ) -> Self {
+        match BackendChoice::display() {
             BackendChoice::Alacritty => Self::Alacritty(Box::new(
-                super::alacritty_backend::AlacrittyBackend::new_display(size, runtime_config),
+                super::alacritty_backend::AlacrittyBackend::new_display_with_wakeup_notifier(
+                    size,
+                    runtime_config,
+                    wakeup_notifier,
+                ),
             )),
             BackendChoice::Tmon => Self::Tmon(Box::new(
-                super::tmon_backend::TmonBackend::new_display(size, runtime_config),
+                super::tmon_backend::TmonBackend::new_display_with_wakeup_notifier(
+                    size,
+                    runtime_config,
+                    wakeup_notifier,
+                ),
             )),
         }
     }
@@ -533,19 +553,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backend_selector_requires_the_exact_private_test_value() {
-        assert_eq!(BackendChoice::from_value(None), BackendChoice::Alacritty);
+    fn backend_selector_only_accepts_exact_private_values() {
         assert_eq!(
-            BackendChoice::from_value(Some(std::ffi::OsStr::new("tmon"))),
+            BackendChoice::from_value(None, BackendChoice::Alacritty),
+            BackendChoice::Alacritty
+        );
+        assert_eq!(
+            BackendChoice::from_value(None, BackendChoice::Tmon),
             BackendChoice::Tmon
         );
         assert_eq!(
-            BackendChoice::from_value(Some(std::ffi::OsStr::new("1"))),
+            BackendChoice::from_value(Some(std::ffi::OsStr::new("alacritty")), BackendChoice::Tmon,),
             BackendChoice::Alacritty
         );
         assert_eq!(
-            BackendChoice::from_value(Some(std::ffi::OsStr::new("TMON"))),
-            BackendChoice::Alacritty
+            BackendChoice::from_value(Some(std::ffi::OsStr::new("tmon")), BackendChoice::Alacritty,),
+            BackendChoice::Tmon
+        );
+        assert_eq!(
+            BackendChoice::from_value(Some(std::ffi::OsStr::new("1")), BackendChoice::Tmon),
+            BackendChoice::Tmon
+        );
+        assert_eq!(
+            BackendChoice::from_value(Some(std::ffi::OsStr::new("TMON")), BackendChoice::Tmon),
+            BackendChoice::Tmon
         );
     }
 }

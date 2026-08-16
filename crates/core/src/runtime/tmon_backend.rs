@@ -84,13 +84,22 @@ impl TmonBackend {
         })
     }
 
-    pub(super) fn new_display(
+    pub(super) fn new_display_with_wakeup_notifier(
         size: TerminalSize,
         runtime_config: Option<&TerminalRuntimeConfig>,
+        wakeup_notifier: Option<TerminalWakeupNotifier>,
     ) -> Self {
         let runtime_config = runtime_config.cloned().unwrap_or_default();
-        let terminal =
-            tmon::Terminal::new_display(tmon_size(size.clamped()), display_config(&runtime_config));
+        let size = tmon_size(size.clamped());
+        let config = display_config(&runtime_config);
+        let terminal = match wakeup_notifier {
+            Some(notifier) => tmon::Terminal::new_display_with_wakeup_notifier(
+                size,
+                config,
+                tmon::WakeupNotifier::new(move || notifier.notify()),
+            ),
+            None => tmon::Terminal::new_display(size, config),
+        };
         let last_damage_cursor = std::sync::Mutex::new(terminal.cursor_state());
         Self {
             terminal,

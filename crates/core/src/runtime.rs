@@ -1284,6 +1284,7 @@ pub struct JsonEventListener {
 }
 
 impl JsonEventListener {
+    #[cfg(test)]
     fn new(events_tx: Sender<RuntimeEvent>, wake_tx: Option<Sender<()>>) -> Self {
         let wakeup_notifier = wake_tx.map(|wake_tx| {
             TerminalWakeupNotifier::new(move || {
@@ -2241,15 +2242,24 @@ mod alacritty_backend {
         /// content is supplied with [`Terminal::feed_output`] (e.g. tmux `%output`).
         /// All rendering, sizing, and event draining work as for a normal terminal;
         /// input (`write`) is a no-op since there is no child process.
+        #[cfg(test)]
         pub fn new_display(
             size: TerminalSize,
             runtime_config: Option<&TerminalRuntimeConfig>,
+        ) -> Self {
+            Self::new_display_with_wakeup_notifier(size, runtime_config, None)
+        }
+
+        pub fn new_display_with_wakeup_notifier(
+            size: TerminalSize,
+            runtime_config: Option<&TerminalRuntimeConfig>,
+            wakeup_notifier: Option<TerminalWakeupNotifier>,
         ) -> Self {
             let size = size.clamped();
             let (events_tx, events_rx) = unbounded();
             let runtime_config = runtime_config.cloned().unwrap_or_default();
             let term_config = backend::term_config(runtime_config.term_options());
-            let listener = JsonEventListener::new(events_tx, None);
+            let listener = JsonEventListener::new_with_wakeup_notifier(events_tx, wakeup_notifier);
             let term = Term::new(term_config, &size, listener.clone());
             let palette_snapshot = backend::palette(&term, 0);
             let term = Arc::new(FairMutex::new(term));
@@ -2290,6 +2300,9 @@ mod alacritty_backend {
                 return;
             }
             self.feed_output_to_parser(bytes);
+            if self.pty_tx.is_none() {
+                self.listener.send_event(AlacEvent::Wakeup);
+            }
         }
 
         pub fn child_pid(&self) -> Option<u32> {
@@ -2927,6 +2940,21 @@ impl Terminal {
         }
     }
 
+    /// Create a display-only terminal whose committed output wakes the host.
+    pub fn new_display_with_wakeup_notifier(
+        size: TerminalSize,
+        runtime_config: Option<&TerminalRuntimeConfig>,
+        wakeup_notifier: Option<TerminalWakeupNotifier>,
+    ) -> Self {
+        Self {
+            backend: engine_backend::Backend::new_display_with_wakeup_notifier(
+                size,
+                runtime_config,
+                wakeup_notifier,
+            ),
+        }
+    }
+
     #[cfg(test)]
     fn new_alacritty_display_for_test(
         size: TerminalSize,
@@ -3319,6 +3347,28 @@ mod tests {
 
         let cursor = terminal.cursor_position();
         assert_eq!(cursor, (2, 3));
+    }
+
+    #[test]
+    fn display_terminal_notifier_coalesces_until_events_are_drained() {
+        let notifications = Arc::new(AtomicU64::new(0));
+        let notification_count = notifications.clone();
+        let terminal = Terminal::new_display_with_wakeup_notifier(
+            test_terminal_size(),
+            None,
+            Some(TerminalWakeupNotifier::new(move || {
+                notification_count.fetch_add(1, Ordering::Relaxed);
+            })),
+        );
+
+        terminal.feed_output(b"a");
+        terminal.feed_output(b"b");
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+
+        let mut reply_host = RecordingReplyHost::default();
+        let _ = terminal.drain_events(&mut reply_host);
+        terminal.feed_output(b"c");
+        assert_eq!(notifications.load(Ordering::Relaxed), 2);
     }
 
     #[test]
