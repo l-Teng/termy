@@ -31,14 +31,14 @@ benchmark-tmon:
     } 2>&1 | tee -a "$report"
     exit "$gate_status"
 
-# Compare Tmon and a pinned local libghostty-vt build for memory and feed throughput.
+# Compare Tmon, alacritty_terminal, and a pinned libghostty-vt build.
 benchmark-tmon-ghostty-memory:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$PWD"
     ghostty_dir="$(cd "${GHOSTTY_DIR:?set GHOSTTY_DIR to a Ghostty source checkout}" && pwd)"
     prefix="${GHOSTTY_VT_PREFIX:-$root/target/ghostty-vt-benchmark}"
-    report="${TMON_GHOSTTY_MEMORY_OUTPUT:-tmon-ghostty-memory-benchmark.txt}"
+    report="${TMON_GHOSTTY_MEMORY_OUTPUT:-terminal-engine-benchmark.txt}"
     expected_ghostty_revision="9e30f70f23418fecbdca1088673000417527c4e4"
     ghostty_revision="$(git -C "$ghostty_dir" rev-parse HEAD)"
     if [[ "$ghostty_revision" != "$expected_ghostty_revision" ]]; then

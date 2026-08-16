@@ -67,39 +67,6 @@ static int ghostty_result_code(GhosttyResult result) {
                                          : TMON_GHOSTTY_SHIM_GHOSTTY_ERROR;
 }
 
-static size_t select_sample_rows(size_t total_rows, size_t out_rows[64]) {
-  if (total_rows <= 64u) {
-    for (size_t i = 0; i < total_rows; i++) {
-      out_rows[i] = i;
-    }
-    return total_rows;
-  }
-
-  const size_t candidates[6] = {
-      0u,
-      1u,
-      total_rows / 4u,
-      total_rows / 2u,
-      total_rows - 2u,
-      total_rows - 1u,
-  };
-  size_t written = 0u;
-  for (size_t i = 0; i < 6u; i++) {
-    const size_t candidate = candidates[i];
-    bool seen = false;
-    for (size_t j = 0; j < written; j++) {
-      if (out_rows[j] == candidate) {
-        seen = true;
-        break;
-      }
-    }
-    if (!seen) {
-      out_rows[written++] = candidate;
-    }
-  }
-  return written;
-}
-
 static void fnv1a64_write_u8(Fnv1a64* hash, uint8_t value) {
   fnv1a64_write_byte(hash, value);
 }
@@ -347,16 +314,13 @@ int tmon_ghostty_terminal_semantic_digest(void* terminal, uint64_t* out_digest) 
     return TMON_GHOSTTY_SHIM_GHOSTTY_ERROR;
   }
 
-  size_t sampled_rows[64];
-  const size_t sampled_len = select_sample_rows(total_rows, sampled_rows);
   Fnv1a64 hash;
   fnv1a64_init(&hash);
   fnv1a64_write_u64(&hash, total_rows);
   fnv1a64_write_u16(&hash, cols);
-  fnv1a64_write_u64(&hash, sampled_len);
+  fnv1a64_write_u64(&hash, total_rows);
 
-  for (size_t i = 0; i < sampled_len; i++) {
-    const size_t row = sampled_rows[i];
+  for (size_t row = 0u; row < total_rows; row++) {
     fnv1a64_write_u64(&hash, row);
     for (uint16_t col = 0u; col < cols; col++) {
       GhosttyPoint point = {
