@@ -15,7 +15,7 @@ benchmark-tmon:
     {
       rustc --version
       echo
-      cargo run --locked --quiet -p tmon --release --example engine_compare
+      cargo run --locked --quiet -p xtask --release --example engine_compare
     } 2>&1 | tee "$report"
     gate_status=0
     set +e
@@ -27,7 +27,7 @@ benchmark-tmon:
     set -e
     {
       echo
-      TMON_BENCH_ALLOCATIONS_ONLY=1 cargo run --locked --quiet -p tmon --release --example engine_compare --features benchmark-allocations
+      TMON_BENCH_ALLOCATIONS_ONLY=1 cargo run --locked --quiet -p xtask --release --example engine_compare --features benchmark-allocations
     } 2>&1 | tee -a "$report"
     exit "$gate_status"
 
@@ -164,7 +164,28 @@ check-file-sizes:
     ./scripts/check-file-sizes.sh
 
 test-tmux-integration:
-    cargo test -p termy_terminal_ui --test tmux_split_integration -- --ignored --nocapture --test-threads=1
+    #!/usr/bin/env bash
+    set -euo pipefail
+    terminal_ui_tests=(
+      tmux_split_vertical_then_horizontal_refresh_snapshot_parses_nested_layout
+      tmux_repeated_split_refresh_cycles_remain_parseable
+      tmux_new_window_after_inserts_immediately_after_target_window
+      tmux_working_directory_flags_apply_to_session_window_and_split
+      tmux_capture_full_rejoins_wrapped_input_rows
+      managed_nonpersistent_drop_kills_session
+      managed_persistent_drop_keeps_session_but_removes_client
+      repeated_reconnect_does_not_increase_client_count
+    )
+    for test_name in "${terminal_ui_tests[@]}"; do
+      cargo test --locked -p termy_terminal_ui --test tmux_split_integration "$test_name" -- \
+        --ignored --exact --nocapture --test-threads=1
+    done
+    cargo test --locked -p termy_tmux_control_core --lib \
+      session::tests::launches_and_drives_control_mode -- \
+      --ignored --exact --nocapture --test-threads=1
+    cargo test --locked -p termy_ffi --test tmux_control_ffi \
+      ffi_control_open_poll_send_close -- \
+      --ignored --exact --nocapture --test-threads=1
 
 # Bump version in desktop app + cli Cargo.toml. Kind: major | minor | patch
 bump kind:

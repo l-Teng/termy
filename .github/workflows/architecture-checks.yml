@@ -105,6 +105,62 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace --release
 
+  tmon-tests:
+    name: Tmon tests (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            runner: macos-latest
+          - os: linux
+            runner: ubuntu-24.04
+          - os: windows
+            runner: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Run Tmon tests
+        run: cargo test --locked -p tmon
+
+  ffi-tests:
+    name: FFI tests (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            runner: macos-latest
+          - os: linux
+            runner: ubuntu-24.04
+          - os: windows
+            runner: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Run FFI tests
+        run: cargo test --locked -p termy_ffi
+
   desktop-platform-check:
     name: Desktop platform check (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
@@ -146,19 +202,43 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Test Tmon on Windows
-        if: matrix.os == 'windows'
-        run: cargo test --locked -p tmon --lib
-
       - name: Check desktop platform
         shell: bash
         run: ./scripts/check-platform-builds.sh --native
 
   tmux-integration:
-    runs-on: macos-latest
+    name: Tmux integration (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            runner: macos-latest
+          - os: linux
+            runner: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Linux desktop dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libfontconfig-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libssl-dev \
+            libzstd-dev \
+            libasound2-dev \
+            libvulkan1 \
+            tmux \
+            just
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -168,7 +248,8 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Install tmux + just
+      - name: Install macOS tmux + just
+        if: matrix.os == 'macos'
         run: brew install tmux just
 
       - name: Require tmux >= 3.3
@@ -183,7 +264,7 @@ jobs:
             minor_digits=0
           fi
           if (( major < 3 )) || (( major == 3 && minor_digits < 3 )); then
-            echo "tmux ${version} is below required 3.3 (run: brew upgrade tmux)" >&2
+            echo "tmux ${version} is below required 3.3" >&2
             exit 1
           fi
           echo "tmux ${version}"

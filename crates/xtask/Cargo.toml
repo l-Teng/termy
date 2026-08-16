@@ -6,7 +6,11 @@ edition = "2024"
 [lints]
 workspace = true
 
+[features]
+benchmark-allocations = []
+
 [dependencies]
+alacritty_terminal = { workspace = true }
 anyhow = { workspace = true }
 roxmltree = "0.20"
 serde = { workspace = true }
@@ -15,3 +19,4 @@ tempfile = { workspace = true }
 termy_command_core = { path = "../command_core" }
 termy_config_core = { path = "../config_core" }
 termy_core = { path = "../core" }
+tmon = { path = "../tmon" }

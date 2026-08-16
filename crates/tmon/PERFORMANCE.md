@@ -128,8 +128,9 @@ The target baseline used Linux x86_64 and rustc 1.97.1:
 | Cursor + line edits | 3.2 MiB/s | 3.3 MiB/s | 0.98x |
 
 The repository's `Tmon vs Alacritty Benchmark` workflow remains the authority
-for a Linux after-table. It runs on every push, is manually dispatchable, and
-uploads `tmon-alacritty-benchmark.txt`.
+for a Linux after-table. It runs on pushes to `main` that change its declared
+Cargo, core, Tmon, xtask, revision-gate, or workflow paths, is manually
+dispatchable, and uploads `tmon-alacritty-benchmark.txt`.
 
 ## Last hosted baseline before the current working tree
 
@@ -214,9 +215,10 @@ finalizer to preserve the report.
 
 It is an integrated runtime comparison, not a raw-parser comparison. Tmon feeds
 its engine directly. Alacritty is exercised through `termy_core`, including its
-locking and graphics-interception boundary. The payload calls are also smaller
-than normal PTY reads. These constraints are now printed in the report rather
-than hidden by a broader claim.
+locking and graphics-interception boundary. The report identifies both selected
+runtimes explicitly, and neither path is selected through the desktop engine
+environment. The payload calls are also smaller than normal PTY reads. These
+constraints are printed in the report rather than hidden by a broader claim.
 
 Pre-change Time Profiler samples identified these hotspots:
 
@@ -367,8 +369,9 @@ same offset and normal input order remains FIFO; saturation closes the session
 rather than silently losing a response. Unsupported Unix ABIs now compile
 through Tmon's non-native fallback instead of entering a partially defined PTY
 module. The parser/grid benchmark does not measure this PTY or event-queue work.
-Windows live-runtime validation and the next GitHub Actions benchmark artifact
-are still pending.
+Windows CI compiles and runs Tmon's Rust tests, but no CI job currently launches
+a live ConPTY child. That live-runtime validation and the next GitHub Actions
+benchmark artifact are still pending.
 
 Dropping a live Unix PTY now sends hangup, waits for a bounded 250 ms grace
 period, and escalates to `SIGKILL`, preventing a hangup-ignoring child from
@@ -381,8 +384,9 @@ they have no parser/grid benchmark number.
 ## Allocation accounting
 
 Whole-process allocator requests are now measured by a separate, report-only
-pass after the timed comparison. The `benchmark-allocations` feature installs a
-`System` wrapper only in the example binary and requires
+pass after the timed comparison. The xtask benchmark example's
+`benchmark-allocations` feature installs a `System` wrapper only in the example
+binary and requires
 `TMON_BENCH_ALLOCATIONS_ONLY=1`; a feature build refuses timed mode, while a
 normal build rejects allocation-only mode. The normal throughput executable
 therefore contains no allocator-counter overhead.

@@ -22,6 +22,16 @@ check_forbidden_target_dep() {
   fi
 }
 
+check_forbidden_all_target_dep() {
+  local crate="$1"
+  local forbidden_dep="$2"
+
+  if cargo tree -p "$crate" --target all --edges normal,build,dev | rg -q "\b${forbidden_dep} v"; then
+    echo "Boundary check failed: ${crate} must not depend on ${forbidden_dep} in any dependency section" >&2
+    exit 1
+  fi
+}
+
 check_required_target_dep() {
   local crate="$1"
   local target="$2"
@@ -200,6 +210,13 @@ check_forbidden_dep "termy_config_core" "termy_themes"
 check_forbidden_dep "termy_cli_install_core" "gpui"
 check_forbidden_dep "termy_cli" "gpui"
 check_forbidden_dep "termy_core" "gpui"
+check_forbidden_all_target_dep "tmon" "termy_core"
+check_forbidden_all_target_dep "tmon" "termy"
+check_forbidden_all_target_dep "tmon" "termy_terminal_ui"
+check_forbidden_all_target_dep "tmon" "termy_ui"
+check_forbidden_all_target_dep "tmon" "gpui"
+check_forbidden_all_target_dep "tmon" "gpui_platform"
+check_forbidden_all_target_dep "tmon" "termy_ffi"
 check_forbidden_dep "termy_ffi" "gpui"
 check_forbidden_dep "termy_ffi" "termy_terminal_ui"
 check_forbidden_dep "termy_plugin_runtime" "gpui"

@@ -8,12 +8,8 @@ description = "Experimental lightweight terminal engine for Termy"
 [lints]
 workspace = true
 
-[features]
-benchmark-allocations = []
-
 [dependencies]
 
 [dev-dependencies]
 alacritty_terminal = { workspace = true }
-termy_core = { path = "../core" }
 unicode-width = { workspace = true }

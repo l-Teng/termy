@@ -292,6 +292,9 @@ const MAX_BENCHMARK_MIB_PER_ENGINE: usize = 2_048;
 #[cfg(feature = "benchmark-allocations")]
 const MAX_ALLOCATION_MIB_TOTAL: usize = 1_024;
 const SUPPLIED_SNAPSHOT_RATIO_BASELINE: f64 = 19.88;
+const TMON_RUNTIME_DESCRIPTION: &str = "tmon::Terminal display engine (direct)";
+const ALACRITTY_RUNTIME_DESCRIPTION: &str =
+    "termy_core::Terminal display engine (Alacritty-backed)";
 #[cfg(feature = "benchmark-allocations")]
 const ALLOCATION_WARMUP_BYTES: usize = 2 * MIB;
 
@@ -900,6 +903,11 @@ fn run_allocation_mode() {
     println!("Tmon vs Alacritty allocation request accounting");
     println!("===============================================");
     println!("Platform: {}/{}", env::consts::OS, env::consts::ARCH);
+    println!("Tmon runtime: {TMON_RUNTIME_DESCRIPTION}");
+    println!("Alacritty runtime: {ALACRITTY_RUNTIME_DESCRIPTION}");
+    println!(
+        "Engine selection: explicit benchmark constructors; desktop engine environment is ignored"
+    );
     println!("Grid: {COLS}x{ROWS}, scrollback: {SCROLLBACK} lines");
     println!("Parse target per engine/workload: {target_bytes} bytes ({target_mib} MiB)");
     println!(
@@ -990,6 +998,11 @@ fn run_timed_mode() {
     println!("Tmon vs Alacritty terminal engine benchmark");
     println!("============================================");
     println!("Platform: {}/{}", env::consts::OS, env::consts::ARCH);
+    println!("Tmon runtime: {TMON_RUNTIME_DESCRIPTION}");
+    println!("Alacritty runtime: {ALACRITTY_RUNTIME_DESCRIPTION}");
+    println!(
+        "Engine selection: explicit benchmark constructors; desktop engine environment is ignored"
+    );
     println!("Grid: {COLS}x{ROWS}, scrollback: {SCROLLBACK} lines");
     println!("Samples: {sample_count}, parse target: {target_mib} MiB/sample");
     println!("Legacy raw snapshots: {snapshot_count}/sample");
@@ -1175,6 +1188,9 @@ fn run_timed_mode() {
     println!();
     println!("Notes");
     println!("  - Ratios above 1.000x favor Tmon; below 1.000x favor Alacritty.");
+    println!(
+        "  - The selected runtimes are printed above and do not depend on the desktop engine environment."
+    );
     println!("  - Alacritty is measured through Termy's termy_core wrapper.");
     println!("  - Even sample counts balance T/A and A/T starting order within every workload.");
     println!("  - Parser targets use the median of per-sample paired ratios.");

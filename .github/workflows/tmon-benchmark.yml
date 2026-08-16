@@ -8,6 +8,7 @@ on:
       - "Cargo.toml"
       - "crates/core/**"
       - "crates/tmon/**"
+      - "crates/xtask/**"
       - "tools/tmon-revision-gate/**"
       - ".github/workflows/tmon-benchmark.yml"
   workflow_dispatch:
@@ -78,7 +79,7 @@ jobs:
             rustc --version
             echo "Cargo.lock SHA-256: $(sha256sum Cargo.lock | awk '{print $1}')"
             echo
-            cargo run --locked --quiet -p tmon --release --example engine_compare
+            cargo run --locked --quiet -p xtask --release --example engine_compare
           } 2>&1 | tee -a "$report"
 
       - name: Checkout immutable snapshot baseline
@@ -128,7 +129,7 @@ jobs:
           report="$RUNNER_TEMP/$TMON_BENCH_REPORT_NAME"
           {
             echo
-            cargo run --locked --quiet -p tmon --release --example engine_compare --features benchmark-allocations
+            cargo run --locked --quiet -p xtask --release --example engine_compare --features benchmark-allocations
           } 2>&1 | tee -a "$report"
 
       - name: Finalize report

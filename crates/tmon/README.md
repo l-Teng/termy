@@ -27,17 +27,22 @@ cargo test -p tmon
 cargo clippy -p tmon --all-targets -- -D warnings
 ```
 
-The benchmark example and immutable revision gate have unit-test modes, but
-their timed mains are intentionally reserved for the GitHub Actions benchmark
-workflow.
+The cross-engine benchmark harness lives in `crates/xtask` so this crate does
+not depend on `termy_core`. Its timed mode can run locally with
+`just benchmark-tmon`; GitHub Actions runs the same comparison for relevant
+pushes to `main` and manual dispatches.
 
 ## Forbidden Dependencies
 
-- `gpui`
+- `gpui` / `gpui_platform`
 - `termy_core`
 - `termy_terminal_ui`
-- `alacritty_terminal`
+- `termy_ui`
+- `termy_ffi`
 - `termy` / `crates/desktop_app`
+
+`alacritty_terminal` and `unicode-width` are development-only dependencies for
+semantic parity checks; Tmon's production dependency section remains empty.
 
 Run the desktop app with Tmon selected:
 
@@ -50,9 +55,11 @@ Open Termy's inspector and select the **Terminal** tab; the **Engine** row reads
 startup log also prints `using experimental Tmon terminal engine` when selected.
 
 The environment variable affects native terminals only. Tmux display panes
-continue to use their existing parser. On Windows, an exact `1` selects Tmon
-when the required ConPTY API is available at runtime; otherwise Termy logs a
-warning and falls back to the unchanged Alacritty-backed native engine. Without
+continue to use their existing parser. On Windows, the code path is gated by the
+runtime availability of the required ConPTY APIs, but CI does not yet exercise
+a live ConPTY child. An exact `1` selects Tmon when those APIs are available;
+otherwise Termy logs a warning and falls back to the unchanged
+Alacritty-backed native engine. Without
 an exact `1`, Alacritty remains the default on every platform. Other Unix
 targets also keep that fallback because Tmon does not advertise an unsupported
 native PTY ABI there.
@@ -210,8 +217,10 @@ dispatch the **Tmon vs Ghostty Benchmark** GitHub Actions workflow:
 GHOSTTY_DIR=../ghostty just benchmark-tmon-ghostty-memory
 ```
 
-The `Tmon vs Alacritty Benchmark` GitHub Actions workflow runs on every push and
-can also be started manually with configurable workload sizes. When the runner
+The `Tmon vs Alacritty Benchmark` GitHub Actions workflow runs on pushes to
+`main` that change its declared Cargo, core, Tmon, xtask, revision-gate, or
+workflow paths, and it can also be started manually with configurable workload
+sizes. When the runner
 remains available, the report is uploaded as a 30-day artifact and included in
 the job summary; its finalizer records setup outcomes even if the comparison
 cannot start. CI defaults to eight samples and rejects odd counts so each
@@ -226,7 +235,10 @@ fails before it can consume the job timeout and prevent report upload. The first
 measured optimization pass is documented in [PERFORMANCE.md](PERFORMANCE.md).
 
 The suite compares identical byte streams, grid dimensions, and scrollback
-limits in release mode. Before timing, an untimed preflight compares up to 32
+limits in release mode. The report names the direct Tmon runtime and the
+Alacritty-backed `termy_core` runtime explicitly; desktop engine environment is
+not used to choose either path. Before timing, an untimed preflight compares up
+to 32
 MiB of every workload across every normalized grid and scrollback cell plus
 cursor, scroll, and screen state. It reports integrated Termy backend
 throughput, current full-frame API throughput, and static cell sizes. Feed calls
@@ -244,8 +256,10 @@ least 250 ms, and an untimed mixed-frame preflight requires exact equality. This
 new equivalent-work ratio is report-only until its first Linux CI baseline is
 available. The suite does not measure graphics decoding, PTY I/O, GPUI painting,
 input latency, or complete terminal compatibility, and speed ratios are not a
-feature-parity score. Windows ConPTY live-runtime validation and the first
-GitHub Actions measurement of the current follow-up work are still pending.
+feature-parity score. Windows CI compiles and runs Tmon's Rust test suite, but
+no CI job currently launches a live Windows ConPTY child; that runtime evidence
+remains pending. The first GitHub Actions measurement of the current follow-up
+work is also pending.
 
 It also prints a report-only Tmon scroll-cache measurement. Parsing and damage
 capture happen once outside both timed paths; an untimed preflight requires an
@@ -266,7 +280,7 @@ CI instead of silently accepting uncertainty. The reference SHA is ratcheted
 only by an explicit source change after a reviewed measurement, never to the
 previous push automatically.
 
-The allocation pass rebuilds only the example with the
+The allocation pass rebuilds only the xtask benchmark example with the
 `benchmark-allocations` feature and requires
 `TMON_BENCH_ALLOCATIONS_ONLY=1`; that feature build refuses timed mode. Its
 `System` allocator wrapper is absent from the normal throughput binary, so the

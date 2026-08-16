@@ -8132,7 +8132,6 @@ name = "tmon"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
- "termy_core",
  "unicode-width 0.2.0",
 ]
 
@@ -10266,6 +10265,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "roxmltree",
  "serde",
@@ -10274,6 +10274,7 @@ dependencies = [
  "termy_command_core",
  "termy_config_core",
  "termy_core",
+ "tmon",
 ]
 
 [[package]]
