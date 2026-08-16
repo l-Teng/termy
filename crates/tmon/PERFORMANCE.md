@@ -369,9 +369,11 @@ same offset and normal input order remains FIFO; saturation closes the session
 rather than silently losing a response. Unsupported Unix ABIs now compile
 through Tmon's non-native fallback instead of entering a partially defined PTY
 module. The parser/grid benchmark does not measure this PTY or event-queue work.
-Windows CI compiles and runs Tmon's Rust tests, but no CI job currently launches
-a live ConPTY child. That live-runtime validation and the next GitHub Actions
-benchmark artifact are still pending.
+Windows CI launches live ConPTY children directly through Tmon and covers final
+output draining before the exit callback, immediate resize plus stdin
+round-trip, and batch-wrapper launch in a normalized working directory. It does
+not exercise ConPTY through the desktop application or measure Windows PTY
+performance. The next GitHub Actions benchmark artifact is still pending.
 
 Dropping a live Unix PTY now sends hangup, waits for a bounded 250 ms grace
 period, and escalates to `SIGKILL`, preventing a hangup-ignoring child from

@@ -166,26 +166,68 @@ check-file-sizes:
 test-tmux-integration:
     #!/usr/bin/env bash
     set -euo pipefail
-    terminal_ui_tests=(
-      tmux_split_vertical_then_horizontal_refresh_snapshot_parses_nested_layout
-      tmux_repeated_split_refresh_cycles_remain_parseable
-      tmux_new_window_after_inserts_immediately_after_target_window
-      tmux_working_directory_flags_apply_to_session_window_and_split
-      tmux_capture_full_rejoins_wrapped_input_rows
-      managed_nonpersistent_drop_kills_session
-      managed_persistent_drop_keeps_session_but_removes_client
-      repeated_reconnect_does_not_increase_client_count
+    validate_exact_test() {
+      local package="$1"
+      local target_kind="$2"
+      local target_name="$3"
+      local test_name="$4"
+      local listed match_count
+      local cargo_args=(test --locked -p "$package")
+      case "$target_kind" in
+        lib) cargo_args+=(--lib) ;;
+        integration) cargo_args+=(--test "$target_name") ;;
+        *)
+          echo "Tmux integration configuration error: invalid target kind '$target_kind'" >&2
+          return 1
+          ;;
+      esac
+      listed=$(cargo "${cargo_args[@]}" "$test_name" -- --ignored --exact --list)
+      match_count=$(printf '%s\n' "$listed" | grep -Fxc -- "$test_name: test" || true)
+      if (( match_count != 1 )); then
+        echo "Tmux integration configuration error: '$test_name' matched $match_count tests" >&2
+        printf '%s\n' "$listed" >&2
+        return 1
+      fi
+    }
+    if [[ -n "${TERMY_TMUX_VALIDATE_TEST_SPEC:-}" ]]; then
+      IFS='|' read -r package target_kind target_name test_name <<<"$TERMY_TMUX_VALIDATE_TEST_SPEC"
+      validate_exact_test "$package" "$target_kind" "$target_name" "$test_name"
+      exit
+    fi
+    tmux_tests=(
+      "termy_terminal_ui|integration|tmux_split_integration|tmux_split_vertical_then_horizontal_refresh_snapshot_parses_nested_layout"
+      "termy_terminal_ui|integration|tmux_split_integration|tmux_repeated_split_refresh_cycles_remain_parseable"
+      "termy_terminal_ui|integration|tmux_split_integration|tmux_new_window_after_inserts_immediately_after_target_window"
+      "termy_terminal_ui|integration|tmux_split_integration|tmux_working_directory_flags_apply_to_session_window_and_split"
+      "termy_terminal_ui|integration|tmux_split_integration|tmux_capture_full_rejoins_wrapped_input_rows"
+      "termy_terminal_ui|integration|tmux_split_integration|managed_nonpersistent_drop_kills_session"
+      "termy_terminal_ui|integration|tmux_split_integration|managed_persistent_drop_keeps_session_but_removes_client"
+      "termy_terminal_ui|integration|tmux_split_integration|repeated_reconnect_does_not_increase_client_count"
+      "termy_tmux_control_core|lib||session::tests::launches_and_drives_control_mode"
+      "termy_ffi|integration|tmux_control_ffi|ffi_control_open_poll_send_close"
     )
-    for test_name in "${terminal_ui_tests[@]}"; do
-      cargo test --locked -p termy_terminal_ui --test tmux_split_integration "$test_name" -- \
+    if (( ${#tmux_tests[@]} != 10 )); then
+      echo "Tmux integration configuration error: expected 10 tests, got ${#tmux_tests[@]}" >&2
+      exit 1
+    fi
+    unique_count=$(
+      printf '%s\n' "${tmux_tests[@]}" | cut -d '|' -f 4 | LC_ALL=C sort -u | wc -l | tr -d '[:space:]'
+    )
+    if (( unique_count != ${#tmux_tests[@]} )); then
+      echo "Tmux integration configuration error: test names must be unique" >&2
+      exit 1
+    fi
+    for test_spec in "${tmux_tests[@]}"; do
+      IFS='|' read -r package target_kind target_name test_name <<<"$test_spec"
+      validate_exact_test "$package" "$target_kind" "$target_name" "$test_name"
+      cargo_args=(test --locked -p "$package")
+      case "$target_kind" in
+        lib) cargo_args+=(--lib) ;;
+        integration) cargo_args+=(--test "$target_name") ;;
+      esac
+      cargo "${cargo_args[@]}" "$test_name" -- \
         --ignored --exact --nocapture --test-threads=1
     done
-    cargo test --locked -p termy_tmux_control_core --lib \
-      session::tests::launches_and_drives_control_mode -- \
-      --ignored --exact --nocapture --test-threads=1
-    cargo test --locked -p termy_ffi --test tmux_control_ffi \
-      ffi_control_open_poll_send_close -- \
-      --ignored --exact --nocapture --test-threads=1
 
 # Bump version in desktop app + cli Cargo.toml. Kind: major | minor | patch
 bump kind:

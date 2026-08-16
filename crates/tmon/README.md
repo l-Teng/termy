@@ -55,11 +55,13 @@ Open Termy's inspector and select the **Terminal** tab; the **Engine** row reads
 startup log also prints `using experimental Tmon terminal engine` when selected.
 
 The environment variable affects native terminals only. Tmux display panes
-continue to use their existing parser. On Windows, the code path is gated by the
-runtime availability of the required ConPTY APIs, but CI does not yet exercise
-a live ConPTY child. An exact `1` selects Tmon when those APIs are available;
-otherwise Termy logs a warning and falls back to the unchanged
-Alacritty-backed native engine. Without
+continue to use their existing parser. Windows Tmon CI launches live ConPTY
+children directly through Tmon and verifies final-output draining before the
+exit callback, immediate resize plus stdin round-trip, and batch-wrapper launch
+in a normalized working directory. It does not exercise desktop engine
+selection or GPUI rendering through a live Windows terminal. An exact `1`
+selects Tmon when the required ConPTY APIs are available; otherwise Termy logs a
+warning and falls back to the unchanged Alacritty-backed native engine. Without
 an exact `1`, Alacritty remains the default on every platform. Other Unix
 targets also keep that fallback because Tmon does not advertise an unsupported
 native PTY ABI there.
@@ -256,10 +258,11 @@ least 250 ms, and an untimed mixed-frame preflight requires exact equality. This
 new equivalent-work ratio is report-only until its first Linux CI baseline is
 available. The suite does not measure graphics decoding, PTY I/O, GPUI painting,
 input latency, or complete terminal compatibility, and speed ratios are not a
-feature-parity score. Windows CI compiles and runs Tmon's Rust test suite, but
-no CI job currently launches a live Windows ConPTY child; that runtime evidence
-remains pending. The first GitHub Actions measurement of the current follow-up
-work is also pending.
+feature-parity score. Windows CI separately launches live ConPTY children to
+cover final-output draining, immediate resize and stdin round-trip, and a
+batch-wrapper working-directory case. It does not exercise ConPTY through the
+desktop application or measure Windows PTY performance. The first GitHub
+Actions measurement of the current follow-up work is also pending.
 
 It also prints a report-only Tmon scroll-cache measurement. Parsing and damage
 capture happen once outside both timed paths; an untimed preflight requires an
