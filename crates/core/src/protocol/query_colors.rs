@@ -181,7 +181,7 @@ impl TerminalQueryColors {
         }
     }
 
-    fn indexed_color(self, idx: u8) -> TerminalColor {
+    pub(crate) fn indexed_color(self, idx: u8) -> TerminalColor {
         match idx {
             0..=15 => self.ansi[idx as usize],
             16..=231 => {

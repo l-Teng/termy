@@ -1444,6 +1444,7 @@ pub(crate) struct Grid {
     history: VecDeque<HistoryRow>,
     history_limit: usize,
     display_offset: usize,
+    resize_anchor_suppressed_after_clear: bool,
     damage: Damage,
     cursor_visible: bool,
     cursor_style: CursorStyle,
@@ -1475,7 +1476,6 @@ pub(crate) struct Grid {
     next_extra_id: u32,
     effects: VecDeque<GridEffect>,
 }
-
 mod edit;
 mod effects;
 mod fast_lines;

@@ -74,6 +74,15 @@ impl TerminalRenderText {
         Self(text)
     }
 
+    pub(crate) fn from_cell_suffix(base: char, combining: Option<&str>) -> Self {
+        let mut text = CompactString::default();
+        text.push(base);
+        if let Some(combining) = combining {
+            text.push_str(combining);
+        }
+        Self(text)
+    }
+
     #[cfg(test)]
     pub(crate) fn is_heap_allocated(&self) -> bool {
         self.0.is_heap_allocated()

@@ -14,6 +14,7 @@ mod pty;
 #[cfg(target_os = "windows")]
 #[path = "pty_windows.rs"]
 mod pty;
+mod terminal_read;
 mod unicode_width;
 
 #[cfg(any(
@@ -391,7 +392,10 @@ impl Engine {
     }
 
     fn feed_detailed(&mut self, bytes: &[u8]) -> EngineOutput {
+        let resize_anchor_was_suppressed = self.grid.resize_anchor_suppressed_after_clear();
         let parsed = self.parser.advance(&mut self.grid, bytes);
+        self.grid
+            .observe_live_output_for_resize_anchor(resize_anchor_was_suppressed);
         self.bump_render_generation();
         let events = parsed.events.into_iter().map(Event::from).collect();
         EngineOutput {
@@ -1115,26 +1119,12 @@ impl Terminal {
     }
 
     pub fn take_damage_snapshot(&self) -> DamageSnapshot {
-        self.engine
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .grid
-            .take_damage()
+        self.take_damage_snapshot_with_viewport_state().0
     }
 
     /// Take renderer-aware damage without losing ordered row movement.
     pub fn take_render_damage_snapshot(&self) -> RenderDamageSnapshot {
-        let mut engine = self
-            .engine
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let generation = engine.render_generation;
-        let (damage, scrolls) = engine.grid.take_render_damage();
-        RenderDamageSnapshot {
-            damage,
-            scrolls,
-            generation,
-        }
+        self.take_render_damage_snapshot_with_palette_revision().0
     }
 
     /// Visit one coherent renderer update and consume only the represented damage.
@@ -1195,11 +1185,7 @@ impl Terminal {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        self.engine
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .grid
-            .snapshot()
+        self.snapshot_with_palette().0
     }
 
     pub fn palette(&self) -> Palette {

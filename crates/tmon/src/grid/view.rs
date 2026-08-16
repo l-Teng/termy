@@ -136,16 +136,20 @@ impl Grid {
         let cursor_row = self.primary.cursor_row;
         let cursor_col = self.primary.cursor_col;
         let old_wrap_pending = self.primary.wrap_pending;
-        let last_meaningful_row = (0..self.primary.rows)
-            .rev()
-            .find(|&row| {
-                self.primary
-                    .row(row)
-                    .iter()
-                    .any(|cell| !cell_is_empty_for_viewport(cell))
-            })
-            .unwrap_or(0)
-            .max(cursor_row);
+        let last_meaningful_row = if self.resize_anchor_suppressed_after_clear {
+            self.primary.rows.saturating_sub(1)
+        } else {
+            (0..self.primary.rows)
+                .rev()
+                .find(|&row| {
+                    self.primary
+                        .row(row)
+                        .iter()
+                        .any(|cell| !cell_is_empty_for_viewport(cell))
+                })
+                .unwrap_or(0)
+                .max(cursor_row)
+        };
 
         let old_history = std::mem::take(&mut self.history);
         let history_rows = old_history.len();
@@ -433,6 +437,7 @@ impl Grid {
         if self.alternate_active {
             return false;
         }
+        self.resize_anchor_suppressed_after_clear = false;
         if self.history.is_empty() && self.display_offset == 0 {
             return false;
         }
@@ -447,6 +452,20 @@ impl Grid {
         }
         self.damage.mark_full();
         true
+    }
+
+    pub(crate) fn resize_anchor_suppressed_after_clear(&self) -> bool {
+        self.resize_anchor_suppressed_after_clear
+    }
+
+    pub(crate) fn observe_live_output_for_resize_anchor(&mut self, was_suppressed: bool) {
+        if !was_suppressed || self.alternate_active {
+            return;
+        }
+        let cursor_row = self.primary.cursor_row;
+        if cursor_row.saturating_add(1) >= self.primary.rows {
+            self.resize_anchor_suppressed_after_clear = false;
+        }
     }
 
     pub(crate) fn pop_effect(&mut self) -> Option<GridEffect> {

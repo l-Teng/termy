@@ -2061,8 +2061,11 @@ impl Dimensions for TerminalSize {
 
 /// The terminal state wrapper
 pub struct Terminal {
-    backend: alacritty_backend::AlacrittyBackend,
+    backend: engine_backend::Backend,
 }
+
+mod engine_backend;
+mod tmon_backend;
 
 mod alacritty_backend {
     use super::*;
@@ -2866,7 +2869,7 @@ impl Terminal {
         runtime_config: Option<&TerminalRuntimeConfig>,
         startup_command: Option<&str>,
     ) -> anyhow::Result<Self> {
-        alacritty_backend::AlacrittyBackend::new(
+        engine_backend::Backend::new(
             size,
             configured_working_dir,
             event_wakeup_tx,
@@ -2886,7 +2889,7 @@ impl Terminal {
         runtime_config: Option<&TerminalRuntimeConfig>,
         startup_command: Option<&str>,
     ) -> anyhow::Result<Self> {
-        alacritty_backend::AlacrittyBackend::new_with_wakeup_notifier(
+        engine_backend::Backend::new_with_wakeup_notifier(
             size,
             configured_working_dir,
             wakeup_notifier,
@@ -2906,7 +2909,7 @@ impl Terminal {
         runtime_config: Option<&TerminalRuntimeConfig>,
         launch: Option<&TerminalLaunch>,
     ) -> anyhow::Result<Self> {
-        alacritty_backend::AlacrittyBackend::new_with_launch_and_wakeup_notifier(
+        engine_backend::Backend::new_with_launch_and_wakeup_notifier(
             size,
             configured_working_dir,
             wakeup_notifier,
@@ -2920,7 +2923,17 @@ impl Terminal {
     /// Create a display-only terminal with no PTY or child process.
     pub fn new_display(size: TerminalSize, runtime_config: Option<&TerminalRuntimeConfig>) -> Self {
         Self {
-            backend: alacritty_backend::AlacrittyBackend::new_display(size, runtime_config),
+            backend: engine_backend::Backend::new_display(size, runtime_config),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_alacritty_display_for_test(
+        size: TerminalSize,
+        runtime_config: Option<&TerminalRuntimeConfig>,
+    ) -> Self {
+        Self {
+            backend: engine_backend::Backend::new_alacritty_display_for_test(size, runtime_config),
         }
     }
 
@@ -4309,7 +4322,7 @@ mod tests {
 
     #[test]
     fn empty_terminal_drain_preserves_a_coalesced_wakeup() {
-        let terminal = Terminal::new_display(test_terminal_size(), None);
+        let terminal = Terminal::new_alacritty_display_for_test(test_terminal_size(), None);
         terminal.backend.send_wakeup_for_test();
         assert!(matches!(
             terminal.backend.try_recv_event_for_test(),

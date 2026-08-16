@@ -1211,3 +1211,36 @@ fn sizes_are_clamped_before_allocating_the_grid() {
     assert_eq!(terminal.size().cell_width, 1.0);
     assert_eq!(terminal.size().cell_height, 1.0);
 }
+
+#[test]
+fn cleared_primary_viewport_stays_clear_across_width_reflow() {
+    let terminal = Terminal::new_display(
+        Size {
+            cols: 40,
+            rows: 10,
+            ..Size::default()
+        },
+        Config::default(),
+    );
+    for line in 0..18 {
+        terminal
+            .feed_output(format!("HISTORY-{line:02}-abcdefghijklmnopqrstuvwxyz\r\n").as_bytes());
+    }
+    terminal.feed_output(b"\x1b[H\x1b[2J$ ");
+
+    terminal.resize(Size {
+        cols: 20,
+        rows: 10,
+        ..Size::default()
+    });
+
+    let snapshot = terminal.snapshot();
+    let visible = snapshot
+        .cells
+        .chunks(usize::from(snapshot.cols))
+        .map(|row| row.iter().map(|cell| cell.character).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!visible.contains("HISTORY-"), "{visible}");
+    assert!(snapshot.history_size > 0);
+}

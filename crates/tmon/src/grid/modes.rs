@@ -9,6 +9,7 @@ impl Grid {
         self.history.clear();
         self.history.shrink_to_fit();
         self.display_offset = 0;
+        self.resize_anchor_suppressed_after_clear = false;
         self.cursor_visible = true;
         self.cursor_style = self.default_cursor_style;
         self.cursor_style_explicit = false;

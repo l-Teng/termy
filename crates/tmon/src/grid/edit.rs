@@ -17,6 +17,7 @@ impl Grid {
             history: VecDeque::new(),
             history_limit: history_limit.min(MAX_SCROLLBACK_LINES),
             display_offset: 0,
+            resize_anchor_suppressed_after_clear: false,
             damage: Damage::new(rows),
             cursor_visible: true,
             cursor_style: default_cursor_style,
@@ -812,6 +813,7 @@ impl Grid {
                 if self.alternate_active {
                     self.active_mut().fill(blank);
                 } else {
+                    self.resize_anchor_suppressed_after_clear = true;
                     let positions = (0..rows)
                         .rev()
                         .find(|&target| {

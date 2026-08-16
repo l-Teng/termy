@@ -12,7 +12,11 @@ Use this crate when behavior should be available to FFI, WASM, JS, or non-GPUI h
 
 ```sh
 cargo test -p termy_core
+TERMY_CORE_TEST_BACKEND=tmon cargo test -p termy_core
 ```
+
+The second command exercises the private migration backend. The selector is
+test-only plumbing, not a supported embedder or desktop configuration surface.
 
 ## Forbidden Dependencies
 
@@ -29,7 +33,9 @@ underline variants and colors, live palette revisions, ordered viewport scroll
 damage, or generation-checked range reads should use `Terminal::render_read`,
 `Terminal::take_render_damage_snapshot`, and the `visit_*` methods instead.
 
-The terminal engine is deliberately private. `termy_core` 0.2 removed
+The terminal engine is deliberately private. During the Tmon migration the
+facade can dispatch to either retained Alacritty state or Tmon without exposing
+either engine's types. `termy_core` 0.2 removed
 `Terminal::with_term`, `TerminalOptions::term_config`, and the exported raw
 Alacritty conversion helpers. Embedders should use core-owned types such as
 `TerminalColor`, `TerminalRenderCell`, and `TerminalQueryColors`, plus the

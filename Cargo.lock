@@ -7852,6 +7852,7 @@ dependencies = [
  "termy_config_core",
  "termy_search",
  "termy_themes",
+ "tmon",
  "ttf-parser",
  "unicode-width 0.2.0",
  "winreg",
