@@ -493,6 +493,53 @@ fn full_viewport_fallback_consumes_damage_represented_by_the_rebuild() {
 }
 
 #[test]
+fn full_viewport_fallback_preserves_damage_when_the_visitor_panics() {
+    let terminal = Terminal::new_display(
+        Size {
+            cols: 4,
+            rows: 2,
+            ..Size::default()
+        },
+        Config::default(),
+    );
+    let _ = terminal.take_render_damage_snapshot();
+    terminal.feed_output(b"a\r\nb\r\nc");
+    let expected = terminal
+        .engine
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .grid
+        .render_damage_snapshot();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        terminal.visit_viewport_cells_and_clear_damage(|_, _, _, _, _| {
+            panic!("visitor failed");
+        });
+    }));
+    assert!(result.is_err());
+    let preserved = terminal
+        .engine
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .grid
+        .render_damage_snapshot();
+    assert_eq!(preserved, expected);
+    assert!(matches!(preserved.0, DamageSnapshot::Partial(_)));
+    assert!(!preserved.1.is_empty());
+
+    let mut cells = 0usize;
+    terminal.visit_viewport_cells_and_clear_damage(|_, _, _, _, _| {
+        cells = cells.saturating_add(1);
+    });
+    assert_eq!(cells, 8);
+    let remaining = terminal.take_render_damage_snapshot();
+    assert_eq!(
+        (remaining.damage, remaining.scrolls),
+        (DamageSnapshot::Partial(Vec::new()), Vec::new())
+    );
+}
+
+#[test]
 fn link_at_expands_same_row_osc8_without_calling_the_classifier() {
     let terminal = Terminal::new_display(
         Size {

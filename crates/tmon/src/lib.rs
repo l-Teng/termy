@@ -1270,8 +1270,9 @@ impl Terminal {
             .engine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let viewport = engine.grid.visit_viewport_cells(visitor);
         engine.grid.clear_damage();
-        engine.grid.visit_viewport_cells(visitor)
+        viewport
     }
 
     pub fn with_viewport_cell<R>(
