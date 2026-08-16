@@ -1,4 +1,5 @@
 use regex::{Regex, RegexBuilder};
+use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
 
 use crate::matcher::{SearchMatch, SearchResults};
@@ -112,6 +113,21 @@ impl SearchEngine {
                     byte_offset_to_cell_column(m.end(), &utf8_char_boundaries, &cell_columns),
                 )
             })
+            .collect()
+    }
+
+    /// Return match ranges as UTF-8 byte offsets into `text`.
+    ///
+    /// Terminal engines with their own cell geometry can translate these
+    /// ranges without inferring columns from Unicode scalar widths.
+    pub fn search_line_byte_ranges(&self, text: &str) -> Vec<Range<usize>> {
+        let Some(regex) = &self.compiled_regex else {
+            return Vec::new();
+        };
+
+        regex
+            .find_iter(text)
+            .map(|matched| matched.start()..matched.end())
             .collect()
     }
 
@@ -357,5 +373,16 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].start_col, 2);
         assert_eq!(matches[0].end_col, 4);
+    }
+
+    #[test]
+    fn test_regex_byte_ranges_preserve_combining_prefix_offsets() {
+        let mut engine = SearchEngine::new(SearchConfig {
+            case_sensitive: true,
+            mode: SearchMode::Regex,
+        });
+        engine.set_pattern(r"\p{M}x").unwrap();
+
+        assert_eq!(engine.search_line_byte_ranges("e\u{0301}x"), vec![1..4]);
     }
 }

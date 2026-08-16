@@ -36,12 +36,20 @@ let terminal = termy_core::Terminal::new(
     Some(&loaded_config.runtime_config),
     None,
 )?;
-terminal.write(b"echo hello\r");
+terminal.try_write(b"echo hello\r")?;
 let frame = terminal.snapshot();
 ```
 
 `TermyFrame` contains a flat row-major `Vec<TermyCell>`, cursor state, scroll
 state, and cell colors as simple RGBA bytes.
+
+PTY-aware Rust hosts should use `Terminal::try_write`, `try_write_owned`,
+`try_resize`, and `try_nudge_resize` when they need to react to a disconnected
+PTY. Tmon also reports a full bounded input queue. The original void methods
+remain source-compatible wrappers and log failures. With Tmon, a successful
+live resize updates the in-memory grid only after the platform PTY acknowledges
+the new dimensions; a failed resize leaves the previous grid size intact.
+Display-only terminals accept writes as no-ops.
 
 Rust renderers that need more than the stable flat-cell contract can use
 `Terminal::render_read`. Its `TerminalRenderRead` contains coherent viewport
@@ -104,6 +112,11 @@ Search match line payloads owned by a search batch are freed by
 `termy_search_batch_free`.
 Embedders should synchronize access to a terminal handle if they call into it
 from multiple threads.
+
+`termy_terminal_write` and `termy_terminal_resize` return
+`TERMY_FFI_WRITE_FAILED` when Tmon rejects the write or the platform PTY cannot
+apply the resize. This reuses the existing status value and does not change the
+C header or ABI.
 
 `termy_terminal_new_with_options` is the host-control constructor. It accepts an
 optional loaded config plus a launch working directory, startup command, and a

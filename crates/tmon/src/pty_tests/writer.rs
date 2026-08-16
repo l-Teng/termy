@@ -44,6 +44,69 @@ fn writer_control_coalesces_to_the_latest_resize() {
 }
 
 #[test]
+fn writer_control_reports_failed_resize_to_waiting_caller() {
+    let (writer, receiver) = WriterHandle::channel();
+    let control = writer.control.clone();
+    let probe_writer = writer.clone();
+    let waiting_writer = writer;
+    let waiter =
+        std::thread::spawn(move || waiting_writer.resize_and_wait(WinSize::from(test_size())));
+
+    let wake = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("synchronous resize should wake the writer loop");
+    assert!(matches!(wake, WriterCommand::Wake(_)));
+    drop(wake);
+
+    let error = service_writer_control(&(), &control, &mut |_, _| {
+        Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "injected resize failure",
+        ))
+    })
+    .expect_err("the writer loop should observe the resize failure");
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(
+        control.is_closed(),
+        "failure must be published before waking the resize caller"
+    );
+    assert_eq!(
+        probe_writer
+            .write(b"must-not-queue")
+            .expect_err("writes after a failed resize must observe closure")
+            .kind(),
+        ErrorKind::BrokenPipe
+    );
+
+    let error = waiter
+        .join()
+        .expect("resize waiter should not panic")
+        .expect_err("the resize caller should receive the OS failure");
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("injected resize failure"));
+}
+
+#[test]
+fn completed_resize_wins_over_a_late_disconnected_wake() {
+    let (pending, completed) = PendingResize::waiting(WinSize::from(test_size()));
+    pending.complete(Ok(()));
+
+    await_resize_completion(Err(writer_closed_error()), completed, writer_closed_error)
+        .expect("an applied resize must not be rolled back by a late wake failure");
+}
+
+#[test]
+fn synchronous_resize_reports_a_disconnected_writer() {
+    let (writer, receiver) = WriterHandle::channel();
+    drop(receiver);
+
+    let error = writer
+        .resize_and_wait(WinSize::from(test_size()))
+        .expect_err("a disconnected resize writer must fail");
+    assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+}
+
+#[test]
 fn writer_control_reapplies_a_same_size_nudge() {
     let (writer, _receiver) = WriterHandle::channel();
     let window_size = WinSize::from(test_size());

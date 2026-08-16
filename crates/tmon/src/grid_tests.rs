@@ -382,6 +382,26 @@ fn long_combining_sequences_spill_out_of_inline_storage_without_data_loss() {
 }
 
 #[test]
+fn combining_text_is_bounded_per_cell_on_utf8_boundaries() {
+    let mut grid = grid(4, 2);
+    grid.put_char('e');
+    let mark = '\u{301}';
+    let retained_marks = edit::MAX_COMBINING_BYTES_PER_CELL / mark.len_utf8();
+    for _ in 0..retained_marks + 1_024 {
+        grid.put_char(mark);
+    }
+
+    let cell = &grid.line(0).unwrap()[0];
+    let combining = grid
+        .combining_text(cell)
+        .expect("bounded combining text")
+        .to_owned_string();
+    assert_eq!(combining.len(), edit::MAX_COMBINING_BYTES_PER_CELL);
+    assert_eq!(combining.chars().count(), retained_marks);
+    assert_eq!(grid.extras.len(), 1);
+}
+
+#[test]
 fn pooled_combining_text_appends_after_cell_moves_without_losing_its_link() {
     let mut grid = grid(8, 2);
     grid.set_hyperlink(None, Some("https://example.com/combined"));
@@ -395,9 +415,11 @@ fn pooled_combining_text_appends_after_cell_moves_without_losing_its_link() {
         .metadata_id
         .expect("combined cell metadata");
     assert!(is_pooled_extra_id(metadata_id));
+    let retained_hyperlink_bytes = grid.retained_hyperlink_bytes;
     grid.set_cursor_position(0, 0);
     grid.insert_blank_chars(2);
     assert_eq!(grid.line(0).unwrap()[2].metadata_id, Some(metadata_id));
+    assert_eq!(grid.retained_hyperlink_bytes, retained_hyperlink_bytes);
 
     grid.set_cursor_position(0, 3);
     grid.put_char('\u{306}');
@@ -1235,6 +1257,69 @@ fn hyperlink_pruning_is_amortized_when_the_grid_retains_many_live_links() {
 }
 
 #[test]
+fn retained_hyperlink_storage_is_bounded_while_live_links_remain_resolvable() {
+    let mut grid = Grid::new(128, 1, 0, CursorStyle::Block);
+    let suffix = "x".repeat(modes::MAX_HYPERLINK_ENTRY_PAYLOAD_BYTES / 2);
+    let mut accepted = 0;
+
+    for index in 0..128 {
+        let target = format!("https://example.com/{index}/{suffix}");
+        grid.set_hyperlink(None, Some(&target));
+        if grid.pen().hyperlink_id.is_none() {
+            break;
+        }
+        grid.put_char('x');
+        accepted += 1;
+    }
+
+    assert!(accepted > 1);
+    assert!(accepted < 128, "the aggregate budget must reject a link");
+    assert_eq!(grid.hyperlinks.len(), accepted);
+    assert_eq!(
+        grid.retained_hyperlink_bytes,
+        grid.hyperlinks
+            .values()
+            .map(HyperlinkEntry::retained_bytes)
+            .sum::<usize>()
+    );
+    assert!(grid.retained_hyperlink_bytes <= modes::MAX_RETAINED_HYPERLINK_BYTES);
+    for col in 0..accepted {
+        assert!(grid.hyperlink_at(0, col).is_some());
+    }
+
+    let prune_count_after_budget_failure = grid.hyperlink_prune_count;
+    for index in 0..128 {
+        let rejected = format!("https://rejected.example/{index}/{suffix}");
+        grid.set_hyperlink(None, Some(&rejected));
+    }
+    assert!(grid.pen().hyperlink_id.is_none());
+    assert_eq!(grid.hyperlink_prune_count, prune_count_after_budget_failure);
+
+    grid.erase_display(2, false);
+    let prune_count_before_recovery = grid.hyperlink_prune_count;
+    let reclaimed = format!("https://example.com/reclaimed/{suffix}");
+    grid.set_hyperlink(None, Some(&reclaimed));
+    assert!(grid.pen().hyperlink_id.is_some());
+    assert!(grid.hyperlink_prune_count > prune_count_before_recovery);
+    assert_eq!(grid.hyperlinks.len(), 1);
+    assert!(grid.retained_hyperlink_bytes > 0);
+    grid.reset();
+    assert_eq!(grid.retained_hyperlink_bytes, 0);
+}
+
+#[test]
+fn oversized_hyperlink_entries_are_rejected_without_retaining_metadata() {
+    let mut grid = grid(4, 2);
+    let target = "x".repeat(modes::MAX_HYPERLINK_ENTRY_PAYLOAD_BYTES + 1);
+
+    grid.set_hyperlink(None, Some(&target));
+
+    assert!(grid.pen().hyperlink_id.is_none());
+    assert!(grid.hyperlinks.is_empty());
+    assert_eq!(grid.retained_hyperlink_bytes, 0);
+}
+
+#[test]
 fn pooled_metadata_and_hyperlinks_retain_live_history_roots() {
     let mut grid = grid(4, 2);
     grid.set_hyperlink(Some("live"), Some("https://example.com/live"));
@@ -1272,6 +1357,13 @@ fn pooled_metadata_and_hyperlinks_retain_live_history_roots() {
     grid.prune_hyperlinks();
     assert!(grid.hyperlinks.contains_key(&live_hyperlink.get()));
     assert!(!grid.hyperlinks.contains_key(&METADATA_VALUE_MASK));
+    assert_eq!(
+        grid.retained_hyperlink_bytes,
+        grid.hyperlinks
+            .values()
+            .map(HyperlinkEntry::retained_bytes)
+            .sum::<usize>()
+    );
 }
 
 #[test]
@@ -1305,6 +1397,17 @@ fn compact_history_preserves_long_combining_text_with_and_without_links() {
         Some(marks.to_string())
     );
     assert_eq!(grid.cell_hyperlink_id(&linked), Some(hyperlink));
+
+    let retained_hyperlink_bytes = grid.retained_hyperlink_bytes;
+    grid.resize(4, 2);
+    assert_eq!(grid.retained_hyperlink_bytes, retained_hyperlink_bytes);
+    assert_eq!(
+        grid.retained_hyperlink_bytes,
+        grid.hyperlinks
+            .values()
+            .map(HyperlinkEntry::retained_bytes)
+            .sum::<usize>()
+    );
 }
 
 #[test]
@@ -1324,6 +1427,17 @@ fn history_eviction_releases_uniquely_owned_pooled_metadata() {
     grid.scroll_up(1);
     assert_eq!(grid.history.len(), 1);
     assert!(grid.extras.is_empty());
+    assert!(grid.retained_hyperlink_bytes > 0);
+    assert_eq!(
+        grid.retained_hyperlink_bytes,
+        grid.hyperlinks
+            .values()
+            .map(HyperlinkEntry::retained_bytes)
+            .sum::<usize>()
+    );
+    grid.prune_hyperlinks();
+    assert!(grid.hyperlinks.is_empty());
+    assert_eq!(grid.retained_hyperlink_bytes, 0);
 }
 
 #[test]
@@ -1357,6 +1471,7 @@ fn shrinking_and_clearing_history_release_rows_and_rare_metadata() {
         assert_eq!(grid.hyperlinks.capacity(), 0);
         assert!(grid.hyperlink_identities.is_empty());
         assert_eq!(grid.hyperlink_identities.capacity(), 0);
+        assert_eq!(grid.retained_hyperlink_bytes, 0);
 
         grid.set_cursor_position(0, 0);
         grid.put_char('x');

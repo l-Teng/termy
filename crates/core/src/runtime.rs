@@ -2308,18 +2308,27 @@ mod alacritty_backend {
 
         /// Write bytes to the PTY (user input). No-op for display-only terminals.
         pub fn write(&self, input: &[u8]) {
-            if self.pty_tx.is_some() {
-                self.write_owned(input.to_vec());
-            }
+            let _ = self.try_write(input);
         }
 
-        /// Write owned bytes to the PTY without copying them into the event-loop
-        /// channel. Prefer this when an encoder already produced a `Vec<u8>`.
-        /// No-op for display-only terminals.
-        pub fn write_owned(&self, input: Vec<u8>) {
-            if let Some(pty_tx) = &self.pty_tx {
-                let _ = pty_tx.send(EventLoopMsg::Input(input.into()));
+        /// Try to enqueue bytes for the PTY event loop.
+        pub fn try_write(&self, input: &[u8]) -> io::Result<()> {
+            if input.is_empty() || self.pty_tx.is_none() {
+                return Ok(());
             }
+            self.try_write_owned(input.to_vec())
+        }
+
+        /// Try to enqueue owned bytes for the PTY event loop without copying.
+        /// No-op for display-only terminals.
+        pub fn try_write_owned(&self, input: Vec<u8>) -> io::Result<()> {
+            if input.is_empty() {
+                return Ok(());
+            }
+            if let Some(pty_tx) = &self.pty_tx {
+                pty_tx.send(EventLoopMsg::Input(input.into()))?;
+            }
+            Ok(())
         }
 
         /// Rehydrate saved terminal output into the in-memory grid without sending input to the PTY.
@@ -2422,24 +2431,23 @@ mod alacritty_backend {
             parser.sync_bytes_count() == 0
         }
 
-        /// Write a string to the PTY
-        #[allow(dead_code)]
-        pub fn write_str(&self, input: &str) {
-            self.write(input.as_bytes());
+        pub fn try_write_str(&self, input: &str) -> io::Result<()> {
+            self.try_write(input.as_bytes())
         }
 
-        /// Resize the terminal. Identical sizes are ignored; use [`Self::nudge_resize`]
-        /// when the child needs a fresh `SIGWINCH` without a dimension change.
-        pub fn resize(&mut self, new_size: TerminalSize) {
+        /// Try to enqueue a PTY resize before changing the in-memory grid.
+        /// Identical sizes are ignored; use [`Self::try_nudge_resize`] when the
+        /// child needs a fresh `SIGWINCH` without a dimension change.
+        pub fn try_resize(&mut self, new_size: TerminalSize) -> io::Result<()> {
             let new_size = new_size.clamped();
             if self.size == new_size {
-                return;
+                return Ok(());
+            }
+            if let Some(pty_tx) = &self.pty_tx {
+                pty_tx.send(EventLoopMsg::Resize(new_size.into()))?;
             }
             self.size = new_size;
             *self.graphics_size.lock() = new_size;
-            if let Some(pty_tx) = &self.pty_tx {
-                let _ = pty_tx.send(EventLoopMsg::Resize(new_size.into()));
-            }
             let mut term = self.term.lock();
             term.resize(new_size);
             self.kitty_graphics_cursor_tracker
@@ -2452,16 +2460,15 @@ mod alacritty_backend {
                 crate::resize_anchor::restore_bottom_anchor(&mut term, new_size);
             }
             self.record_render_mutation(&term);
+            Ok(())
         }
 
         /// Re-send the current size to the PTY without touching the term grid.
-        /// This delivers SIGWINCH to the child process, nudging TUI applications
-        /// (e.g. lazygit) to refresh their display after an alternate-screen
-        /// transition even though the actual dimensions have not changed.
-        pub fn nudge_resize(&self) {
+        pub fn try_nudge_resize(&self) -> io::Result<()> {
             if let Some(pty_tx) = &self.pty_tx {
-                let _ = pty_tx.send(EventLoopMsg::NudgeResize(self.size.into()));
+                pty_tx.send(EventLoopMsg::NudgeResize(self.size.into()))?;
             }
+            Ok(())
         }
 
         /// Get the current terminal size
@@ -3008,8 +3015,22 @@ impl Terminal {
         self.backend.write(input);
     }
 
+    /// Try to enqueue bytes for the child PTY.
+    ///
+    /// Native backends report definite enqueue failures; Tmon also reports
+    /// bounded-backlog failures. A display-only terminal accepts the write as
+    /// a no-op.
+    pub fn try_write(&self, input: &[u8]) -> io::Result<()> {
+        self.backend.try_write(input)
+    }
+
     pub fn write_owned(&self, input: Vec<u8>) {
         self.backend.write_owned(input);
+    }
+
+    /// Try to enqueue owned bytes for the child PTY without an extra copy.
+    pub fn try_write_owned(&self, input: Vec<u8>) -> io::Result<()> {
+        self.backend.try_write_owned(input)
     }
 
     pub fn hydrate_output(&self, bytes: &[u8]) {
@@ -3021,12 +3042,26 @@ impl Terminal {
         self.backend.write_str(input);
     }
 
+    pub fn try_write_str(&self, input: &str) -> io::Result<()> {
+        self.backend.try_write_str(input)
+    }
+
     pub fn resize(&mut self, new_size: TerminalSize) {
         self.backend.resize(new_size);
     }
 
+    /// Resize the child PTY and grid, returning any PTY enqueue failure.
+    pub fn try_resize(&mut self, new_size: TerminalSize) -> io::Result<()> {
+        self.backend.try_resize(new_size)
+    }
+
     pub fn nudge_resize(&self) {
         self.backend.nudge_resize();
+    }
+
+    /// Re-send the current size and return any PTY enqueue failure.
+    pub fn try_nudge_resize(&self) -> io::Result<()> {
+        self.backend.try_nudge_resize()
     }
 
     pub fn size(&self) -> TerminalSize {

@@ -48,6 +48,14 @@ Alacritty conversion helpers. Embedders should use core-owned types such as
 `TerminalColor`, `TerminalRenderCell`, and `TerminalQueryColors`, plus the
 neutral `Terminal` methods, rather than depending on an engine grid or parser.
 
+PTY-aware Rust hosts should use `Terminal::try_write`, `try_write_owned`,
+`try_resize`, and `try_nudge_resize` when they need to react to a disconnected
+PTY. Tmon additionally reports a full bounded queue and waits for the platform
+resize before committing the grid change. The original void methods remain
+source-compatible wrappers and log failures. Display-only terminals accept
+writes as no-ops. The C ABI maps reported failures to its existing
+`TERMY_FFI_WRITE_FAILED` status without changing the header contract.
+
 ## Why libtermy instead of a VT engine directly?
 
 A VT engine provides parser, grid, and PTY primitives. libtermy wraps those

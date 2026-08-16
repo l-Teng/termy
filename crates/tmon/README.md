@@ -103,6 +103,14 @@ Tmon also keeps combining marks available to selection and search. Termy's
 existing Alacritty cell adapter omits that out-of-line text; its default behavior
 is deliberately unchanged by the experiment. OSC/DCS payloads are bounded to
 64 KiB so an unterminated control string cannot grow without limit.
+Combining text retained by one cell is capped at 4 KiB on a UTF-8 boundary.
+An OSC 8 link may retain at most 64 KiB of protocol-ID-plus-target payload, and
+all retained hyperlink records share a 2 MiB logical-storage budget. If pruning
+unreachable links cannot admit a new link, Tmon closes the hyperlink pen while
+keeping existing live links resolvable. Repeated rejected links back off
+full-grid pruning exponentially. Each backoff window permits one early recovery
+probe after roots change, so reclaimed capacity returns promptly without letting
+root churn force an unbounded scan loop.
 Width reflow is differential-tested while scrolled and while changing rows and
 columns together. Tmon additionally keeps its public one-column grid finite for
 wide characters, even though the pinned Alacritty engine supports a minimum of
@@ -149,9 +157,13 @@ priority lane cannot accept a required reply, Tmon closes the session instead
 of silently leaving a child waiting forever. Resize and close notifications
 coalesce to a single wake while the newest resize and sticky close state remain
 out of band, so control traffic cannot grow an unbounded queue or wait behind
-the input backlog. Synchronized-update expiry uses one shared scheduler with at
-most one queued watchdog task per engine instead of spawning or retaining an
-unbounded task stream.
+the input backlog. Rust hosts that need failure handling use `try_write`,
+`try_write_owned`, `try_resize`, and `try_nudge_resize`; the original void
+methods remain compatibility wrappers. A live resize waits for the platform PTY
+to acknowledge the new dimensions before changing the in-memory grid, so a
+failed resize leaves both sides at the previous size. Synchronized-update
+expiry uses one shared scheduler with at most one queued watchdog task per
+engine instead of spawning or retaining an unbounded task stream.
 
 Extended underline state is preserved rather than collapsed to a boolean. Tmon
 tracks single, double, curly, dotted, and dashed SGR 4 styles plus indexed and

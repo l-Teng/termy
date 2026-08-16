@@ -1,6 +1,33 @@
 use super::view::*;
 use super::*;
 
+// OSC payloads are parser-bounded at 64 KiB. Keep the same ceiling when grid
+// methods are exercised directly, then bound the total retained link storage.
+pub(super) const MAX_HYPERLINK_ENTRY_PAYLOAD_BYTES: usize = 64 * 1024;
+pub(super) const MAX_RETAINED_HYPERLINK_BYTES: usize = 2 * 1024 * 1024;
+const MAX_HYPERLINK_PRUNE_BACKOFF_MUTATIONS: u64 = 4 * 1024;
+
+impl HyperlinkEntry {
+    fn payload_bytes(protocol_id: Option<&str>, target: &str) -> usize {
+        protocol_id.map_or(0, str::len).saturating_add(target.len())
+    }
+
+    fn retained_bytes_for(protocol_id: Option<&str>, target: &str) -> usize {
+        // Include the map key/value and the optional identity-index record in
+        // addition to owned string payloads. Allocator bookkeeping varies by
+        // platform, so this is a conservative logical-storage budget rather
+        // than an exact RSS measurement.
+        std::mem::size_of::<u32>()
+            .saturating_add(std::mem::size_of::<Self>())
+            .saturating_add(protocol_id.map_or(0, |_| std::mem::size_of::<(u64, u32)>()))
+            .saturating_add(Self::payload_bytes(protocol_id, target))
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        Self::retained_bytes_for(self.protocol_id.as_deref(), &self.target)
+    }
+}
+
 impl Grid {
     pub(crate) fn reset(&mut self) {
         self.primary.reset();
@@ -32,6 +59,15 @@ impl Grid {
         self.hyperlinks.shrink_to_fit();
         self.hyperlink_identities.clear();
         self.hyperlink_identities.shrink_to_fit();
+        self.retained_hyperlink_bytes = 0;
+        self.failed_hyperlink_prune_generations = None;
+        self.hyperlink_root_generation = 0;
+        self.hyperlink_root_retry_available = false;
+        self.hyperlink_prune_backoff = 1;
+        #[cfg(test)]
+        {
+            self.hyperlink_prune_count = 0;
+        }
         self.next_hyperlink_id = 1;
         self.next_hyperlink_prune_len = HYPERLINK_PRUNE_MIN_LEN;
         self.extras.clear();
@@ -187,6 +223,15 @@ impl Grid {
             cols,
         });
         let blank = self.pen().blank();
+        if self
+            .active()
+            .cells
+            .iter()
+            .flatten()
+            .any(Cell::has_hyperlink)
+        {
+            self.note_hyperlink_root_removed();
+        }
         self.active_mut().fill(blank);
         self.damage.mark_full();
     }
@@ -196,6 +241,15 @@ impl Grid {
     }
 
     pub(crate) fn alignment_test(&mut self) {
+        if self
+            .active()
+            .cells
+            .iter()
+            .flatten()
+            .any(Cell::has_hyperlink)
+        {
+            self.note_hyperlink_root_removed();
+        }
         self.active_mut().fill(Cell {
             character: 'E',
             ..Cell::default()
@@ -245,7 +299,7 @@ impl Grid {
         }
         if enabled {
             if save_cursor {
-                self.primary.save_cursor();
+                self.save_cursor();
             }
             let cursor_col = self.primary.cursor_col;
             let cursor_row = self.primary.cursor_row;
@@ -256,6 +310,14 @@ impl Grid {
             let scroll_bottom = self.primary.scroll_bottom;
             let cols = self.primary.cols;
             let rows = self.primary.rows;
+            let removes_hyperlink_root = self.alternate.as_ref().is_some_and(|alternate| {
+                (alternate.pen.hyperlink_id.is_some()
+                    && alternate.pen.hyperlink_id != pen.hyperlink_id)
+                    || alternate.cells.iter().flatten().any(Cell::has_hyperlink)
+            });
+            if removes_hyperlink_root {
+                self.note_hyperlink_root_removed();
+            }
             let alternate = self
                 .alternate
                 .get_or_insert_with(|| Screen::new(cols, rows));
@@ -378,9 +440,14 @@ impl Grid {
 
     pub(crate) fn set_hyperlink(&mut self, protocol_id: Option<&str>, target: Option<&str>) {
         let Some(target) = target.filter(|target| !target.is_empty()) else {
-            self.pen_mut().hyperlink_id = None;
+            self.set_pen_hyperlink(None);
             return;
         };
+        let payload_bytes = HyperlinkEntry::payload_bytes(protocol_id, target);
+        if payload_bytes > MAX_HYPERLINK_ENTRY_PAYLOAD_BYTES {
+            self.set_pen_hyperlink(None);
+            return;
+        }
 
         // Alacritty treats each OSC 8 link without an explicit `id` as a new
         // identity. Explicit IDs, however, reconnect equal `id + uri` pairs.
@@ -407,7 +474,7 @@ impl Grid {
                 None => None,
             };
             if let Some(id) = id {
-                self.pen_mut().hyperlink_id = NonZeroU32::new(id);
+                self.set_pen_hyperlink(NonZeroU32::new(id));
                 return;
             }
         }
@@ -422,6 +489,50 @@ impl Grid {
                 .saturating_add(HYPERLINK_PRUNE_INTERVAL)
                 .max(HYPERLINK_PRUNE_MIN_LEN);
         }
+        let retained_bytes = HyperlinkEntry::retained_bytes_for(protocol_id, target);
+        if self.retained_hyperlink_bytes.saturating_add(retained_bytes)
+            > MAX_RETAINED_HYPERLINK_BYTES
+        {
+            // The old pen link stops being a root when this OSC 8 sequence
+            // changes the active link. Drop it before reclaiming unreachable
+            // entries so stale metadata cannot permanently consume the budget.
+            self.set_pen_hyperlink(None);
+            let mutation_generation = self.damage.mutation_generation();
+            let mut early_root_retry = false;
+            if let Some((failed_mutation_generation, failed_root_generation)) =
+                self.failed_hyperlink_prune_generations
+            {
+                let mutation_ready = mutation_generation.wrapping_sub(failed_mutation_generation)
+                    >= self.hyperlink_prune_backoff;
+                if !mutation_ready {
+                    if self.hyperlink_root_generation == failed_root_generation
+                        || !self.hyperlink_root_retry_available
+                    {
+                        return;
+                    }
+                    early_root_retry = true;
+                }
+            }
+            self.prune_hyperlinks();
+            if self.retained_hyperlink_bytes.saturating_add(retained_bytes)
+                > MAX_RETAINED_HYPERLINK_BYTES
+            {
+                if early_root_retry {
+                    self.hyperlink_root_retry_available = false;
+                } else {
+                    self.failed_hyperlink_prune_generations = Some((
+                        self.damage.mutation_generation(),
+                        self.hyperlink_root_generation,
+                    ));
+                    self.hyperlink_root_retry_available = true;
+                    self.hyperlink_prune_backoff = self
+                        .hyperlink_prune_backoff
+                        .saturating_mul(2)
+                        .min(MAX_HYPERLINK_PRUNE_BACKOFF_MUTATIONS);
+                }
+                return;
+            }
+        }
         let id = self.next_available_hyperlink_id();
         self.hyperlinks.insert(
             id,
@@ -433,7 +544,43 @@ impl Grid {
         if let Some(identity_hash) = identity_hash {
             self.hyperlink_identities.entry(identity_hash).or_insert(id);
         }
-        self.pen_mut().hyperlink_id = NonZeroU32::new(id);
+        self.retained_hyperlink_bytes =
+            self.retained_hyperlink_bytes.saturating_add(retained_bytes);
+        self.failed_hyperlink_prune_generations = None;
+        self.hyperlink_root_retry_available = false;
+        self.hyperlink_prune_backoff = 1;
+        self.set_pen_hyperlink(NonZeroU32::new(id));
+    }
+
+    fn set_pen_hyperlink(&mut self, hyperlink_id: Option<NonZeroU32>) {
+        let previous = self.pen().hyperlink_id;
+        if previous == hyperlink_id {
+            return;
+        }
+        if previous.is_some() {
+            self.damage.note_mutation();
+            self.note_hyperlink_root_removed();
+        }
+        self.pen_mut().hyperlink_id = hyperlink_id;
+    }
+
+    pub(super) fn note_hyperlink_root_removed(&mut self) {
+        self.hyperlink_root_generation = self.hyperlink_root_generation.wrapping_add(1);
+    }
+
+    pub(super) fn has_hyperlink_roots(&self) -> bool {
+        let screen_has_root = |screen: &Screen| {
+            screen.pen.hyperlink_id.is_some()
+                || screen.saved_pen.hyperlink_id.is_some()
+                || screen.cells.iter().flatten().any(Cell::has_hyperlink)
+        };
+        screen_has_root(&self.primary)
+            || self.alternate.as_ref().is_some_and(screen_has_root)
+            || self
+                .history
+                .iter()
+                .flat_map(HistoryRow::iter)
+                .any(|cell| cell.has_hyperlink())
     }
 
     pub(super) fn next_available_hyperlink_id(&mut self) -> u32 {
@@ -451,6 +598,10 @@ impl Grid {
     }
 
     pub(super) fn prune_hyperlinks(&mut self) {
+        #[cfg(test)]
+        {
+            self.hyperlink_prune_count += 1;
+        }
         let mut live = HashSet::new();
         let extras = &self.extras;
         live.extend(
@@ -486,6 +637,11 @@ impl Grid {
         }
         self.hyperlinks
             .retain(|id, _| NonZeroU32::new(*id).is_some_and(|id| live.contains(&id)));
+        self.retained_hyperlink_bytes = self
+            .hyperlinks
+            .values()
+            .map(HyperlinkEntry::retained_bytes)
+            .sum();
         self.hyperlink_identities.clear();
         for (id, entry) in &self.hyperlinks {
             let Some(protocol_id) = entry.protocol_id.as_deref() else {
@@ -619,5 +775,80 @@ impl Grid {
             }
             index += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod hyperlink_root_tests {
+    use super::*;
+
+    #[test]
+    fn saved_pen_replacement_invalidates_failed_prune_state() {
+        let mut grid = Grid::new(2, 1, 0, CursorStyle::Block);
+        grid.set_hyperlink(None, Some("https://example.com/saved"));
+        grid.save_cursor();
+        grid.set_hyperlink(None, None);
+
+        let before_save = grid.hyperlink_root_generation;
+        grid.save_cursor();
+        assert!(grid.hyperlink_root_generation > before_save);
+
+        grid.set_hyperlink(None, Some("https://example.com/restored"));
+        let before_restore = grid.hyperlink_root_generation;
+        grid.restore_cursor();
+        assert!(grid.hyperlink_root_generation > before_restore);
+    }
+
+    #[test]
+    fn root_churn_gets_only_one_early_prune_per_backoff_window() {
+        let mut grid = Grid::new(128, 1, 0, CursorStyle::Block);
+        let suffix = "x".repeat(MAX_HYPERLINK_ENTRY_PAYLOAD_BYTES / 2);
+        for index in 0..128 {
+            grid.set_hyperlink(None, Some(&format!("https://live/{index}/{suffix}")));
+            if grid.pen().hyperlink_id.is_none() {
+                break;
+            }
+            grid.put_char('x');
+        }
+        assert!(grid.failed_hyperlink_prune_generations.is_some());
+
+        let prune_count = grid.hyperlink_prune_count;
+        for index in 0..128 {
+            grid.damage.note_mutation();
+            grid.note_hyperlink_root_removed();
+            grid.set_hyperlink(None, Some(&format!("https://rejected/{index}/{suffix}")));
+        }
+        assert!(grid.hyperlink_prune_count - prune_count < 16);
+    }
+
+    #[test]
+    fn bulk_root_removals_invalidate_prune_recovery() {
+        let mut erase = Grid::new(4, 2, 0, CursorStyle::Block);
+        erase.set_hyperlink(None, Some("https://blank"));
+        erase.put_char(' ');
+        erase.set_hyperlink(None, None);
+        let before_erase = erase.hyperlink_root_generation;
+        erase.erase_display(2, false);
+        assert!(erase.hyperlink_root_generation > before_erase);
+
+        let mut fast = Grid::new(4, 2, 0, CursorStyle::Block);
+        fast.set_hyperlink(None, Some("https://fast"));
+        fast.put_char('x');
+        fast.set_hyperlink(None, None);
+        fast.set_cursor_position(1, 0);
+        let before_fast = fast.hyperlink_root_generation;
+        assert!(fast.put_default_text_lines(b"a\r\nb\r\n").0 > 0);
+        assert!(fast.hyperlink_root_generation > before_fast);
+    }
+
+    #[test]
+    fn alternate_pen_replacement_invalidates_prune_recovery() {
+        let mut grid = Grid::new(2, 1, 0, CursorStyle::Block);
+        grid.set_alternate_screen(true, false);
+        grid.set_hyperlink(None, Some("https://alternate-pen"));
+        grid.set_alternate_screen(false, false);
+        let before = grid.hyperlink_root_generation;
+        grid.set_alternate_screen(true, false);
+        assert!(grid.hyperlink_root_generation > before);
     }
 }

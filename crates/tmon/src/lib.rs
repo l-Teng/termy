@@ -14,6 +14,14 @@ mod pty;
 #[cfg(target_os = "windows")]
 #[path = "pty_windows.rs"]
 mod pty;
+mod pty_api;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "windows"
+))]
+mod pty_resize;
 mod terminal_read;
 mod unicode_width;
 
@@ -864,39 +872,6 @@ impl Terminal {
         }
     }
 
-    pub fn write(&self, input: &[u8]) {
-        #[cfg(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "windows"
-        ))]
-        if let Some(pty) = &self.pty {
-            let _ = pty.write(input);
-        }
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "windows"
-        )))]
-        let _ = input;
-    }
-
-    pub fn write_owned(&self, input: Vec<u8>) {
-        #[cfg(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "windows"
-        ))]
-        if let Some(pty) = &self.pty {
-            let _ = pty.write_owned(input);
-            return;
-        }
-        let _ = input;
-    }
-
     /// Send a terminal-protocol response to the child PTY.
     ///
     /// Live terminals use the bounded priority reply lane so required responses
@@ -996,56 +971,6 @@ impl Terminal {
         }
         let has_more = !queue.is_empty();
         (events, has_more)
-    }
-
-    pub fn resize(&self, size: Size) {
-        let size = size.clamped();
-        {
-            let mut engine = self
-                .engine
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if size == engine.size {
-                return;
-            }
-            let Engine {
-                parser,
-                grid,
-                size: engine_size,
-                render_generation,
-            } = &mut *engine;
-            let graphics_can_change = parser.has_graphics_placements();
-            grid.resize(size.cols, size.rows);
-            *engine_size = size;
-            parser.set_size(size);
-            grid.set_cell_metrics(size.cell_width, size.cell_height);
-            let graphics_changed = parser.sync_grid_effects(grid);
-            if graphics_can_change && !graphics_changed {
-                parser.bump_graphics_revision();
-            }
-            *render_generation = render_generation.wrapping_add(1);
-        }
-        #[cfg(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "windows"
-        ))]
-        if let Some(pty) = &self.pty {
-            let _ = pty.resize(size);
-        }
-    }
-
-    pub fn nudge_resize(&self) {
-        #[cfg(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "windows"
-        ))]
-        if let Some(pty) = &self.pty {
-            let _ = pty.resize(self.size());
-        }
     }
 
     pub fn size(&self) -> Size {

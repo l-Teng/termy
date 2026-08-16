@@ -287,16 +287,90 @@ fn conpty_size_conversion_rejects_zero_and_overflow() {
 #[test]
 fn control_state_coalesces_resize_and_close_is_sticky() {
     let state = ControlState::default();
-    assert!(state.request_resize(Coord { x: 80, y: 24 }));
-    assert!(state.request_resize(Coord { x: 120, y: 40 }));
-    assert_eq!(state.take_resize(), Some(Coord { x: 120, y: 40 }));
-    assert_eq!(state.take_resize(), None);
+    assert!(state.request_resize(PendingResize::detached(Coord { x: 80, y: 24 })));
+    assert!(state.request_resize(PendingResize::detached(Coord { x: 120, y: 40 })));
+    assert_eq!(
+        state
+            .take_resize()
+            .expect("latest resize should remain pending")
+            .size,
+        Coord { x: 120, y: 40 }
+    );
+    assert!(state.take_resize().is_none());
 
-    assert!(state.request_resize(Coord { x: 90, y: 30 }));
+    assert!(state.request_resize(PendingResize::detached(Coord { x: 90, y: 30 })));
     state.request_close();
     assert!(state.is_closed());
-    assert_eq!(state.take_resize(), None);
-    assert!(!state.request_resize(Coord { x: 100, y: 50 }));
+    assert!(state.take_resize().is_none());
+    assert!(!state.request_resize(PendingResize::detached(Coord { x: 100, y: 50 })));
+}
+
+#[test]
+fn control_reports_failed_resize_to_waiting_caller() {
+    let state = Arc::new(ControlState::default());
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let control = ControlHandle {
+        sender,
+        state: state.clone(),
+    };
+    let waiting_control = control.clone();
+    let waiter =
+        std::thread::spawn(move || waiting_control.resize_and_wait(Coord { x: 100, y: 40 }));
+
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_secs(1)),
+        Ok(ControlCommand::Wake)
+    ));
+    let error = service_control_resize(&state, |_| {
+        Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "injected ConPTY resize failure",
+        ))
+    })
+    .expect_err("the control loop should observe the resize failure");
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(
+        state.is_closed(),
+        "failure must be published before waking the resize caller"
+    );
+
+    let (writer, _receiver) = WriterHandle::channel(control.clone());
+    assert_eq!(
+        writer
+            .write(b"must-not-queue")
+            .expect_err("writes after a failed resize must observe closure")
+            .kind(),
+        ErrorKind::BrokenPipe
+    );
+
+    let error = waiter
+        .join()
+        .expect("resize waiter should not panic")
+        .expect_err("the resize caller should receive the OS failure");
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("injected ConPTY resize failure"));
+}
+
+#[test]
+fn completed_resize_wins_over_a_late_disconnected_wake() {
+    let (pending, completed) = PendingResize::waiting(Coord { x: 100, y: 40 });
+    pending.complete(Ok(()));
+
+    await_resize_completion(Err(pty_closed_error()), completed, pty_closed_error)
+        .expect("an applied resize must not be rolled back by a late wake failure");
+}
+
+#[test]
+fn synchronous_resize_reports_a_disconnected_control_thread() {
+    let state = Arc::new(ControlState::default());
+    let (sender, receiver) = mpsc::sync_channel(1);
+    drop(receiver);
+    let control = ControlHandle { sender, state };
+
+    let error = control
+        .resize_and_wait(Coord { x: 80, y: 24 })
+        .expect_err("a disconnected control thread must reject resize");
+    assert_eq!(error.kind(), ErrorKind::BrokenPipe);
 }
 
 fn writer_harness() -> (WriterHandle, mpsc::Receiver<WriterCommand>) {
@@ -577,7 +651,13 @@ fn writer_and_control_wakes_coalesce_while_latest_resize_wins() {
         receiver.try_recv(),
         Err(mpsc::TryRecvError::Empty)
     ));
-    assert_eq!(state.take_resize(), Some(Coord { x: 132, y: 44 }));
+    assert_eq!(
+        state
+            .take_resize()
+            .expect("latest coalesced resize should remain pending")
+            .size,
+        Coord { x: 132, y: 44 }
+    );
 
     for _ in 0..128 {
         control.close();

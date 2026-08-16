@@ -133,6 +133,16 @@ impl Grid {
             );
         }
         let history_before = self.history.len();
+        if (alternate || self.history_limit == 0)
+            && self
+                .active()
+                .cells
+                .iter()
+                .flatten()
+                .any(Cell::has_hyperlink)
+        {
+            self.note_hyperlink_root_removed();
+        }
         let (old_cells, old_extents) = {
             let screen = self.active_mut();
             (
@@ -242,6 +252,15 @@ impl Grid {
     ) -> (usize, Option<char>) {
         let retained_new_lines = batch.line_count.min(rows.saturating_sub(1));
         let direct_discard = batch.line_count.saturating_sub(retained_new_lines);
+        if self
+            .active()
+            .cells
+            .iter()
+            .flatten()
+            .any(Cell::has_hyperlink)
+        {
+            self.note_hyperlink_root_removed();
+        }
         let mut line_offset = 0usize;
         for _ in 0..direct_discard {
             line_offset = line_end(bytes, line_offset, batch.consumed, batch.line_stride) + 2;

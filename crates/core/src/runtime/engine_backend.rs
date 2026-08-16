@@ -350,16 +350,28 @@ impl Backend {
     }
 
     pub(super) fn write(&self, input: &[u8]) {
+        if let Err(error) = self.try_write(input) {
+            log::warn!("terminal PTY write failed: {error}");
+        }
+    }
+
+    pub(super) fn try_write(&self, input: &[u8]) -> io::Result<()> {
         match self {
-            Self::Alacritty(backend) => backend.write(input),
-            Self::Tmon(backend) => backend.write(input),
+            Self::Alacritty(backend) => backend.try_write(input),
+            Self::Tmon(backend) => backend.try_write(input),
         }
     }
 
     pub(super) fn write_owned(&self, input: Vec<u8>) {
+        if let Err(error) = self.try_write_owned(input) {
+            log::warn!("terminal PTY write failed: {error}");
+        }
+    }
+
+    pub(super) fn try_write_owned(&self, input: Vec<u8>) -> io::Result<()> {
         match self {
-            Self::Alacritty(backend) => backend.write_owned(input),
-            Self::Tmon(backend) => backend.write_owned(input),
+            Self::Alacritty(backend) => backend.try_write_owned(input),
+            Self::Tmon(backend) => backend.try_write_owned(input),
         }
     }
 
@@ -371,23 +383,41 @@ impl Backend {
     }
 
     pub(super) fn write_str(&self, input: &str) {
+        if let Err(error) = self.try_write_str(input) {
+            log::warn!("terminal PTY write failed: {error}");
+        }
+    }
+
+    pub(super) fn try_write_str(&self, input: &str) -> io::Result<()> {
         match self {
-            Self::Alacritty(backend) => backend.write_str(input),
-            Self::Tmon(backend) => backend.write_str(input),
+            Self::Alacritty(backend) => backend.try_write_str(input),
+            Self::Tmon(backend) => backend.try_write_str(input),
         }
     }
 
     pub(super) fn resize(&mut self, new_size: TerminalSize) {
+        if let Err(error) = self.try_resize(new_size) {
+            log::warn!("terminal PTY resize failed: {error}");
+        }
+    }
+
+    pub(super) fn try_resize(&mut self, new_size: TerminalSize) -> io::Result<()> {
         match self {
-            Self::Alacritty(backend) => backend.resize(new_size),
-            Self::Tmon(backend) => backend.resize(new_size),
+            Self::Alacritty(backend) => backend.try_resize(new_size),
+            Self::Tmon(backend) => backend.try_resize(new_size),
         }
     }
 
     pub(super) fn nudge_resize(&self) {
+        if let Err(error) = self.try_nudge_resize() {
+            log::warn!("terminal PTY resize nudge failed: {error}");
+        }
+    }
+
+    pub(super) fn try_nudge_resize(&self) -> io::Result<()> {
         match self {
-            Self::Alacritty(backend) => backend.nudge_resize(),
-            Self::Tmon(backend) => backend.nudge_resize(),
+            Self::Alacritty(backend) => backend.try_nudge_resize(),
+            Self::Tmon(backend) => backend.try_nudge_resize(),
         }
     }
 
@@ -705,6 +735,10 @@ impl Backend {
 mod tests {
     use super::*;
 
+    const ALACRITTY_DISCONNECT_CHILD: &str = "TERMY_CORE_ALACRITTY_DISCONNECT_CHILD";
+    const ALACRITTY_DISCONNECT_TEST: &str =
+        "runtime::engine_backend::tests::forced_alacritty_reports_disconnected_pty_operations";
+
     #[test]
     fn backend_selector_only_accepts_exact_private_values() {
         assert_eq!(BackendChoice::from_test_value(None), None);
@@ -849,6 +883,102 @@ mod tests {
         assert_eq!(reason, TerminalEngineSelectionReason::TmonUnavailable);
         assert!(detail.is_some());
         assert_eq!(tmon_starts.get(), 0);
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    #[test]
+    fn forced_alacritty_reports_disconnected_pty_operations() {
+        if env::var_os(ALACRITTY_DISCONNECT_CHILD).is_none() {
+            let output = std::process::Command::new(
+                env::current_exe().expect("current core test executable"),
+            )
+            .arg("--exact")
+            .arg(ALACRITTY_DISCONNECT_TEST)
+            .arg("--nocapture")
+            .env_remove(TEST_BACKEND_ENV)
+            .env(FORCE_ALACRITTY_ENV, "1")
+            .env(ALACRITTY_DISCONNECT_CHILD, "1")
+            .output()
+            .expect("forced-Alacritty disconnect helper should start");
+            assert!(
+                output.status.success(),
+                "forced-Alacritty disconnect helper failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let original_size = TerminalSize::default();
+        let mut terminal = Terminal::new(original_size, None, None, None, None, Some("exit"))
+            .expect("forced Alacritty terminal should start");
+        assert_eq!(terminal.engine_label(), "alacritty");
+        assert_eq!(
+            terminal.engine_diagnostics().selection_reason,
+            TerminalEngineSelectionReason::ForcedAlacritty
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let disconnected = loop {
+            match terminal.try_write(b"disconnect probe") {
+                Ok(()) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(()) => panic!("Alacritty PTY event loop did not disconnect in time"),
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(disconnected.kind(), ErrorKind::BrokenPipe);
+        terminal
+            .try_write(&[])
+            .expect("empty borrowed writes remain no-ops after disconnect");
+        terminal
+            .try_write_owned(Vec::new())
+            .expect("empty owned writes remain no-ops after disconnect");
+        assert_eq!(
+            terminal
+                .try_write_owned(b"owned probe".to_vec())
+                .expect_err("owned writes after PTY exit must fail")
+                .kind(),
+            ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            terminal
+                .try_write_str("string probe")
+                .expect_err("string writes after PTY exit must fail")
+                .kind(),
+            ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            terminal
+                .try_nudge_resize()
+                .expect_err("resize nudges after PTY exit must fail")
+                .kind(),
+            ErrorKind::BrokenPipe
+        );
+
+        let next_size = TerminalSize {
+            cols: original_size.cols + 1,
+            ..original_size
+        };
+        assert_eq!(
+            terminal
+                .try_resize(next_size)
+                .expect_err("resizes after PTY exit must fail")
+                .kind(),
+            ErrorKind::BrokenPipe
+        );
+        assert_eq!(terminal.size(), original_size);
+        let frame = terminal.snapshot();
+        assert_eq!(
+            (frame.cols, frame.rows),
+            (original_size.cols, original_size.rows)
+        );
     }
 
     #[cfg(any(

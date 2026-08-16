@@ -7,6 +7,8 @@ impl Grid {
         if self.primary.cols == cols && self.primary.rows == rows {
             return;
         }
+        let may_remove_hyperlink_root =
+            self.failed_hyperlink_prune_generations.is_some() && self.has_hyperlink_roots();
 
         if self.primary.cols != cols {
             // Match Alacritty's resize order: visible rows are adjusted before
@@ -41,6 +43,9 @@ impl Grid {
                     }
                 }
             }
+        }
+        if may_remove_hyperlink_root {
+            self.note_hyperlink_root_removed();
         }
         self.display_offset = self.display_offset.min(self.history.len());
         let old_tab_count = self.tab_stops.len();

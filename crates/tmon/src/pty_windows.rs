@@ -19,7 +19,10 @@ use std::{
 #[cfg(test)]
 use std::os::windows::ffi::OsStringExt;
 
-use crate::{PtyStartError, Size};
+use crate::{
+    PtyStartError, Size,
+    pty_resize::{PendingResize, await_resize_completion},
+};
 
 type Bool = i32;
 type Dword = u32;
@@ -297,7 +300,7 @@ enum ControlCommand {
 #[derive(Default)]
 struct ControlState {
     close_requested: AtomicBool,
-    pending_resize: Mutex<Option<Coord>>,
+    pending_resize: Mutex<Option<PendingResize<Coord>>>,
 }
 
 impl ControlState {
@@ -305,7 +308,7 @@ impl ControlState {
         self.close_requested.load(Ordering::Acquire)
     }
 
-    fn request_resize(&self, size: Coord) -> bool {
+    fn request_resize(&self, request: PendingResize<Coord>) -> bool {
         if self.is_closed() {
             return false;
         }
@@ -316,11 +319,16 @@ impl ControlState {
         if self.is_closed() {
             return false;
         }
-        *pending = Some(size);
+        if let Some(replaced) = pending.replace(request) {
+            replaced.complete(Err(io::Error::new(
+                ErrorKind::Interrupted,
+                "tmon ConPTY resize was superseded by a newer request",
+            )));
+        }
         true
     }
 
-    fn take_resize(&self) -> Option<Coord> {
+    fn take_resize(&self) -> Option<PendingResize<Coord>> {
         self.pending_resize
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -329,16 +337,31 @@ impl ControlState {
 
     fn request_close(&self) {
         self.close_requested.store(true, Ordering::Release);
-        self.pending_resize
+        if let Some(pending) = self
+            .pending_resize
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+            .take()
+        {
+            pending.complete(Err(pty_closed_error()));
+        }
     }
 }
 
 impl ControlHandle {
+    #[cfg(test)]
     fn request_resize(&self, size: Coord) -> io::Result<()> {
-        if !self.state.request_resize(size) {
+        self.queue_resize(PendingResize::detached(size))
+    }
+
+    fn resize_and_wait(&self, size: Coord) -> io::Result<()> {
+        let (request, completed) = PendingResize::waiting(size);
+        let publication = self.queue_resize(request);
+        await_resize_completion(publication, completed, pty_closed_error)
+    }
+
+    fn queue_resize(&self, request: PendingResize<Coord>) -> io::Result<()> {
+        if !self.state.request_resize(request) {
             return Err(pty_closed_error());
         }
         match self.sender.try_send(ControlCommand::Wake) {
@@ -929,7 +952,7 @@ impl Pty {
     }
 
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
-        self.writer.control.request_resize(Coord::try_from(size)?)
+        self.writer.control.resize_and_wait(Coord::try_from(size)?)
     }
 
     pub(crate) fn child_pid(&self) -> u32 {
@@ -1074,9 +1097,7 @@ fn run_control(
         if state.is_closed() {
             break;
         }
-        if let Some(size) = state.take_resize()
-            && resources.pseudo_console().resize(size).is_err()
-        {
+        if service_control_resize(&state, |size| resources.pseudo_console().resize(size)).is_err() {
             state.request_close();
             break;
         }
@@ -1098,6 +1119,27 @@ fn run_control(
     // dedicated reader keeps draining. Older Windows releases can block here
     // until all final pseudoconsole output has been consumed.
     resources.close_pseudo_console();
+}
+
+fn service_control_resize(
+    state: &ControlState,
+    mut resize: impl FnMut(Coord) -> io::Result<()>,
+) -> io::Result<()> {
+    let Some(pending) = state.take_resize() else {
+        return Ok(());
+    };
+    match resize(pending.size) {
+        Ok(()) => {
+            pending.complete(Ok(()));
+            Ok(())
+        }
+        Err(error) => {
+            let completion_error = io::Error::new(error.kind(), error.to_string());
+            state.request_close();
+            pending.complete(Err(completion_error));
+            Err(error)
+        }
+    }
 }
 
 fn read_handle(handle: &OwnedHandle, buffer: &mut [u8]) -> io::Result<usize> {

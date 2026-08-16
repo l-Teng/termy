@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
         None,                         // startup command
     )?;
 
-    terminal.write(b"printf 'hello from libtermy\\r\\n'\r");
+    terminal.try_write(b"printf 'hello from libtermy\\r\\n'\r")?;
     let _ = wakeup_rx.recv_timeout(Duration::from_secs(1));
 
     // Force the first update to contain a complete row-major frame.
@@ -104,6 +104,13 @@ Use `Terminal::frame_update(false)` after the first frame. Partial updates carry
 cells in dirty-span order, allowing a retained renderer to patch only the rows
 and rectangles that changed. `Terminal::snapshot()` remains useful for one-off
 captures and simple prototypes.
+
+PTY-aware Rust hosts should prefer `Terminal::try_write`, `try_write_owned`,
+`try_resize`, and `try_nudge_resize`. They report a disconnected PTY, and Tmon
+also reports a full bounded input queue. The original void methods remain
+source-compatible wrappers and log failures. Tmon applies a live grid resize
+only after the platform PTY acknowledges it, so a failed resize leaves the
+previous grid dimensions intact. Display-only terminals accept writes as no-ops.
 
 ### Rich Rust rendering and the engine boundary
 
@@ -171,10 +178,13 @@ int main(void) {
   }
 
   const char *input = "printf 'hello from libtermy\\r\\n'\r";
-  termy_terminal_write(
-      terminal,
-      (const uint8_t *)input,
-      strlen(input));
+  if (termy_terminal_write(
+          terminal,
+          (const uint8_t *)input,
+          strlen(input)) != TERMY_FFI_OK) {
+    termy_terminal_free(terminal);
+    return 2;
+  }
 
   TermyFfiFrameUpdate update = {0};
   if (termy_terminal_take_frame_update(terminal, true, &update) == TERMY_FFI_OK) {
@@ -191,6 +201,9 @@ For production-style hosts, prefer `termy_terminal_new_with_options`. It accepts
 a loaded config, working directory, startup command, and environment overrides.
 Use `termy_config_render_config_for_appearance` to obtain theme colors, font
 settings, padding, cursor behavior, and measured cell dimensions.
+`termy_terminal_write` and `termy_terminal_resize` return the existing
+`TERMY_FFI_WRITE_FAILED` status when Tmon rejects the operation; the public C
+header and ABI are unchanged.
 
 ## Drive the render loop
 

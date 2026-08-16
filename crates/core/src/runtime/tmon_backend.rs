@@ -5,12 +5,20 @@ use crate::{
     TerminalViewportScroll, TerminalViewportScrollDirection, TermyCell, TermyColor,
     find_link_in_line,
 };
+use termy_search::{SearchConfig, SearchEngine, SearchMode};
 
 pub(super) struct TmonBackend {
     terminal: tmon::Terminal,
     query_colors: TerminalQueryColors,
     default_cursor_style: TerminalCursorStyle,
     last_damage_cursor: std::sync::Mutex<Option<tmon::CursorState>>,
+}
+
+#[derive(Clone, Copy)]
+struct SearchTextSpan {
+    byte_start: usize,
+    start_col: usize,
+    end_col: usize,
 }
 
 impl TmonBackend {
@@ -78,28 +86,28 @@ impl TmonBackend {
         self.terminal.set_wakeup_enabled(enabled);
     }
 
-    pub(super) fn write(&self, input: &[u8]) {
-        self.terminal.write(input);
+    pub(super) fn try_write(&self, input: &[u8]) -> io::Result<()> {
+        self.terminal.try_write(input)
     }
 
-    pub(super) fn write_owned(&self, input: Vec<u8>) {
-        self.terminal.write_owned(input);
+    pub(super) fn try_write_owned(&self, input: Vec<u8>) -> io::Result<()> {
+        self.terminal.try_write_owned(input)
     }
 
     pub(super) fn hydrate_output(&self, bytes: &[u8]) {
         self.terminal.hydrate_output(bytes);
     }
 
-    pub(super) fn write_str(&self, input: &str) {
-        self.write(input.as_bytes());
+    pub(super) fn try_write_str(&self, input: &str) -> io::Result<()> {
+        self.try_write(input.as_bytes())
     }
 
-    pub(super) fn resize(&mut self, new_size: TerminalSize) {
-        self.terminal.resize(tmon_size(new_size.clamped()));
+    pub(super) fn try_resize(&mut self, new_size: TerminalSize) -> io::Result<()> {
+        self.terminal.try_resize(tmon_size(new_size.clamped()))
     }
 
-    pub(super) fn nudge_resize(&self) {
-        self.terminal.nudge_resize();
+    pub(super) fn try_nudge_resize(&self) -> io::Result<()> {
+        self.terminal.try_nudge_resize()
     }
 
     pub(super) fn size(&self) -> TerminalSize {
@@ -342,6 +350,18 @@ impl TmonBackend {
         if query.is_empty() {
             return Vec::new();
         }
+        let mut search_engine = SearchEngine::new(SearchConfig {
+            case_sensitive: options.case_sensitive,
+            mode: if options.regex {
+                SearchMode::Regex
+            } else {
+                SearchMode::Literal
+            },
+        });
+        if search_engine.set_pattern(query).is_err() {
+            return Vec::new();
+        }
+
         let (first_line, last_line) = self.terminal.line_bounds();
         let line_count = last_line
             .checked_sub(first_line)
@@ -349,17 +369,80 @@ impl TmonBackend {
             .and_then(|count| count.checked_add(1))
             .unwrap_or(0);
         let mut lines = vec![String::new(); line_count];
-        self.terminal
-            .for_each_line_cell_range(first_line, last_line, |_, line, _, cell, _| {
+        let mut text_spans = vec![Vec::<SearchTextSpan>::new(); line_count];
+        self.terminal.for_each_line_cell_range(
+            first_line,
+            last_line,
+            |range, line, col, cell, combining| {
                 let index = usize::try_from(line.saturating_sub(first_line)).unwrap_or(usize::MAX);
-                if let Some(text) = lines.get_mut(index) {
-                    text.push(search_character(cell));
+                let (Some(text), Some(spans)) = (lines.get_mut(index), text_spans.get_mut(index))
+                else {
+                    return;
+                };
+
+                let mut next_col = spans.last().map_or(0, |span| span.end_col);
+                while next_col < col {
+                    let gap_col = next_col;
+                    push_search_character(text, spans, ' ', gap_col, gap_col + 1);
+                    next_col += 1;
                 }
-            });
-        for line in &mut lines {
-            line.truncate(line.trim_end().len());
+                if cell.wide_spacer() {
+                    return;
+                }
+
+                let render_text = !cell.leading_wide_spacer()
+                    && !cell.attributes.hidden()
+                    && cell.character != '\0'
+                    && !cell.character.is_control();
+                if render_text {
+                    let byte_start = text.len();
+                    text.push(cell.character);
+                    if let Some(combining) = combining {
+                        combining.append_to(text);
+                    }
+                    let width = unicode_width::UnicodeWidthChar::width(cell.character)
+                        .unwrap_or(0)
+                        .clamp(1, 2);
+                    let end_col = col.saturating_add(width).min(range.columns);
+                    spans.push(SearchTextSpan {
+                        byte_start,
+                        start_col: col,
+                        end_col,
+                    });
+                } else {
+                    let end_col = col.saturating_add(1).min(range.columns);
+                    push_search_character(text, spans, ' ', col, end_col);
+                }
+            },
+        );
+
+        for (line, spans) in lines.iter_mut().zip(&mut text_spans) {
+            let trimmed_len = line.trim_end().len();
+            line.truncate(trimmed_len);
+            spans.retain(|span| span.byte_start < trimmed_len);
         }
-        search_lines_shared(lines.into_iter().enumerate(), query, options)
+
+        let mut matches = Vec::new();
+        for (row, (line, spans)) in lines.into_iter().zip(text_spans).enumerate() {
+            let byte_matches = search_engine.search_line_byte_ranges(&line);
+            if byte_matches.is_empty() {
+                continue;
+            }
+
+            let line = Arc::new(line);
+            for byte_match in byte_matches {
+                let Some((start_col, end_col)) = search_match_columns(&spans, byte_match) else {
+                    continue;
+                };
+                matches.push(TermySharedSearchMatch {
+                    row,
+                    start_col,
+                    end_col: end_col - 1,
+                    line: Arc::clone(&line),
+                });
+            }
+        }
+        matches
     }
 
     pub(super) fn hyperlink_at(&self, row: usize, col: usize) -> Option<DetectedLink> {
@@ -861,13 +944,38 @@ fn resolve_color(
     }
 }
 
-fn search_character(cell: &tmon::Cell) -> char {
-    let render_text = !cell.wide_spacer()
-        && !cell.leading_wide_spacer()
-        && !cell.attributes.hidden()
-        && cell.character != '\0'
-        && !cell.character.is_control();
-    if render_text { cell.character } else { ' ' }
+fn push_search_character(
+    text: &mut String,
+    spans: &mut Vec<SearchTextSpan>,
+    character: char,
+    start_col: usize,
+    end_col: usize,
+) {
+    let byte_start = text.len();
+    text.push(character);
+    spans.push(SearchTextSpan {
+        byte_start,
+        start_col,
+        end_col,
+    });
+}
+
+fn search_match_columns(
+    spans: &[SearchTextSpan],
+    byte_match: std::ops::Range<usize>,
+) -> Option<(usize, usize)> {
+    if byte_match.is_empty() {
+        return None;
+    }
+    let first = spans
+        .partition_point(|span| span.byte_start <= byte_match.start)
+        .checked_sub(1)
+        .and_then(|index| spans.get(index))?;
+    let last = spans
+        .partition_point(|span| span.byte_start < byte_match.end)
+        .checked_sub(1)
+        .and_then(|index| spans.get(index))?;
+    (last.end_col > first.start_col).then_some((first.start_col, last.end_col))
 }
 
 fn graphics_placement(placement: tmon::GraphicsRenderPlacement) -> KittyGraphicsRenderPlacement {
@@ -892,5 +1000,114 @@ fn graphics_placement(placement: tmon::GraphicsRenderPlacement) -> KittyGraphics
         x_offset: placement.x_offset,
         y_offset: placement.y_offset,
         z_index: placement.z_index,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn display_backend() -> TmonBackend {
+        TmonBackend::new_display_with_wakeup_notifier(
+            TerminalSize {
+                cols: 16,
+                rows: 2,
+                cell_width: 9.0,
+                cell_height: 18.0,
+            },
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn search_keeps_combining_text_in_the_match_and_line() {
+        let backend = display_backend();
+        backend.feed_output("a e\u{301} z".as_bytes());
+
+        assert_eq!(
+            backend.search("e\u{301}"),
+            vec![TermySearchMatch {
+                row: 0,
+                start_col: 2,
+                end_col: 2,
+                line: "a e\u{301} z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn search_maps_combining_substrings_to_their_owner_cell() {
+        let backend = display_backend();
+        backend.feed_output("e\u{301}x".as_bytes());
+
+        assert_eq!(
+            backend.search("\u{301}"),
+            vec![TermySearchMatch {
+                row: 0,
+                start_col: 0,
+                end_col: 0,
+                line: "e\u{301}x".to_string(),
+            }]
+        );
+        assert_eq!(
+            backend.search("\u{301}x"),
+            vec![TermySearchMatch {
+                row: 0,
+                start_col: 0,
+                end_col: 1,
+                line: "e\u{301}x".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn search_uses_terminal_columns_after_wide_text_and_keeps_real_blanks() {
+        let backend = display_backend();
+        backend.feed_output("a\u{754c} b".as_bytes());
+
+        assert_eq!(
+            backend.search("\u{754c} b"),
+            vec![TermySearchMatch {
+                row: 0,
+                start_col: 1,
+                end_col: 4,
+                line: "a\u{754c} b".to_string(),
+            }]
+        );
+        assert_eq!(backend.search("b")[0].start_col, 4);
+    }
+
+    #[test]
+    fn search_uses_tmons_two_cell_width_after_unicode_width_three_text() {
+        let backend = display_backend();
+        backend.feed_output("\u{17d8}x".as_bytes());
+
+        assert_eq!(
+            backend.search("x"),
+            vec![TermySearchMatch {
+                row: 0,
+                start_col: 2,
+                end_col: 2,
+                line: "\u{17d8}x".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn search_keeps_hidden_wide_text_as_two_blank_cells() {
+        let backend = display_backend();
+        backend.feed_output("\u{1b}[8m\u{754c}\u{1b}[28m x".as_bytes());
+
+        assert_eq!(
+            backend.search("   x"),
+            vec![TermySearchMatch {
+                row: 0,
+                start_col: 0,
+                end_col: 3,
+                line: "   x".to_string(),
+            }]
+        );
+        assert!(backend.search("\u{754c}").is_empty());
     }
 }

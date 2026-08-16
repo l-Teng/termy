@@ -677,6 +677,67 @@ fn unix_pty_processes_owned_input_through_the_writer_thread() {
 
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 #[test]
+fn unix_terminal_try_write_reports_oversized_input() {
+    let terminal = Terminal::new(
+        Size::default(),
+        Config {
+            launch: Some(Launch::ShellCommand("sleep 30".to_string())),
+            ..Config::default()
+        },
+        None,
+    )
+    .expect("tmon should start a Unix PTY");
+
+    let oversized = vec![b'x'; 8 * 1024 * 1024 + 1];
+    let error = terminal
+        .try_write(&oversized)
+        .expect_err("input above the bounded backlog must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[test]
+fn unix_terminal_reports_closed_write_and_keeps_grid_size_after_failed_resize() {
+    use std::{sync::mpsc, time::Duration};
+
+    let (notify_tx, notify_rx) = mpsc::channel();
+    let terminal = Terminal::new(
+        Size::default(),
+        Config {
+            launch: Some(Launch::ShellCommand("true".to_string())),
+            ..Config::default()
+        },
+        Some(WakeupNotifier::new(move || {
+            let _ = notify_tx.send(());
+        })),
+    )
+    .expect("tmon should start a Unix PTY");
+
+    for _ in 0..20 {
+        let _ = notify_rx.recv_timeout(Duration::from_millis(100));
+        if terminal.drain_events().0.contains(&Event::Exit) {
+            let original_size = terminal.size();
+            let error = terminal
+                .try_write(b"x")
+                .expect_err("input after PTY exit must report disconnection");
+            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+
+            let error = terminal
+                .try_resize(Size {
+                    cols: original_size.cols + 1,
+                    ..original_size
+                })
+                .expect_err("resize after PTY exit must report disconnection");
+            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+            assert_eq!(terminal.size(), original_size);
+            return;
+        }
+    }
+    panic!("PTY exit event did not arrive in time");
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[test]
 fn unix_pty_honors_the_configured_working_directory() {
     use std::{sync::mpsc, time::Duration};
 

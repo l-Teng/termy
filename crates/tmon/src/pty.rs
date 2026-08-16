@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::pty_resize::{PendingResize, await_resize_completion, writer_closed_error};
 use crate::{PtyStartError, Size};
 
 const F_GETFL: c_int = 3;
@@ -235,7 +236,7 @@ struct WriterControl {
     protocol_reply_bytes: AtomicUsize,
     protocol_reply_entries: AtomicUsize,
     protocol_reply_limits: WriterLimits,
-    pending_resize: Mutex<Option<WinSize>>,
+    pending_resize: Mutex<Option<PendingResize<WinSize>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -390,8 +391,19 @@ impl WriterHandle {
         Ok(())
     }
 
+    #[cfg(test)]
     fn resize(&self, window_size: WinSize) -> io::Result<()> {
-        if !self.control.request_resize(window_size) {
+        self.request_resize(PendingResize::detached(window_size))
+    }
+
+    fn resize_and_wait(&self, window_size: WinSize) -> io::Result<()> {
+        let (request, completed) = PendingResize::waiting(window_size);
+        let publication = self.request_resize(request);
+        await_resize_completion(publication, completed, writer_closed_error)
+    }
+
+    fn request_resize(&self, request: PendingResize<WinSize>) -> io::Result<()> {
+        if !self.control.request_resize(request) {
             return Err(writer_closed_error());
         }
         self.wake()
@@ -422,7 +434,7 @@ impl WriterControl {
         self.close_requested.load(Ordering::Acquire)
     }
 
-    fn request_resize(&self, window_size: WinSize) -> bool {
+    fn request_resize(&self, request: PendingResize<WinSize>) -> bool {
         if self.is_closed() {
             return false;
         }
@@ -434,11 +446,16 @@ impl WriterControl {
         if self.is_closed() {
             return false;
         }
-        *pending_resize = Some(window_size);
+        if let Some(replaced) = pending_resize.replace(request) {
+            replaced.complete(Err(io::Error::new(
+                ErrorKind::Interrupted,
+                "tmon PTY resize was superseded by a newer request",
+            )));
+        }
         true
     }
 
-    fn take_resize(&self) -> Option<WinSize> {
+    fn take_resize(&self) -> Option<PendingResize<WinSize>> {
         self.pending_resize
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -449,10 +466,14 @@ impl WriterControl {
         self.close_requested.store(true, Ordering::Release);
         // Do not leave stale resize state behind after cancellation. The lock
         // is never held while the writer performs ioctl, write, or poll.
-        self.pending_resize
+        if let Some(pending) = self
+            .pending_resize
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+            .take()
+        {
+            pending.complete(Err(writer_closed_error()));
+        }
     }
 
     fn reserve_write(
@@ -619,10 +640,6 @@ fn try_reserve_counter(counter: &AtomicUsize, amount: usize, limit: usize) -> bo
                 .filter(|reserved| *reserved <= limit)
         })
         .is_ok()
-}
-
-fn writer_closed_error() -> io::Error {
-    io::Error::new(ErrorKind::BrokenPipe, "tmon PTY is closed")
 }
 
 impl Pty {
@@ -911,7 +928,7 @@ impl Pty {
     }
 
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
-        self.writer.resize(WinSize::from(size))
+        self.writer.resize_and_wait(WinSize::from(size))
     }
 
     pub(crate) fn child_pid(&self) -> u32 {
@@ -1066,8 +1083,17 @@ fn service_writer_control<W>(
     if control.is_closed() {
         return Ok(false);
     }
-    if let Some(window_size) = pending_resize {
-        resize(writer, window_size)?;
+    if let Some(pending) = pending_resize {
+        let result = resize(writer, pending.size);
+        match result {
+            Ok(()) => pending.complete(Ok(())),
+            Err(error) => {
+                let completion_error = io::Error::new(error.kind(), error.to_string());
+                control.request_close();
+                pending.complete(Err(completion_error));
+                return Err(error);
+            }
+        }
     }
     Ok(!control.is_closed())
 }
