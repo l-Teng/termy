@@ -182,6 +182,7 @@ pub(super) fn render_damage(update: tmon::RenderDamageSnapshot) -> TerminalRende
             })
             .collect(),
         generation: Some(update.generation),
+        palette_revision: None,
     }
 }
 

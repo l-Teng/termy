@@ -10,6 +10,8 @@ use alacritty_terminal::{
     vte::ansi::{Color as AnsiColor, NamedColor, Rgb as AnsiRgb},
 };
 
+use compact_str::CompactString;
+
 use crate::{
     backend,
     protocol::TerminalQueryColors,
@@ -56,8 +58,51 @@ pub enum TerminalUnderlineStyle {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalRenderText(CompactString);
+
+impl TerminalRenderText {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub(crate) fn from_cell_chars(base: char, combining: Option<&[char]>) -> Self {
+        let mut text = CompactString::default();
+        text.push(base);
+        if let Some(combining) = combining {
+            text.extend(combining);
+        }
+        Self(text)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_heap_allocated(&self) -> bool {
+        self.0.is_heap_allocated()
+    }
+}
+
+impl std::ops::Deref for TerminalRenderText {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for TerminalRenderText {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for TerminalRenderText {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TerminalRenderCell {
-    pub text: String,
+    pub text: TerminalRenderText,
     pub foreground: TerminalRenderColor,
     pub background: TerminalRenderColor,
     pub underline_color: Option<TerminalRenderColor>,
@@ -93,6 +138,7 @@ pub struct TerminalRenderDamageSnapshot {
     pub damage: TerminalDamageSnapshot,
     pub scrolls: Vec<TerminalViewportScroll>,
     pub generation: u64,
+    pub palette_revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

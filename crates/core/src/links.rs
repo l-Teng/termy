@@ -99,7 +99,7 @@ fn store_cached_file_url(token: &str, resolved: Option<String>) {
 /// hyperlink (matched by OSC 8 id + uri), so hover underlines cover the whole
 /// link text even when it differs from the target URI. Takes priority over the
 /// heuristic [`find_link_in_line`] detection.
-pub fn hyperlink_at_viewport_cell<T: EventListener>(
+pub(crate) fn hyperlink_at_viewport_cell<T: EventListener>(
     term: &Term<T>,
     row: usize,
     col: usize,
@@ -143,7 +143,7 @@ pub fn hyperlink_at_viewport_cell<T: EventListener>(
 /// OSC 8 metadata takes priority over heuristic URL detection. The returned
 /// range is clipped to the visible viewport while the target is built from the
 /// complete logical link, including portions currently in scrollback.
-pub fn link_at_viewport_cell<T: EventListener>(
+pub(crate) fn link_at_viewport_cell<T: EventListener>(
     term: &Term<T>,
     row: usize,
     col: usize,

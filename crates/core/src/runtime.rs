@@ -1580,6 +1580,78 @@ struct NativeRenderState {
     palette_snapshot: Arc<FairMutex<crate::TerminalPalette>>,
 }
 
+impl NativeRenderState {
+    fn record_mutation<T: EventListener>(&self, term: &Term<T>) {
+        record_render_mutation(
+            term,
+            &self.generation,
+            &self.palette_revision,
+            &self.palette_snapshot,
+        );
+    }
+}
+
+fn refresh_palette_revision<T: EventListener>(
+    term: &Term<T>,
+    palette_revision: &AtomicU64,
+    palette_snapshot: &FairMutex<crate::TerminalPalette>,
+) {
+    let mut snapshot = palette_snapshot.lock();
+    if backend::palette_changed(term, &snapshot) {
+        let revision = palette_revision
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        *snapshot = backend::palette(term, revision);
+    }
+}
+
+fn record_render_mutation<T: EventListener>(
+    term: &Term<T>,
+    generation: &AtomicU64,
+    palette_revision: &AtomicU64,
+    palette_snapshot: &FairMutex<crate::TerminalPalette>,
+) {
+    generation.fetch_add(1, Ordering::Relaxed);
+    refresh_palette_revision(term, palette_revision, palette_snapshot);
+}
+
+fn stop_synchronized_update<T: EventListener>(
+    parser: &mut ansi::Processor,
+    term: &mut Term<T>,
+    generation: &AtomicU64,
+    palette_revision: &AtomicU64,
+    palette_snapshot: &FairMutex<crate::TerminalPalette>,
+) {
+    parser.stop_sync(term);
+    record_render_mutation(term, generation, palette_revision, palette_snapshot);
+}
+
+fn capture_viewport_ranges_at_generation<T: EventListener>(
+    term: &Term<T>,
+    current_generation: &AtomicU64,
+    requested_generation: u64,
+    spans: &[TerminalDirtySpan],
+) -> Option<Vec<backend::ViewportRangeCell>> {
+    (current_generation.load(Ordering::Relaxed) == requested_generation)
+        .then(|| backend::viewport_ranges(term, spans))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn move_graphics_cursor_and_record<T: EventListener>(
+    term: &mut Term<T>,
+    cols: u32,
+    rows: u32,
+    full_screen_scroll_region: bool,
+    generation: &AtomicU64,
+    palette_revision: &AtomicU64,
+    palette_snapshot: &FairMutex<crate::TerminalPalette>,
+) -> usize {
+    let untracked_scroll =
+        backend::move_graphics_cursor(term, cols, rows, full_screen_scroll_region);
+    record_render_mutation(term, generation, palette_revision, palette_snapshot);
+    untracked_scroll
+}
+
 struct NativeEventLoop {
     poll: Arc<Poller>,
     pty: tty::Pty,
@@ -1656,6 +1728,7 @@ impl NativeEventLoop {
         let mut processed = 0usize;
         let mut unprocessed = 0usize;
         let mut graphics_changed = false;
+        let mut term_mutated = false;
 
         let _terminal_lease = Some(self.render_state.terminal.lease());
         let mut terminal = None;
@@ -1702,6 +1775,7 @@ impl NativeEventLoop {
                 match item {
                     KittyGraphicsItem::Text(text) => {
                         parsed = parsed.saturating_add(text.len());
+                        term_mutated = true;
                         let track_scrolls = self.kitty_graphics.lock().has_placements();
                         let effects = advance_terminal_text(
                             &mut state.kitty_graphics_cursor_tracker,
@@ -1741,11 +1815,14 @@ impl NativeEventLoop {
                         if result.cursor_advance_screen == Some(screen)
                             && let Some((cols, rows)) = result.cursor_advance
                         {
-                            let untracked_scroll = backend::move_graphics_cursor(
+                            let untracked_scroll = move_graphics_cursor_and_record(
                                 &mut **terminal,
                                 cols,
                                 rows,
                                 full_screen_scroll_region,
+                                &self.render_state.generation,
+                                &self.render_state.palette_revision,
+                                &self.render_state.palette_snapshot,
                             );
                             if untracked_scroll > 0 {
                                 graphics_changed |= self
@@ -1767,19 +1844,8 @@ impl NativeEventLoop {
         if graphics_changed {
             self.kitty_graphics_revision.fetch_add(1, Ordering::Relaxed);
         }
-        if parsed > 0 {
-            self.render_state.generation.fetch_add(1, Ordering::Relaxed);
-            if let Some(terminal) = terminal.as_deref() {
-                let mut palette_snapshot = self.render_state.palette_snapshot.lock();
-                if backend::palette_changed(terminal, &palette_snapshot) {
-                    let revision = self
-                        .render_state
-                        .palette_revision
-                        .fetch_add(1, Ordering::Relaxed)
-                        .wrapping_add(1);
-                    *palette_snapshot = backend::palette(terminal, revision);
-                }
-            }
+        if term_mutated && let Some(terminal) = terminal.as_deref() {
+            self.render_state.record_mutation(terminal);
         }
         if graphics_changed || (state.parser.sync_bytes_count() < parsed && parsed > 0) {
             self.event_proxy.send_event(AlacEvent::Wakeup);
@@ -1852,9 +1918,14 @@ impl NativeEventLoop {
                 }
 
                 if events.is_empty() && self.rx.peek().is_none() {
-                    state
-                        .parser
-                        .stop_sync(&mut *self.render_state.terminal.lock());
+                    let mut term = self.render_state.terminal.lock();
+                    stop_synchronized_update(
+                        &mut state.parser,
+                        &mut term,
+                        &self.render_state.generation,
+                        &self.render_state.palette_revision,
+                        &self.render_state.palette_snapshot,
+                    );
                     self.event_proxy.send_event(AlacEvent::Wakeup);
                     continue;
                 }
@@ -2256,9 +2327,11 @@ impl Terminal {
         let mut parser = self.parser.lock();
         let mut term = self.term.lock();
         let mut graphics_changed = false;
+        let mut term_mutated = false;
         for item in interceptor.process(bytes) {
             match item {
                 KittyGraphicsItem::Text(text) => {
+                    term_mutated = true;
                     let track_scrolls = self.kitty_graphics.lock().has_placements();
                     let effects = advance_terminal_text(
                         &mut cursor_tracker,
@@ -2291,11 +2364,14 @@ impl Terminal {
                     if result.cursor_advance_screen == Some(screen)
                         && let Some((cols, rows)) = result.cursor_advance
                     {
-                        let untracked_scroll = backend::move_graphics_cursor(
+                        let untracked_scroll = move_graphics_cursor_and_record(
                             &mut *term,
                             cols,
                             rows,
                             full_screen_scroll_region,
+                            &self.render_generation,
+                            &self.palette_revision,
+                            &self.palette_snapshot,
                         );
                         if untracked_scroll > 0 {
                             graphics_changed |= self
@@ -2310,8 +2386,9 @@ impl Terminal {
         if graphics_changed {
             self.kitty_graphics_revision.fetch_add(1, Ordering::Relaxed);
         }
-        self.bump_render_generation();
-        self.refresh_palette_revision(&term);
+        if term_mutated {
+            self.record_render_mutation(&term);
+        }
     }
 
     /// Write a string to the PTY
@@ -2343,7 +2420,7 @@ impl Terminal {
         if self.resize_anchor_state.allows_restore() {
             crate::resize_anchor::restore_bottom_anchor(&mut term, new_size);
         }
-        self.bump_render_generation();
+        self.record_render_mutation(&term);
     }
 
     /// Re-send the current size to the PTY without touching the term grid.
@@ -2426,19 +2503,17 @@ impl Terminal {
         self.query_colors = query_colors;
     }
 
-    fn bump_render_generation(&self) {
-        self.render_generation.fetch_add(1, Ordering::Relaxed);
+    fn record_render_mutation<T: EventListener>(&self, term: &Term<T>) {
+        record_render_mutation(
+            term,
+            &self.render_generation,
+            &self.palette_revision,
+            &self.palette_snapshot,
+        );
     }
 
     fn refresh_palette_revision<T: EventListener>(&self, term: &Term<T>) {
-        let mut snapshot = self.palette_snapshot.lock();
-        if backend::palette_changed(term, &snapshot) {
-            let revision = self
-                .palette_revision
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1);
-            *snapshot = backend::palette(term, revision);
-        }
+        refresh_palette_revision(term, &self.palette_revision, &self.palette_snapshot);
     }
 
     pub fn palette(&self) -> crate::TerminalPalette {
@@ -2468,12 +2543,13 @@ impl Terminal {
     /// Consume renderer-neutral damage with a generation for coherent partial reads.
     pub fn take_render_damage_snapshot(&self) -> TerminalRenderDamageSnapshot {
         let mut term = self.term.lock();
+        self.refresh_palette_revision(&term);
         let damage = backend::take_damage_snapshot(&mut term);
-        let generation = self.render_generation.load(Ordering::Relaxed);
         TerminalRenderDamageSnapshot {
             damage,
             scrolls: Vec::new(),
-            generation,
+            generation: self.render_generation.load(Ordering::Relaxed),
+            palette_revision: self.palette_revision.load(Ordering::Relaxed),
         }
     }
 
@@ -2506,6 +2582,7 @@ impl Terminal {
                 damage,
                 scrolls: Vec::new(),
                 generation,
+                palette_revision: self.palette_revision.load(Ordering::Relaxed),
             },
         }
     }
@@ -2515,22 +2592,29 @@ impl Terminal {
         &self,
         mut visitor: impl FnMut(usize, i32, usize, &crate::TerminalRenderCell),
     ) -> TerminalViewportMetadata {
-        let term = self.term.lock();
-        self.refresh_palette_revision(&term);
-        let generation = self.render_generation.load(Ordering::Relaxed);
-        for (display_offset, line, col, cell) in backend::viewport_cells(&term) {
-            visitor(display_offset, line, col, &cell);
+        let (metadata, batch) = {
+            let term = self.term.lock();
+            self.refresh_palette_revision(&term);
+            let batch = backend::viewport_cells(&term);
+            let (_, history_size) = backend::scroll_state(&term);
+            let metadata = TerminalViewportMetadata {
+                cols: self.size.cols,
+                rows: self.size.rows,
+                cursor: backend::cursor_state(&term),
+                display_offset: batch.display_offset,
+                history_size,
+                palette_revision: self.palette_revision.load(Ordering::Relaxed),
+                generation: self.render_generation.load(Ordering::Relaxed),
+            };
+            (metadata, batch)
+        };
+        let cols = usize::from(metadata.cols);
+        for (index, cell) in batch.cells.iter().enumerate() {
+            let row = index / cols;
+            let line = row as i32 - batch.display_offset as i32;
+            visitor(batch.display_offset, line, index % cols, cell);
         }
-        let (display_offset, history_size) = backend::scroll_state(&term);
-        TerminalViewportMetadata {
-            cols: self.size.cols,
-            rows: self.size.rows,
-            cursor: backend::cursor_state(&term),
-            display_offset,
-            history_size,
-            palette_revision: self.palette_revision.load(Ordering::Relaxed),
-            generation,
-        }
+        metadata
     }
 
     pub fn visit_viewport_ranges_at_generation(
@@ -2539,12 +2623,20 @@ impl Terminal {
         spans: &[TerminalDirtySpan],
         mut visitor: impl FnMut(usize, usize, i32, usize, &crate::TerminalRenderCell),
     ) -> bool {
-        let term = self.term.lock();
-        if self.render_generation.load(Ordering::Relaxed) != generation {
+        let Some(cells) = ({
+            let term = self.term.lock();
+            capture_viewport_ranges_at_generation(&term, &self.render_generation, generation, spans)
+        }) else {
             return false;
-        }
-        for (row, display_offset, line, col, cell) in backend::viewport_ranges(&term, spans) {
-            visitor(row, display_offset, line, col, &cell);
+        };
+        for cell in &cells {
+            visitor(
+                cell.row,
+                cell.display_offset,
+                cell.line,
+                cell.col,
+                &cell.cell,
+            );
         }
         true
     }
@@ -2560,10 +2652,12 @@ impl Terminal {
         requested_last: i32,
         mut visitor: impl FnMut((i32, i32, usize), i32, usize, &crate::TerminalRenderCell),
     ) -> (i32, i32, usize) {
-        let term = self.term.lock();
-        let (range, cells) = backend::line_cells(&term, requested_first, requested_last);
-        for (line, col, cell) in cells {
-            visitor(range, line, col, &cell);
+        let (range, cells) = {
+            let term = self.term.lock();
+            backend::line_cells(&term, requested_first, requested_last)
+        };
+        for cell in &cells {
+            visitor(range, cell.line, cell.col, &cell.cell);
         }
         range
     }
@@ -2631,7 +2725,7 @@ impl Terminal {
         let mut term = self.term.lock();
         let changed = backend::scroll_display(&mut term, delta_lines);
         if changed {
-            self.bump_render_generation();
+            self.record_render_mutation(&term);
         }
         changed
     }
@@ -2642,7 +2736,7 @@ impl Terminal {
         let mut term = self.term.lock();
         let changed = backend::scroll_to_bottom(&mut term);
         if changed {
-            self.bump_render_generation();
+            self.record_render_mutation(&term);
         }
         changed
     }
@@ -2653,7 +2747,7 @@ impl Terminal {
         let mut term = self.term.lock();
         let changed = backend::clear_scrollback(&mut term);
         if changed {
-            self.bump_render_generation();
+            self.record_render_mutation(&term);
         }
         changed
     }
@@ -2684,8 +2778,9 @@ impl Terminal {
 
     /// Sync live term options derived from the current runtime configuration.
     pub fn set_term_options(&self, options: TerminalOptions) {
-        self.with_term_mut(|term| backend::apply_term_options(term, options));
-        self.bump_render_generation();
+        let mut term = self.term.lock();
+        backend::apply_term_options(&mut term, options);
+        self.record_render_mutation(&term);
     }
 
     /// Change only the live scrollback cap, preserving cursor defaults.
@@ -2844,9 +2939,10 @@ mod tests {
         TERMY_TERM_PROGRAM, Terminal, TerminalCursorState, TerminalCursorStyle,
         TerminalDamageSnapshot, TerminalEvent, TerminalLaunch, TerminalOptions,
         TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
-        WorkingDirFallback, advance_terminal_text, drain_runtime_events,
-        normalize_working_directory_candidate, resolve_launch_working_directory,
-        resolve_shell_path, resolve_terminal_launch, search_term_buffer, should_drop_event,
+        WorkingDirFallback, advance_terminal_text, capture_viewport_ranges_at_generation,
+        drain_runtime_events, normalize_working_directory_candidate,
+        resolve_launch_working_directory, resolve_shell_path, resolve_terminal_launch,
+        search_term_buffer, should_drop_event, stop_synchronized_update,
         terminal_environment_overrides, terminal_event_from_osc, user_home_dir,
     };
     #[cfg(target_os = "windows")]
@@ -2864,13 +2960,17 @@ mod tests {
     use alacritty_terminal::{
         event::{Event as AlacEvent, EventListener, VoidListener, WindowSize},
         grid::Dimensions,
+        index::{Column, Line},
         sync::FairMutex,
         term::{ClipboardType, Config as TermConfig, Term, TermMode},
         vte::ansi::{self, CursorShape, NamedColor},
     };
     use flume::unbounded;
     use std::collections::HashMap;
-    use std::sync::{Arc, atomic::Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
 
     #[test]
     fn terminal_size_clamps_absurd_dimensions() {
@@ -2901,6 +3001,74 @@ mod tests {
 
         let cursor = terminal.cursor_position();
         assert_eq!(cursor, (2, 3));
+    }
+
+    #[test]
+    fn kitty_command_only_cursor_movement_rejects_old_render_generation() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        let update = terminal.take_render_damage_snapshot();
+
+        terminal.feed_output(b"\x1b_Ga=T,f=32,s=1,v=1,i=177,c=2,r=3;AQID/w==\x1b\\");
+
+        let mut visited = 0;
+        assert!(!terminal.visit_viewport_ranges_at_generation(
+            update.generation,
+            &[crate::TerminalDirtySpan {
+                row: 0,
+                left_col: 0,
+                right_col: 0,
+            }],
+            |_, _, _, _, _| visited += 1,
+        ));
+        assert_eq!(visited, 0);
+    }
+
+    #[test]
+    fn synchronized_update_watchdog_replay_rejects_old_render_generation() {
+        let size = test_terminal_size();
+        let listener = VoidListener;
+        let mut term = Term::new(TermConfig::default(), &size, listener);
+        let palette_snapshot = FairMutex::new(backend::palette(&term, 0));
+        let generation = AtomicU64::new(0);
+        let palette_revision = AtomicU64::new(0);
+        let mut parser = ansi::Processor::new();
+
+        parser.advance(&mut term, b"\x1b[?2026h\x1b]4;1;#123456\x07X");
+        let old_generation = generation.load(Ordering::Relaxed);
+        assert_eq!(term.grid()[Line(0)][Column(0)].c, ' ');
+
+        stop_synchronized_update(
+            &mut parser,
+            &mut term,
+            &generation,
+            &palette_revision,
+            &palette_snapshot,
+        );
+
+        assert_eq!(term.grid()[Line(0)][Column(0)].c, 'X');
+        assert!(generation.load(Ordering::Relaxed) > old_generation);
+        assert!(
+            capture_viewport_ranges_at_generation(
+                &term,
+                &generation,
+                old_generation,
+                &[crate::TerminalDirtySpan {
+                    row: 0,
+                    left_col: 0,
+                    right_col: 0,
+                }],
+            )
+            .is_none()
+        );
+        assert!(palette_revision.load(Ordering::Relaxed) > 0);
+        assert_eq!(
+            palette_snapshot.lock().indexed[1],
+            Some(crate::TerminalColor {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            })
+        );
     }
 
     #[test]
@@ -4121,6 +4289,7 @@ mod tests {
         let read = terminal.render_read(true);
         assert_eq!((read.metadata.cols, read.metadata.rows), (32, 4));
         assert_eq!(read.metadata.generation, read.update.generation);
+        assert_eq!(read.metadata.palette_revision, read.update.palette_revision);
         assert_eq!(read.metadata.palette_revision, read.palette.revision);
         assert!(matches!(read.update.damage, TerminalDamageSnapshot::Full));
         assert!(read.update.scrolls.is_empty());
@@ -4148,6 +4317,72 @@ mod tests {
         assert!(cell.hidden);
         assert!(cell.strikethrough);
         assert!(read.cells.iter().any(|cell| cell.wide_character_spacer));
+    }
+
+    #[test]
+    fn rich_visitors_allow_reentrant_terminal_reads() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        terminal.feed_output(b"abc");
+
+        let mut viewport_reentered = false;
+        terminal.visit_viewport_cells(|_, _, _, _| {
+            if !viewport_reentered {
+                viewport_reentered = true;
+                assert_eq!(terminal.line_bounds().1, 3);
+            }
+        });
+        assert!(viewport_reentered);
+
+        let update = terminal.take_render_damage_snapshot();
+        let spans = match &update.damage {
+            TerminalDamageSnapshot::Partial(spans) if !spans.is_empty() => spans.clone(),
+            TerminalDamageSnapshot::Full | TerminalDamageSnapshot::Partial(_) => {
+                vec![crate::TerminalDirtySpan {
+                    row: 0,
+                    left_col: 0,
+                    right_col: 0,
+                }]
+            }
+        };
+        let mut range_reentered = false;
+        assert!(terminal.visit_viewport_ranges_at_generation(
+            update.generation,
+            &spans,
+            |_, _, _, _, _| {
+                if !range_reentered {
+                    range_reentered = true;
+                    let _ = terminal.palette();
+                }
+            },
+        ));
+        assert!(range_reentered);
+
+        let mut line_reentered = false;
+        terminal.visit_line_cells(0, 0, |_, _, _, _| {
+            if !line_reentered {
+                line_reentered = true;
+                assert_eq!(terminal.cursor_position(), (3, 0));
+            }
+        });
+        assert!(line_reentered);
+    }
+
+    #[test]
+    fn rich_render_cell_keeps_common_text_inline() {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        terminal.feed_output(b"plain");
+
+        let read = terminal.render_read(true);
+        assert!(read.cells.iter().all(|cell| !cell.text.is_heap_allocated()));
+
+        terminal.feed_output("\rcombined e\u{301}".as_bytes());
+        let read = terminal.render_read(true);
+        assert!(
+            read.cells
+                .iter()
+                .filter(|cell| !cell.text.is_empty())
+                .all(|cell| !cell.text.is_heap_allocated())
+        );
     }
 
     #[test]

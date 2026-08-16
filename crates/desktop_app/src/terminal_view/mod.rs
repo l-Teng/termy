@@ -44,8 +44,8 @@ use termy_core::{
     TerminalKeyEventKind, TerminalKeyboardMode, TerminalLaunch, TerminalMouseMode, TerminalOptions,
     TerminalPalette, TerminalQueryColors, TerminalReplyHost, TerminalRuntimeConfig, TerminalSize,
     TerminalWakeupNotifier, WindowsShell as RuntimeWindowsShell,
-    WorkingDirFallback as RuntimeWorkingDirFallback, find_link_in_line, hyperlink_at_viewport_cell,
-    link_at_viewport_cell, normalize_working_directory_candidate, resolve_launch_working_directory,
+    WorkingDirFallback as RuntimeWorkingDirFallback, find_link_in_line,
+    normalize_working_directory_candidate, resolve_launch_working_directory,
     resolve_working_directory_path,
 };
 use termy_plugin_runtime::{PluginEvent, PluginRuntime};
@@ -897,9 +897,7 @@ impl Terminal {
     /// The OSC 8 hyperlink under the given viewport cell, if any.
     fn hyperlink_at(&self, row: usize, col: usize) -> Option<termy_core::DetectedLink> {
         match self {
-            Self::Tmux(terminal) => {
-                terminal.with_term(|term| hyperlink_at_viewport_cell(term, row, col))
-            }
+            Self::Tmux(terminal) => terminal.hyperlink_at(row, col),
             Self::Native(terminal) => terminal
                 .lock()
                 .ok()
@@ -920,9 +918,7 @@ impl Terminal {
     /// including links spanning soft-wrapped rows.
     fn link_at(&self, row: usize, col: usize) -> Option<termy_core::DetectedViewportLink> {
         match self {
-            Self::Tmux(terminal) => {
-                terminal.with_term(|term| link_at_viewport_cell(term, row, col))
-            }
+            Self::Tmux(terminal) => terminal.link_at(row, col),
             Self::Native(terminal) => terminal
                 .lock()
                 .ok()

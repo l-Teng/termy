@@ -16,7 +16,7 @@ pub(in crate::terminal_view) struct TerminalPaneRenderCacheKey {
     pub(in crate::terminal_view) selection_range: Option<(SelectionPos, SelectionPos)>,
     pub(in crate::terminal_view) search_results_revision: Option<u64>,
     pub(in crate::terminal_view) search_position: Option<(usize, usize)>,
-    pub(in crate::terminal_view) tmon_palette_revision: Option<u64>,
+    pub(in crate::terminal_view) palette_revision: Option<u64>,
     pub(in crate::terminal_view) effective_background_opacity_bits: u32,
     pub(in crate::terminal_view) background_opacity_cells: bool,
     pub(in crate::terminal_view) color_transform: TerminalPaneCellColorTransformKey,
@@ -65,7 +65,7 @@ mod tests {
                 )),
                 search_results_revision: Some(7),
                 search_position: Some((1, 1)),
-                tmon_palette_revision: Some(9),
+                palette_revision: Some(9),
                 effective_background_opacity_bits: 0.92f32.to_bits(),
                 background_opacity_cells: false,
                 color_transform: TerminalPaneCellColorTransformKey {

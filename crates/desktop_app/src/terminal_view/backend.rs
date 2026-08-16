@@ -46,6 +46,7 @@ pub(super) struct TerminalRenderDamageSnapshot {
     pub(super) damage: TerminalDamageSnapshot,
     pub(super) scrolls: Vec<TerminalViewportScroll>,
     pub(super) generation: Option<u64>,
+    pub(super) palette_revision: Option<u64>,
 }
 
 impl TerminalRenderDamageSnapshot {
@@ -70,6 +71,7 @@ impl TerminalRenderDamageSnapshot {
                 })
                 .collect(),
             generation: Some(update.generation),
+            palette_revision: Some(update.palette_revision),
         }
     }
 
@@ -78,6 +80,7 @@ impl TerminalRenderDamageSnapshot {
             damage,
             scrolls: Vec::new(),
             generation: None,
+            palette_revision: None,
         }
     }
 }

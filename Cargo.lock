@@ -7839,6 +7839,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "base64",
+ "compact_str",
  "dirs 6.0.0",
  "flate2",
  "flume",

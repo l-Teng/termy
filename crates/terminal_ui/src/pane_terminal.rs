@@ -12,8 +12,8 @@ use termy_core::{
 };
 
 use termy_core::{
-    KittyGraphicsCursorTracker, TerminalCursorState, TerminalDamageSnapshot, TerminalKeyboardMode,
-    TerminalMouseMode, TerminalOptions, TerminalSize,
+    DetectedLink, DetectedViewportLink, KittyGraphicsCursorTracker, TerminalCursorState,
+    TerminalDamageSnapshot, TerminalKeyboardMode, TerminalMouseMode, TerminalOptions, TerminalSize,
 };
 
 use crate::alacritty_bridge;
@@ -160,6 +160,16 @@ impl PaneTerminal {
         inner.size.cols = u16::try_from(term.grid().columns()).unwrap_or(u16::MAX);
         inner.size.rows = u16::try_from(term.grid().screen_lines()).unwrap_or(u16::MAX);
         result
+    }
+
+    pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<DetectedLink> {
+        let term = self.cloned_term_arc();
+        alacritty_bridge::hyperlink_at(&term.lock(), row, col)
+    }
+
+    pub fn link_at(&self, row: usize, col: usize) -> Option<DetectedViewportLink> {
+        let term = self.cloned_term_arc();
+        alacritty_bridge::link_at(&term.lock(), row, col)
     }
 
     pub fn take_damage_snapshot(&self) -> TerminalDamageSnapshot {
@@ -440,6 +450,28 @@ mod tests {
         let motion_mode = terminal.mouse_mode();
         assert!(motion_mode.enabled);
         assert!(motion_mode.report_motion);
+    }
+
+    #[test]
+    fn tmux_link_lookup_is_owned_by_pane_terminal() {
+        let terminal = PaneTerminal::new(
+            TerminalSize {
+                cols: 12,
+                rows: 3,
+                ..TerminalSize::default()
+            },
+            test_term_options(2000),
+        );
+        terminal.feed_output(
+            b"\x1b]8;id=docs;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\ https://x.io",
+        );
+
+        let hyperlink = terminal.hyperlink_at(0, 1).expect("OSC 8 link");
+        assert_eq!((hyperlink.start_col, hyperlink.end_col), (0, 3));
+        assert_eq!(hyperlink.target, "https://example.com/docs");
+
+        let detected = terminal.link_at(1, 3).expect("wrapped text link");
+        assert_eq!(detected.target, "https://x.io");
     }
 
     #[test]

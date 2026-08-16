@@ -15,7 +15,7 @@ use alacritty_terminal::{
 use crate::{
     DetectedLink, DetectedViewportLink, TerminalColor, TerminalCursorState, TerminalCursorStyle,
     TerminalDamageSnapshot, TerminalDirtySpan, TerminalKeyboardMode, TerminalMouseMode,
-    TerminalOptions, TerminalPalette, TerminalRenderCell, TerminalRenderColor,
+    TerminalOptions, TerminalPalette, TerminalRenderCell, TerminalRenderColor, TerminalRenderText,
     TerminalUnderlineStyle,
 };
 
@@ -256,14 +256,8 @@ pub(crate) fn render_cell(cell: &alacritty_terminal::term::cell::Cell) -> Termin
     }
 }
 
-fn cell_text(cell: &alacritty_terminal::term::cell::Cell) -> String {
-    let combining_len = cell.zerowidth().map_or(0, <[char]>::len);
-    let mut text = String::with_capacity(cell.c.len_utf8().saturating_add(combining_len * 4));
-    text.push(cell.c);
-    if let Some(combining) = cell.zerowidth() {
-        text.extend(combining);
-    }
-    text
+fn cell_text(cell: &alacritty_terminal::term::cell::Cell) -> TerminalRenderText {
+    TerminalRenderText::from_cell_chars(cell.c, cell.zerowidth())
 }
 
 pub(crate) fn visible_render_cells<T: EventListener>(
@@ -275,28 +269,34 @@ pub(crate) fn visible_render_cells<T: EventListener>(
         .collect()
 }
 
-pub(crate) fn viewport_cells<T: EventListener>(
-    term: &EngineTerm<T>,
-) -> Vec<(usize, i32, usize, TerminalRenderCell)> {
+pub(crate) struct ViewportCellBatch {
+    pub(crate) display_offset: usize,
+    pub(crate) cells: Vec<TerminalRenderCell>,
+}
+
+pub(crate) fn viewport_cells<T: EventListener>(term: &EngineTerm<T>) -> ViewportCellBatch {
     let content = term.renderable_content();
-    let display_offset = content.display_offset;
-    content
-        .display_iter
-        .map(|indexed| {
-            (
-                display_offset,
-                indexed.point.line.0,
-                indexed.point.column.0,
-                render_cell(indexed.cell),
-            )
-        })
-        .collect()
+    ViewportCellBatch {
+        display_offset: content.display_offset,
+        cells: content
+            .display_iter
+            .map(|indexed| render_cell(indexed.cell))
+            .collect(),
+    }
+}
+
+pub(crate) struct ViewportRangeCell {
+    pub(crate) row: usize,
+    pub(crate) display_offset: usize,
+    pub(crate) line: i32,
+    pub(crate) col: usize,
+    pub(crate) cell: TerminalRenderCell,
 }
 
 pub(crate) fn viewport_ranges<T: EventListener>(
     term: &EngineTerm<T>,
     spans: &[TerminalDirtySpan],
-) -> Vec<(usize, usize, i32, usize, TerminalRenderCell)> {
+) -> Vec<ViewportRangeCell> {
     let grid = term.grid();
     let display_offset = grid.display_offset();
     let rows = grid.screen_lines();
@@ -309,13 +309,13 @@ pub(crate) fn viewport_ranges<T: EventListener>(
         let line = span.row as i32 - display_offset as i32;
         let right = span.right_col.min(cols.saturating_sub(1));
         for col in span.left_col..=right {
-            cells.push((
-                span.row,
+            cells.push(ViewportRangeCell {
+                row: span.row,
                 display_offset,
                 line,
                 col,
-                render_cell(&grid[Line(line)][Column(col)]),
-            ));
+                cell: render_cell(&grid[Line(line)][Column(col)]),
+            });
         }
     }
     cells
@@ -330,7 +330,12 @@ pub(crate) fn line_bounds<T: EventListener>(term: &EngineTerm<T>) -> (i32, i32) 
 }
 
 type RenderLineBounds = (i32, i32, usize);
-type RenderLineCell = (i32, usize, TerminalRenderCell);
+
+pub(crate) struct RenderLineCell {
+    pub(crate) line: i32,
+    pub(crate) col: usize,
+    pub(crate) cell: TerminalRenderCell,
+}
 
 pub(crate) fn line_cells<T: EventListener>(
     term: &EngineTerm<T>,
@@ -347,7 +352,11 @@ pub(crate) fn line_cells<T: EventListener>(
         if first <= last {
             for line in first..=last {
                 for col in 0..columns {
-                    cells.push((line, col, render_cell(&grid[Line(line)][Column(col)])));
+                    cells.push(RenderLineCell {
+                        line,
+                        col,
+                        cell: render_cell(&grid[Line(line)][Column(col)]),
+                    });
                 }
             }
         }

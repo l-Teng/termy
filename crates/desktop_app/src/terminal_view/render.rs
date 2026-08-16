@@ -337,6 +337,13 @@ fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+fn render_damage_palette_matches(
+    damage_revision: Option<u64>,
+    sampled_revision: Option<u64>,
+) -> bool {
+    damage_revision.is_none() || damage_revision == sampled_revision
+}
+
 fn pane_cache_update_strategy(
     cache_has_cells: bool,
     cache_size_matches: bool,
@@ -968,7 +975,7 @@ impl TerminalView {
             selection_range: is_active_pane.then(|| self.selection_range()).flatten(),
             search_results_revision,
             search_position,
-            tmon_palette_revision: palette_revision,
+            palette_revision,
             effective_background_opacity_bits: effective_background_opacity.to_bits(),
             background_opacity_cells: self.background_opacity_cells,
             color_transform: TerminalPaneCellColorTransformKey {
@@ -1201,6 +1208,7 @@ impl TerminalView {
         cols: usize,
         rows: usize,
         display_offset: usize,
+        damage: TerminalRenderDamageSnapshot,
         cache: &mut TerminalPaneRenderCache,
         cache_key: TerminalPaneRenderCacheKey,
         context: PaneCellBuildContext<'_>,
@@ -1210,7 +1218,8 @@ impl TerminalView {
         PaneCacheUpdateStrategy,
         TerminalGridPaintDamage,
     ) {
-        let damage = terminal.take_render_damage_snapshot();
+        let palette_matches =
+            render_damage_palette_matches(damage.palette_revision, cache_key.palette_revision);
         let mut strategy = pane_cache_update_strategy(
             !cache.cells.is_empty(),
             cache.cols == cols && cache.rows == rows,
@@ -1218,7 +1227,9 @@ impl TerminalView {
             cache.key.as_ref() == Some(&cache_key),
             &damage.damage,
         );
-        if strategy == PaneCacheUpdateStrategy::Reuse && !damage.scrolls.is_empty() {
+        if !palette_matches {
+            strategy = PaneCacheUpdateStrategy::Full;
+        } else if strategy == PaneCacheUpdateStrategy::Reuse && !damage.scrolls.is_empty() {
             strategy = PaneCacheUpdateStrategy::Partial;
         }
         if strategy == PaneCacheUpdateStrategy::Partial
@@ -1255,6 +1266,7 @@ impl TerminalView {
                     damage: TerminalDamageSnapshot::Partial(spans),
                     scrolls,
                     generation,
+                    palette_revision: _,
                 } = damage
                 else {
                     cache.cells = self.rebuild_pane_render_cache(
@@ -3315,9 +3327,7 @@ impl Render for TerminalView {
                 // the start of the render pass, avoiding another nested pair
                 // of terminal locks here.
                 let alternate_screen_mode = pane.last_alternate_screen.get();
-                // Sample once before consuming damage. If a palette mutation races after
-                // this point, its newer revision invalidates the next frame even when this
-                // frame consumed the mutation's full-damage marker.
+                let damage = terminal.take_render_damage_snapshot();
                 let core_palette = terminal.core_palette();
                 let tmon_palette = terminal.tmon_palette();
                 let palette_revision = core_palette
@@ -3359,6 +3369,7 @@ impl Render for TerminalView {
                         cols,
                         rows,
                         pane_display_offset,
+                        damage,
                         &mut pane_render_cache,
                         pane_cache_key.clone(),
                         pane_build_context,
@@ -5257,6 +5268,13 @@ mod tests {
     }
 
     #[test]
+    fn core_damage_palette_revision_requires_matching_sample() {
+        assert!(render_damage_palette_matches(Some(4), Some(4)));
+        assert!(!render_damage_palette_matches(Some(5), Some(4)));
+        assert!(render_damage_palette_matches(None, Some(4)));
+    }
+
+    #[test]
     fn pane_cache_strategy_reuses_cells_when_damage_is_empty_and_key_matches() {
         let strategy = pane_cache_update_strategy(
             true,
@@ -5297,14 +5315,14 @@ mod tests {
     }
 
     #[test]
-    fn pane_cache_strategy_forces_full_rebuild_for_new_tmon_palette_revision() {
+    fn pane_cache_strategy_forces_full_rebuild_for_new_palette_revision() {
         let cached_key = TerminalPaneRenderCacheKey {
             is_active_pane: true,
             alternate_screen_mode: false,
             selection_range: None,
             search_results_revision: None,
             search_position: None,
-            tmon_palette_revision: Some(4),
+            palette_revision: Some(4),
             effective_background_opacity_bits: 1.0f32.to_bits(),
             background_opacity_cells: false,
             color_transform: TerminalPaneCellColorTransformKey {
@@ -5314,7 +5332,7 @@ mod tests {
             },
         };
         let current_key = TerminalPaneRenderCacheKey {
-            tmon_palette_revision: Some(5),
+            palette_revision: Some(5),
             ..cached_key
         };
 
