@@ -122,6 +122,11 @@ helpers as part of the renderer-neutral core API change. Use core-owned
 public `Terminal` methods instead. This is an intentional Rust source break;
 the flat frame layout and C ABI did not change.
 
+> **Tmon rollout note:** Native terminals currently default to Tmon. Launching
+> with exact `TERMY_FORCE_ALACRITTY_ENGINE=1` selects the temporary Alacritty
+> fallback. This is a release rollback switch, not a permanent configuration
+> key; launch and configuration errors are never hidden by an engine retry.
+
 ### Display-only terminals
 
 When another process owns the session—such as a tmux control-mode client—create

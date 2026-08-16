@@ -486,6 +486,7 @@ impl TerminalView {
             RuntimeKind::Tmux => "tmux",
         };
         let engine_label = terminal_engine_label(self.active_terminal());
+        let engine_selection = terminal_engine_selection_label(self.active_terminal());
         let tab_summary = self.inspector_active_tab_snapshot();
         let panes = self.inspector_pane_snapshots();
         let font_size: f32 = self.font_size.into();
@@ -500,6 +501,12 @@ impl TerminalView {
         content = content.child(Self::inspector_row(
             "Engine",
             engine_label.to_string(),
+            text_muted,
+            text_primary,
+        ));
+        content = content.child(Self::inspector_row(
+            "Engine Selection",
+            engine_selection,
             text_muted,
             text_primary,
         ));

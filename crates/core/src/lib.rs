@@ -61,9 +61,10 @@ pub use render_metrics::{
 pub use runtime::{
     KittyGraphicsCursorTracker, KittyGraphicsTextEffects, MAX_TERMINAL_SCROLLBACK_HISTORY,
     ResolvedTerminalLaunch, TabTitleShellIntegration, Terminal, TerminalCursorState,
-    TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalLaunch,
-    TerminalOptions, TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
-    WorkingDirFallback, normalize_working_directory_candidate, resolve_launch_working_directory,
+    TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEngineDiagnostics,
+    TerminalEngineSelectionReason, TerminalEvent, TerminalLaunch, TerminalOptions,
+    TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell, WorkingDirFallback,
+    normalize_working_directory_candidate, resolve_launch_working_directory,
     resolve_terminal_launch, resolve_working_directory_path, terminal_environment_overrides,
 };
 pub use search::{

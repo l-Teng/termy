@@ -1,9 +1,9 @@
-//! A small experimental terminal engine for Termy.
+//! Termy's small renderer-neutral terminal engine.
 //!
 //! Tmon deliberately uses only the Rust standard library. It owns its VT parser,
-//! bounded grid/scrollback, damage tracking, and native PTY lifecycle. The
-//! desktop app keeps it behind `TERMY_EXPERIMENTAL_TMON_ENGINE=1`; the regular
-//! native and tmux engines do not depend on this runtime path.
+//! bounded grid/scrollback, damage tracking, and native PTY lifecycle. It is
+//! Termy's default native engine during the guarded rollout; core retains the
+//! temporary Alacritty fallback and keeps engine selection private.
 
 mod graphics;
 mod grid;
@@ -288,9 +288,30 @@ impl WakeupNotifier {
 #[derive(Debug)]
 pub struct Error {
     inner: io::Error,
+    backend_initialization_failure: bool,
 }
 
 impl Error {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    fn launch(inner: io::Error) -> Self {
+        Self {
+            inner,
+            backend_initialization_failure: false,
+        }
+    }
+
+    fn backend_initialization(inner: io::Error) -> Self {
+        Self {
+            inner,
+            backend_initialization_failure: true,
+        }
+    }
+
     #[cfg(not(any(
         target_os = "linux",
         target_os = "android",
@@ -298,9 +319,16 @@ impl Error {
         target_os = "windows"
     )))]
     fn unsupported(message: &'static str) -> Self {
-        Self {
-            inner: io::Error::new(io::ErrorKind::Unsupported, message),
-        }
+        Self::backend_initialization(io::Error::new(io::ErrorKind::Unsupported, message))
+    }
+
+    /// Whether this failure happened while establishing the native PTY backend.
+    ///
+    /// Launch and configuration failures intentionally return `false` so hosts
+    /// do not hide invalid programs, arguments, environments, or working
+    /// directories by retrying a different terminal engine.
+    pub fn is_backend_initialization_failure(&self) -> bool {
+        self.backend_initialization_failure
     }
 }
 
@@ -316,9 +344,69 @@ impl std::error::Error for Error {
     }
 }
 
-impl From<io::Error> for Error {
-    fn from(inner: io::Error) -> Self {
-        Self { inner }
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "windows"
+))]
+#[derive(Debug)]
+pub(crate) struct PtyStartError {
+    inner: io::Error,
+    backend_initialization_failure: bool,
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "windows"
+))]
+impl PtyStartError {
+    pub(crate) fn launch(inner: io::Error) -> Self {
+        Self {
+            inner,
+            backend_initialization_failure: false,
+        }
+    }
+
+    pub(crate) fn backend_initialization(inner: io::Error) -> Self {
+        Self {
+            inner,
+            backend_initialization_failure: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn kind(&self) -> io::ErrorKind {
+        self.inner.kind()
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "windows"
+))]
+impl fmt::Display for PtyStartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.fmt(formatter)
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "windows"
+))]
+impl From<PtyStartError> for Error {
+    fn from(error: PtyStartError) -> Self {
+        Self {
+            inner: error.inner,
+            backend_initialization_failure: error.backend_initialization_failure,
+        }
     }
 }
 
@@ -648,7 +736,8 @@ impl Terminal {
                 target.pending.drain(..).collect::<Vec<_>>()
             };
             if !pending.is_empty() {
-                pty.write_protocol_reply_owned(pending)?;
+                pty.write_protocol_reply_owned(pending)
+                    .map_err(Error::backend_initialization)?;
             }
             (Some(pty), protocol_reply_sink)
         };

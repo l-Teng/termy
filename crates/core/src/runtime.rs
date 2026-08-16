@@ -164,6 +164,46 @@ pub enum TerminalLaunch {
     Program { program: String, args: Vec<String> },
 }
 
+/// Why the runtime selected its active terminal engine.
+///
+/// This is diagnostic state only. Engine selection remains private to core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalEngineSelectionReason {
+    TmonDefault,
+    DisplayDefault,
+    ForcedAlacritty,
+    TmonUnavailable,
+    TmonInitializationFailure,
+    TestOverride,
+}
+
+impl TerminalEngineSelectionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TmonDefault => "tmon-default",
+            Self::DisplayDefault => "display-default",
+            Self::ForcedAlacritty => "forced-alacritty",
+            Self::TmonUnavailable => "tmon-unavailable",
+            Self::TmonInitializationFailure => "tmon-initialization-failure",
+            Self::TestOverride => "test-override",
+        }
+    }
+}
+
+impl std::fmt::Display for TerminalEngineSelectionReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// The actual engine plus the reason it was selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalEngineDiagnostics {
+    pub engine: &'static str,
+    pub selection_reason: TerminalEngineSelectionReason,
+    pub fallback_detail: Option<String>,
+}
+
 impl Default for TerminalRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -2063,6 +2103,7 @@ impl Dimensions for TerminalSize {
 /// The terminal state wrapper
 pub struct Terminal {
     backend: engine_backend::Backend,
+    engine_diagnostics: TerminalEngineDiagnostics,
 }
 
 mod engine_backend;
@@ -2098,54 +2139,6 @@ mod alacritty_backend {
     }
 
     impl AlacrittyBackend {
-        /// Create a new terminal with the given size.
-        pub fn new(
-            size: TerminalSize,
-            configured_working_dir: Option<&str>,
-            event_wakeup_tx: Option<Sender<()>>,
-            tab_title_shell_integration: Option<&TabTitleShellIntegration>,
-            runtime_config: Option<&TerminalRuntimeConfig>,
-            startup_command: Option<&str>,
-        ) -> anyhow::Result<Self> {
-            let wakeup_notifier = event_wakeup_tx.map(|event_wakeup_tx| {
-                TerminalWakeupNotifier::new(move || {
-                    let _ = event_wakeup_tx.try_send(());
-                })
-            });
-            Self::new_with_wakeup_notifier(
-                size,
-                configured_working_dir,
-                wakeup_notifier,
-                tab_title_shell_integration,
-                runtime_config,
-                startup_command,
-            )
-        }
-
-        /// Create a terminal whose wakeups are routed through a host callback.
-        ///
-        /// Multi-terminal hosts can capture a stable terminal identifier in the
-        /// callback and drain only the terminal that produced the wakeup.
-        pub fn new_with_wakeup_notifier(
-            size: TerminalSize,
-            configured_working_dir: Option<&str>,
-            wakeup_notifier: Option<TerminalWakeupNotifier>,
-            tab_title_shell_integration: Option<&TabTitleShellIntegration>,
-            runtime_config: Option<&TerminalRuntimeConfig>,
-            startup_command: Option<&str>,
-        ) -> anyhow::Result<Self> {
-            let launch =
-                startup_command.map(|command| TerminalLaunch::ShellCommand(command.to_string()));
-            Self::new_with_launch_and_wakeup_notifier(
-                size,
-                configured_working_dir,
-                wakeup_notifier,
-                tab_title_shell_integration,
-                runtime_config,
-                launch.as_ref(),
-            )
-        }
-
         /// Create a terminal whose child is selected with a typed launch contract.
         pub fn new_with_launch_and_wakeup_notifier(
             size: TerminalSize,
@@ -2876,7 +2869,12 @@ impl Terminal {
     /// The active engine name for diagnostics. Do not branch application
     /// behavior on this value; construction policy remains owned by core.
     pub fn engine_label(&self) -> &'static str {
-        self.backend.engine_label()
+        self.engine_diagnostics.engine
+    }
+
+    /// The actual engine and the private selector's construction reason.
+    pub fn engine_diagnostics(&self) -> &TerminalEngineDiagnostics {
+        &self.engine_diagnostics
     }
 
     /// Create a new terminal with the given size.
@@ -2888,7 +2886,7 @@ impl Terminal {
         runtime_config: Option<&TerminalRuntimeConfig>,
         startup_command: Option<&str>,
     ) -> anyhow::Result<Self> {
-        engine_backend::Backend::new(
+        engine_backend::Backend::select_native(
             size,
             configured_working_dir,
             event_wakeup_tx,
@@ -2896,7 +2894,7 @@ impl Terminal {
             runtime_config,
             startup_command,
         )
-        .map(|backend| Self { backend })
+        .map(Self::from_backend_selection)
     }
 
     /// Create a terminal whose wakeups are routed through a host callback.
@@ -2916,7 +2914,7 @@ impl Terminal {
             runtime_config,
             startup_command,
         )
-        .map(|backend| Self { backend })
+        .map(Self::from_backend_selection)
     }
 
     /// Create a terminal whose child is selected with a typed launch contract.
@@ -2936,14 +2934,12 @@ impl Terminal {
             runtime_config,
             launch,
         )
-        .map(|backend| Self { backend })
+        .map(Self::from_backend_selection)
     }
 
     /// Create a display-only terminal with no PTY or child process.
     pub fn new_display(size: TerminalSize, runtime_config: Option<&TerminalRuntimeConfig>) -> Self {
-        Self {
-            backend: engine_backend::Backend::new_display(size, runtime_config),
-        }
+        Self::from_backend_selection(engine_backend::Backend::new_display(size, runtime_config))
     }
 
     /// Create a display-only terminal whose committed output wakes the host.
@@ -2952,13 +2948,11 @@ impl Terminal {
         runtime_config: Option<&TerminalRuntimeConfig>,
         wakeup_notifier: Option<TerminalWakeupNotifier>,
     ) -> Self {
-        Self {
-            backend: engine_backend::Backend::new_display_with_wakeup_notifier(
-                size,
-                runtime_config,
-                wakeup_notifier,
-            ),
-        }
+        Self::from_backend_selection(engine_backend::Backend::new_display_with_wakeup_notifier(
+            size,
+            runtime_config,
+            wakeup_notifier,
+        ))
     }
 
     #[cfg(test)]
@@ -2966,8 +2960,16 @@ impl Terminal {
         size: TerminalSize,
         runtime_config: Option<&TerminalRuntimeConfig>,
     ) -> Self {
+        Self::from_backend_selection(engine_backend::Backend::new_alacritty_display_for_test(
+            size,
+            runtime_config,
+        ))
+    }
+
+    fn from_backend_selection(selection: engine_backend::BackendSelection) -> Self {
         Self {
-            backend: engine_backend::Backend::new_alacritty_display_for_test(size, runtime_config),
+            backend: selection.backend,
+            engine_diagnostics: selection.diagnostics,
         }
     }
 

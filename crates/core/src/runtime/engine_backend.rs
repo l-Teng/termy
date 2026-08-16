@@ -1,7 +1,8 @@
 use super::*;
+use anyhow::Context as _;
 
 const TEST_BACKEND_ENV: &str = "TERMY_CORE_TEST_BACKEND";
-const EXPERIMENTAL_TMON_ENV: &str = "TERMY_EXPERIMENTAL_TMON_ENGINE";
+const FORCE_ALACRITTY_ENV: &str = "TERMY_FORCE_ALACRITTY_ENGINE";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum BackendChoice {
@@ -11,29 +12,6 @@ enum BackendChoice {
 }
 
 impl BackendChoice {
-    fn native() -> Self {
-        if let Some(choice) = Self::from_test_value(env::var_os(TEST_BACKEND_ENV).as_deref()) {
-            return choice;
-        }
-        let requested = env::var_os(EXPERIMENTAL_TMON_ENV);
-        let available = tmon::native_pty_available();
-        if requested.as_deref() == Some(std::ffi::OsStr::new("1")) && !available {
-            log::warn!(
-                "TERMY_EXPERIMENTAL_TMON_ENGINE=1 requested, but Tmon's native PTY is unavailable; \
-                 falling back to the native Alacritty terminal engine"
-            );
-        }
-        let choice = Self::from_experimental_value(requested.as_deref(), available);
-        if choice == Self::Tmon {
-            log::info!("using experimental Tmon terminal engine");
-        }
-        choice
-    }
-
-    fn display() -> Self {
-        Self::from_test_value(env::var_os(TEST_BACKEND_ENV).as_deref()).unwrap_or(Self::Tmon)
-    }
-
     fn from_test_value(value: Option<&std::ffi::OsStr>) -> Option<Self> {
         match value.and_then(std::ffi::OsStr::to_str) {
             Some("alacritty") => Some(Self::Alacritty),
@@ -41,12 +19,137 @@ impl BackendChoice {
             _ => None,
         }
     }
+}
 
-    fn from_experimental_value(value: Option<&std::ffi::OsStr>, available: bool) -> Self {
-        if value == Some(std::ffi::OsStr::new("1")) && available {
-            Self::Tmon
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeBackendRequest {
+    TestOverride(BackendChoice),
+    ForcedAlacritty,
+    PreferTmon,
+}
+
+impl NativeBackendRequest {
+    fn current() -> Self {
+        Self::from_values(
+            env::var_os(TEST_BACKEND_ENV).as_deref(),
+            env::var_os(FORCE_ALACRITTY_ENV).as_deref(),
+        )
+    }
+
+    fn from_values(
+        test_value: Option<&std::ffi::OsStr>,
+        force_alacritty_value: Option<&std::ffi::OsStr>,
+    ) -> Self {
+        if let Some(choice) = BackendChoice::from_test_value(test_value) {
+            return Self::TestOverride(choice);
+        }
+        if force_alacritty_value == Some(std::ffi::OsStr::new("1")) {
+            Self::ForcedAlacritty
         } else {
-            Self::Alacritty
+            Self::PreferTmon
+        }
+    }
+}
+
+fn tmon_failure_is_fallback_eligible(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<tmon::Error>()
+        .is_some_and(tmon::Error::is_backend_initialization_failure)
+}
+
+fn select_native_backend<T>(
+    request: NativeBackendRequest,
+    tmon_available: bool,
+    mut start_alacritty: impl FnMut() -> anyhow::Result<T>,
+    mut start_tmon: impl FnMut() -> anyhow::Result<T>,
+    tmon_failure_is_eligible: impl Fn(&anyhow::Error) -> bool,
+) -> anyhow::Result<(T, TerminalEngineSelectionReason, Option<String>)> {
+    match request {
+        NativeBackendRequest::TestOverride(BackendChoice::Alacritty) => Ok((
+            start_alacritty()?,
+            TerminalEngineSelectionReason::TestOverride,
+            None,
+        )),
+        NativeBackendRequest::TestOverride(BackendChoice::Tmon) => Ok((
+            start_tmon()?,
+            TerminalEngineSelectionReason::TestOverride,
+            None,
+        )),
+        NativeBackendRequest::ForcedAlacritty => Ok((
+            start_alacritty()?,
+            TerminalEngineSelectionReason::ForcedAlacritty,
+            None,
+        )),
+        NativeBackendRequest::PreferTmon if !tmon_available => Ok((
+            start_alacritty()?,
+            TerminalEngineSelectionReason::TmonUnavailable,
+            Some("native Tmon PTY support is unavailable on this host".to_string()),
+        )),
+        NativeBackendRequest::PreferTmon => match start_tmon() {
+            Ok(backend) => Ok((backend, TerminalEngineSelectionReason::TmonDefault, None)),
+            Err(error) if tmon_failure_is_eligible(&error) => {
+                let detail = error.to_string();
+                let backend = start_alacritty().with_context(|| {
+                    format!(
+                        "Tmon backend initialization failed ({detail}); Alacritty fallback also failed"
+                    )
+                })?;
+                Ok((
+                    backend,
+                    TerminalEngineSelectionReason::TmonInitializationFailure,
+                    Some(detail),
+                ))
+            }
+            Err(error) => Err(error),
+        },
+    }
+}
+
+pub(super) struct BackendSelection {
+    pub(super) backend: Backend,
+    pub(super) diagnostics: TerminalEngineDiagnostics,
+}
+
+impl BackendSelection {
+    fn new(
+        backend: Backend,
+        selection_reason: TerminalEngineSelectionReason,
+        fallback_detail: Option<String>,
+    ) -> Self {
+        let diagnostics = TerminalEngineDiagnostics {
+            engine: backend.engine_label(),
+            selection_reason,
+            fallback_detail,
+        };
+        Self {
+            backend,
+            diagnostics,
+        }
+    }
+
+    fn log_native(&self) {
+        let diagnostics = &self.diagnostics;
+        match diagnostics.selection_reason {
+            TerminalEngineSelectionReason::TmonUnavailable
+            | TerminalEngineSelectionReason::TmonInitializationFailure => log::warn!(
+                "terminal engine selected: {} ({}){}",
+                diagnostics.engine,
+                diagnostics.selection_reason,
+                diagnostics
+                    .fallback_detail
+                    .as_deref()
+                    .map_or_else(String::new, |detail| format!("; {detail}"))
+            ),
+            TerminalEngineSelectionReason::TestOverride => log::debug!(
+                "terminal engine selected: {} ({})",
+                diagnostics.engine,
+                diagnostics.selection_reason
+            ),
+            _ => log::info!(
+                "terminal engine selected: {} ({})",
+                diagnostics.engine,
+                diagnostics.selection_reason
+            ),
         }
     }
 }
@@ -64,36 +167,27 @@ impl Backend {
         }
     }
 
-    pub(super) fn new(
+    pub(super) fn select_native(
         size: TerminalSize,
         configured_working_dir: Option<&str>,
         event_wakeup_tx: Option<Sender<()>>,
         tab_title_shell_integration: Option<&TabTitleShellIntegration>,
         runtime_config: Option<&TerminalRuntimeConfig>,
         startup_command: Option<&str>,
-    ) -> anyhow::Result<Self> {
-        match BackendChoice::native() {
-            BackendChoice::Alacritty => super::alacritty_backend::AlacrittyBackend::new(
-                size,
-                configured_working_dir,
-                event_wakeup_tx,
-                tab_title_shell_integration,
-                runtime_config,
-                startup_command,
-            )
-            .map(Box::new)
-            .map(Self::Alacritty),
-            BackendChoice::Tmon => super::tmon_backend::TmonBackend::new(
-                size,
-                configured_working_dir,
-                event_wakeup_tx,
-                tab_title_shell_integration,
-                runtime_config,
-                startup_command,
-            )
-            .map(Box::new)
-            .map(Self::Tmon),
-        }
+    ) -> anyhow::Result<BackendSelection> {
+        let wakeup_notifier = event_wakeup_tx.map(|event_wakeup_tx| {
+            TerminalWakeupNotifier::new(move || {
+                let _ = event_wakeup_tx.try_send(());
+            })
+        });
+        Self::new_with_wakeup_notifier(
+            size,
+            configured_working_dir,
+            wakeup_notifier,
+            tab_title_shell_integration,
+            runtime_config,
+            startup_command,
+        )
     }
 
     pub(super) fn new_with_wakeup_notifier(
@@ -103,31 +197,17 @@ impl Backend {
         tab_title_shell_integration: Option<&TabTitleShellIntegration>,
         runtime_config: Option<&TerminalRuntimeConfig>,
         startup_command: Option<&str>,
-    ) -> anyhow::Result<Self> {
-        match BackendChoice::native() {
-            BackendChoice::Alacritty => {
-                super::alacritty_backend::AlacrittyBackend::new_with_wakeup_notifier(
-                    size,
-                    configured_working_dir,
-                    wakeup_notifier,
-                    tab_title_shell_integration,
-                    runtime_config,
-                    startup_command,
-                )
-                .map(Box::new)
-                .map(Self::Alacritty)
-            }
-            BackendChoice::Tmon => super::tmon_backend::TmonBackend::new_with_wakeup_notifier(
-                size,
-                configured_working_dir,
-                wakeup_notifier,
-                tab_title_shell_integration,
-                runtime_config,
-                startup_command,
-            )
-            .map(Box::new)
-            .map(Self::Tmon),
-        }
+    ) -> anyhow::Result<BackendSelection> {
+        let launch =
+            startup_command.map(|command| TerminalLaunch::ShellCommand(command.to_string()));
+        Self::new_with_launch_and_wakeup_notifier(
+            size,
+            configured_working_dir,
+            wakeup_notifier,
+            tab_title_shell_integration,
+            runtime_config,
+            launch.as_ref(),
+        )
     }
 
     pub(super) fn new_with_launch_and_wakeup_notifier(
@@ -137,39 +217,48 @@ impl Backend {
         tab_title_shell_integration: Option<&TabTitleShellIntegration>,
         runtime_config: Option<&TerminalRuntimeConfig>,
         launch: Option<&TerminalLaunch>,
-    ) -> anyhow::Result<Self> {
-        match BackendChoice::native() {
-            BackendChoice::Alacritty => {
-                super::alacritty_backend::AlacrittyBackend::new_with_launch_and_wakeup_notifier(
-                    size,
-                    configured_working_dir,
-                    wakeup_notifier,
-                    tab_title_shell_integration,
-                    runtime_config,
-                    launch,
-                )
-                .map(Box::new)
-                .map(Self::Alacritty)
-            }
-            BackendChoice::Tmon => {
-                super::tmon_backend::TmonBackend::new_with_launch_and_wakeup_notifier(
-                    size,
-                    configured_working_dir,
-                    wakeup_notifier,
-                    tab_title_shell_integration,
-                    runtime_config,
-                    launch,
-                )
-                .map(Box::new)
-                .map(Self::Tmon)
-            }
-        }
+    ) -> anyhow::Result<BackendSelection> {
+        let start_alacritty = || {
+            super::alacritty_backend::AlacrittyBackend::new_with_launch_and_wakeup_notifier(
+                size,
+                configured_working_dir,
+                wakeup_notifier.clone(),
+                tab_title_shell_integration,
+                runtime_config,
+                launch,
+            )
+            .map(Box::new)
+            .map(Self::Alacritty)
+        };
+        let start_tmon = || {
+            super::tmon_backend::TmonBackend::new_with_launch_and_wakeup_notifier(
+                size,
+                configured_working_dir,
+                wakeup_notifier.clone(),
+                tab_title_shell_integration,
+                runtime_config,
+                launch,
+            )
+            .map(Box::new)
+            .map(Self::Tmon)
+        };
+
+        let (backend, reason, detail) = select_native_backend(
+            NativeBackendRequest::current(),
+            tmon::native_pty_available(),
+            start_alacritty,
+            start_tmon,
+            tmon_failure_is_fallback_eligible,
+        )?;
+        let selection = BackendSelection::new(backend, reason, detail);
+        selection.log_native();
+        Ok(selection)
     }
 
     pub(super) fn new_display(
         size: TerminalSize,
         runtime_config: Option<&TerminalRuntimeConfig>,
-    ) -> Self {
+    ) -> BackendSelection {
         Self::new_display_with_wakeup_notifier(size, runtime_config, None)
     }
 
@@ -177,33 +266,56 @@ impl Backend {
         size: TerminalSize,
         runtime_config: Option<&TerminalRuntimeConfig>,
         wakeup_notifier: Option<TerminalWakeupNotifier>,
-    ) -> Self {
-        match BackendChoice::display() {
-            BackendChoice::Alacritty => Self::Alacritty(Box::new(
-                super::alacritty_backend::AlacrittyBackend::new_display_with_wakeup_notifier(
-                    size,
-                    runtime_config,
-                    wakeup_notifier,
-                ),
-            )),
-            BackendChoice::Tmon => Self::Tmon(Box::new(
-                super::tmon_backend::TmonBackend::new_display_with_wakeup_notifier(
-                    size,
-                    runtime_config,
-                    wakeup_notifier,
-                ),
-            )),
-        }
+    ) -> BackendSelection {
+        let (backend, reason) = match BackendChoice::from_test_value(
+            env::var_os(TEST_BACKEND_ENV).as_deref(),
+        ) {
+            Some(BackendChoice::Alacritty) => (
+                Self::Alacritty(Box::new(
+                    super::alacritty_backend::AlacrittyBackend::new_display_with_wakeup_notifier(
+                        size,
+                        runtime_config,
+                        wakeup_notifier,
+                    ),
+                )),
+                TerminalEngineSelectionReason::TestOverride,
+            ),
+            Some(BackendChoice::Tmon) => (
+                Self::Tmon(Box::new(
+                    super::tmon_backend::TmonBackend::new_display_with_wakeup_notifier(
+                        size,
+                        runtime_config,
+                        wakeup_notifier,
+                    ),
+                )),
+                TerminalEngineSelectionReason::TestOverride,
+            ),
+            None => (
+                Self::Tmon(Box::new(
+                    super::tmon_backend::TmonBackend::new_display_with_wakeup_notifier(
+                        size,
+                        runtime_config,
+                        wakeup_notifier,
+                    ),
+                )),
+                TerminalEngineSelectionReason::DisplayDefault,
+            ),
+        };
+        BackendSelection::new(backend, reason, None)
     }
 
     #[cfg(test)]
     pub(super) fn new_alacritty_display_for_test(
         size: TerminalSize,
         runtime_config: Option<&TerminalRuntimeConfig>,
-    ) -> Self {
-        Self::Alacritty(Box::new(
-            super::alacritty_backend::AlacrittyBackend::new_display(size, runtime_config),
-        ))
+    ) -> BackendSelection {
+        BackendSelection::new(
+            Self::Alacritty(Box::new(
+                super::alacritty_backend::AlacrittyBackend::new_display(size, runtime_config),
+            )),
+            TerminalEngineSelectionReason::TestOverride,
+            None,
+        )
     }
 
     pub(super) fn feed_output(&self, bytes: &[u8]) {
@@ -605,24 +717,197 @@ mod tests {
     }
 
     #[test]
-    fn experimental_native_selector_requires_exact_opt_in_and_availability() {
+    fn native_selector_defaults_to_tmon_and_requires_exact_force_value() {
         assert_eq!(
-            BackendChoice::from_experimental_value(Some(std::ffi::OsStr::new("1")), true),
-            BackendChoice::Tmon
+            NativeBackendRequest::from_values(None, None),
+            NativeBackendRequest::PreferTmon
         );
         for value in [
-            None,
             Some(std::ffi::OsStr::new("0")),
             Some(std::ffi::OsStr::new("true")),
         ] {
             assert_eq!(
-                BackendChoice::from_experimental_value(value, true),
-                BackendChoice::Alacritty
+                NativeBackendRequest::from_values(None, value),
+                NativeBackendRequest::PreferTmon
             );
         }
         assert_eq!(
-            BackendChoice::from_experimental_value(Some(std::ffi::OsStr::new("1")), false),
-            BackendChoice::Alacritty
+            NativeBackendRequest::from_values(None, Some(std::ffi::OsStr::new("1"))),
+            NativeBackendRequest::ForcedAlacritty
         );
+    }
+
+    #[test]
+    fn private_test_override_precedes_emergency_force_value() {
+        assert_eq!(
+            NativeBackendRequest::from_values(
+                Some(std::ffi::OsStr::new("tmon")),
+                Some(std::ffi::OsStr::new("1")),
+            ),
+            NativeBackendRequest::TestOverride(BackendChoice::Tmon)
+        );
+        assert_eq!(
+            NativeBackendRequest::from_values(Some(std::ffi::OsStr::new("alacritty")), None,),
+            NativeBackendRequest::TestOverride(BackendChoice::Alacritty)
+        );
+    }
+
+    #[test]
+    fn eligible_tmon_initialization_failure_uses_alacritty_with_reason() {
+        let alacritty_starts = std::cell::Cell::new(0);
+        let (backend, reason, detail) = select_native_backend(
+            NativeBackendRequest::PreferTmon,
+            true,
+            || {
+                alacritty_starts.set(alacritty_starts.get() + 1);
+                Ok("alacritty")
+            },
+            || Err(anyhow::anyhow!("injected Tmon initialization failure")),
+            |_| true,
+        )
+        .expect("eligible initialization failure should fall back");
+
+        assert_eq!(backend, "alacritty");
+        assert_eq!(
+            reason,
+            TerminalEngineSelectionReason::TmonInitializationFailure
+        );
+        assert_eq!(
+            detail.as_deref(),
+            Some("injected Tmon initialization failure")
+        );
+        assert_eq!(alacritty_starts.get(), 1);
+    }
+
+    #[test]
+    fn ineligible_tmon_failure_returns_without_starting_alacritty() {
+        let alacritty_starts = std::cell::Cell::new(0);
+        let error = select_native_backend(
+            NativeBackendRequest::PreferTmon,
+            true,
+            || {
+                alacritty_starts.set(alacritty_starts.get() + 1);
+                Ok("alacritty")
+            },
+            || Err(anyhow::anyhow!("invalid launch")),
+            |_| false,
+        )
+        .expect_err("invalid launch must stay visible");
+
+        assert_eq!(error.to_string(), "invalid launch");
+        assert_eq!(alacritty_starts.get(), 0);
+    }
+
+    #[test]
+    fn unavailable_tmon_uses_structured_fallback_without_starting_tmon() {
+        let tmon_starts = std::cell::Cell::new(0);
+        let (backend, reason, detail) = select_native_backend(
+            NativeBackendRequest::PreferTmon,
+            false,
+            || Ok("alacritty"),
+            || {
+                tmon_starts.set(tmon_starts.get() + 1);
+                Ok("tmon")
+            },
+            |_| true,
+        )
+        .expect("unavailable Tmon should use the retained backend");
+
+        assert_eq!(backend, "alacritty");
+        assert_eq!(reason, TerminalEngineSelectionReason::TmonUnavailable);
+        assert!(detail.is_some());
+        assert_eq!(tmon_starts.get(), 0);
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    #[test]
+    fn native_terminal_reports_the_actual_selected_engine_and_reason() {
+        let terminal = Terminal::new(
+            TerminalSize::default(),
+            None,
+            None,
+            None,
+            None,
+            Some("exit"),
+        )
+        .expect("native diagnostic probe should start");
+        let diagnostics = terminal.engine_diagnostics();
+        let test_override =
+            BackendChoice::from_test_value(env::var_os(TEST_BACKEND_ENV).as_deref());
+
+        match test_override {
+            Some(BackendChoice::Alacritty) => {
+                assert_eq!(diagnostics.engine, "alacritty");
+                assert_eq!(
+                    diagnostics.selection_reason,
+                    TerminalEngineSelectionReason::TestOverride
+                );
+            }
+            Some(BackendChoice::Tmon) => {
+                assert_eq!(diagnostics.engine, "tmon");
+                assert_eq!(
+                    diagnostics.selection_reason,
+                    TerminalEngineSelectionReason::TestOverride
+                );
+            }
+            None if env::var_os(FORCE_ALACRITTY_ENV).as_deref()
+                == Some(std::ffi::OsStr::new("1")) =>
+            {
+                assert_eq!(diagnostics.engine, "alacritty");
+                assert_eq!(
+                    diagnostics.selection_reason,
+                    TerminalEngineSelectionReason::ForcedAlacritty
+                );
+            }
+            None if tmon::native_pty_available() => {
+                assert_eq!(diagnostics.engine, "tmon");
+                assert_eq!(
+                    diagnostics.selection_reason,
+                    TerminalEngineSelectionReason::TmonDefault
+                );
+            }
+            None => {
+                assert_eq!(diagnostics.engine, "alacritty");
+                assert_eq!(
+                    diagnostics.selection_reason,
+                    TerminalEngineSelectionReason::TmonUnavailable
+                );
+            }
+        }
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    #[test]
+    fn invalid_tmon_launch_is_not_eligible_for_alacritty_fallback() {
+        let missing_program = std::env::temp_dir()
+            .join(format!("missing-termy-program-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let error = super::super::tmon_backend::TmonBackend::new_with_launch_and_wakeup_notifier(
+            TerminalSize::default(),
+            None,
+            None,
+            None,
+            None,
+            Some(&TerminalLaunch::Program {
+                program: missing_program,
+                args: Vec::new(),
+            }),
+        )
+        .err()
+        .expect("a missing program should fail before a terminal starts");
+
+        assert!(error.downcast_ref::<tmon::Error>().is_some());
+        assert!(!tmon_failure_is_fallback_eligible(&error));
     }
 }

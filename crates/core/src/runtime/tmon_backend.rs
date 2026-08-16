@@ -14,49 +14,6 @@ pub(super) struct TmonBackend {
 }
 
 impl TmonBackend {
-    pub(super) fn new(
-        size: TerminalSize,
-        configured_working_dir: Option<&str>,
-        event_wakeup_tx: Option<Sender<()>>,
-        tab_title_shell_integration: Option<&TabTitleShellIntegration>,
-        runtime_config: Option<&TerminalRuntimeConfig>,
-        startup_command: Option<&str>,
-    ) -> anyhow::Result<Self> {
-        let wakeup_notifier = event_wakeup_tx.map(|event_wakeup_tx| {
-            TerminalWakeupNotifier::new(move || {
-                let _ = event_wakeup_tx.try_send(());
-            })
-        });
-        Self::new_with_wakeup_notifier(
-            size,
-            configured_working_dir,
-            wakeup_notifier,
-            tab_title_shell_integration,
-            runtime_config,
-            startup_command,
-        )
-    }
-
-    pub(super) fn new_with_wakeup_notifier(
-        size: TerminalSize,
-        configured_working_dir: Option<&str>,
-        wakeup_notifier: Option<TerminalWakeupNotifier>,
-        tab_title_shell_integration: Option<&TabTitleShellIntegration>,
-        runtime_config: Option<&TerminalRuntimeConfig>,
-        startup_command: Option<&str>,
-    ) -> anyhow::Result<Self> {
-        let launch =
-            startup_command.map(|command| TerminalLaunch::ShellCommand(command.to_string()));
-        Self::new_with_launch_and_wakeup_notifier(
-            size,
-            configured_working_dir,
-            wakeup_notifier,
-            tab_title_shell_integration,
-            runtime_config,
-            launch.as_ref(),
-        )
-    }
-
     pub(super) fn new_with_launch_and_wakeup_notifier(
         size: TerminalSize,
         configured_working_dir: Option<&str>,

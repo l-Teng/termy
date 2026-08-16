@@ -165,6 +165,23 @@ pub(super) fn terminal_engine_label(terminal: Option<&Terminal>) -> &'static str
     }
 }
 
+pub(super) fn terminal_engine_selection_label(terminal: Option<&Terminal>) -> String {
+    match terminal {
+        Some(Terminal::Native(terminal)) => terminal.lock().map_or_else(
+            |_| "unknown".to_string(),
+            |terminal| {
+                let diagnostics = terminal.engine_diagnostics();
+                diagnostics.fallback_detail.as_deref().map_or_else(
+                    || diagnostics.selection_reason.to_string(),
+                    |detail| format!("{}: {detail}", diagnostics.selection_reason),
+                )
+            },
+        ),
+        Some(Terminal::Tmux(_)) => "tmux-display-parser".to_string(),
+        None => "-".to_string(),
+    }
+}
+
 impl Deref for NativeTerminalInstance {
     type Target = Mutex<NativeTerminal>;
 

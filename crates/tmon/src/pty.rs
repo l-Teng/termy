@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::Size;
+use crate::{PtyStartError, Size};
 
 const F_GETFL: c_int = 3;
 const F_SETFD: c_int = 2;
@@ -631,13 +631,15 @@ impl Pty {
         size: Size,
         mut on_output: impl FnMut(&[u8]) -> Vec<u8> + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
-    ) -> io::Result<Self> {
-        let program_path = resolve_program(&config)?;
-        let program = c_string_os(program_path.as_os_str(), "terminal program")?;
+    ) -> Result<Self, PtyStartError> {
+        let program_path = resolve_program(&config).map_err(PtyStartError::launch)?;
+        let program = c_string_os(program_path.as_os_str(), "terminal program")
+            .map_err(PtyStartError::launch)?;
         let mut arguments = Vec::with_capacity(config.args.len() + 1);
-        arguments.push(c_string(&config.program, "terminal program")?);
+        arguments
+            .push(c_string(&config.program, "terminal program").map_err(PtyStartError::launch)?);
         for argument in &config.args {
-            arguments.push(c_string(argument, "terminal argument")?);
+            arguments.push(c_string(argument, "terminal argument").map_err(PtyStartError::launch)?);
         }
         let mut argv = arguments
             .iter()
@@ -649,20 +651,25 @@ impl Pty {
             .working_directory
             .as_ref()
             .map(|path| c_string_os(path.as_os_str(), "working directory"))
-            .transpose()?;
+            .transpose()
+            .map_err(PtyStartError::launch)?;
         let environment =
-            child_environment(&config.environment, config.working_directory.as_deref())?;
+            child_environment(&config.environment, config.working_directory.as_deref())
+                .map_err(PtyStartError::launch)?;
         let mut environment_pointers = environment
             .iter()
             .map(|entry| entry.as_ptr())
             .collect::<Vec<_>>();
         environment_pointers.push(ptr::null());
 
-        let (mut child_status_reader, child_status_writer) = UnixStream::pair()?;
+        let (mut child_status_reader, child_status_writer) =
+            UnixStream::pair().map_err(PtyStartError::backend_initialization)?;
         // A successful exec closes the child endpoint and reports EOF to the
         // parent. Failures write a small stage + errno record before _exit.
         if unsafe { fcntl(child_status_writer.as_raw_fd(), F_SETFD, FD_CLOEXEC) } < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(PtyStartError::backend_initialization(
+                io::Error::last_os_error(),
+            ));
         }
 
         let mut master = -1;
@@ -671,7 +678,9 @@ impl Pty {
         // fork. The child only invokes libc functions before replacing its image.
         let pid = unsafe { forkpty(&mut master, ptr::null_mut(), ptr::null(), &window_size) };
         if pid < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(PtyStartError::backend_initialization(
+                io::Error::last_os_error(),
+            ));
         }
 
         if pid == 0 {
@@ -716,12 +725,12 @@ impl Pty {
             Ok(Some(failure)) => {
                 drop(master_file);
                 wait_for_child(pid);
-                return Err(failure.into_io_error());
+                return Err(PtyStartError::launch(failure.into_io_error()));
             }
             Err(error) => {
                 drop(master_file);
                 terminate_and_reap(pid);
-                return Err(error);
+                return Err(PtyStartError::backend_initialization(error));
             }
         }
         drop(child_status_reader);
@@ -730,19 +739,19 @@ impl Pty {
             let error = io::Error::last_os_error();
             drop(master_file);
             terminate_and_reap(pid);
-            return Err(error);
+            return Err(PtyStartError::backend_initialization(error));
         }
         if let Err(error) = set_nonblocking(&master_file) {
             drop(master_file);
             terminate_and_reap(pid);
-            return Err(error);
+            return Err(PtyStartError::backend_initialization(error));
         }
         let mut reader = match master_file.try_clone() {
             Ok(reader) => reader,
             Err(error) => {
                 drop(master_file);
                 terminate_and_reap(pid);
-                return Err(error);
+                return Err(PtyStartError::backend_initialization(error));
             }
         };
         let (writer, writer_rx) = WriterHandle::channel();
@@ -761,7 +770,7 @@ impl Pty {
         if let Err(error) = writer_thread {
             drop(reader);
             terminate_and_reap(pid);
-            return Err(error);
+            return Err(PtyStartError::backend_initialization(error));
         }
 
         let (mut shutdown_reader, mut shutdown_writer) = match UnixStream::pair() {
@@ -769,7 +778,7 @@ impl Pty {
             Err(error) => {
                 writer.close();
                 terminate_and_reap(pid);
-                return Err(error);
+                return Err(PtyStartError::backend_initialization(error));
             }
         };
         let reader_writer = writer.clone();
@@ -856,7 +865,7 @@ impl Pty {
         if let Err(error) = reader_thread {
             writer.close();
             terminate_and_reap(pid);
-            return Err(error);
+            return Err(PtyStartError::backend_initialization(error));
         }
 
         let watcher_alive = alive.clone();
@@ -870,7 +879,7 @@ impl Pty {
         if let Err(error) = watcher_thread {
             writer.close();
             terminate_and_reap(pid);
-            return Err(error);
+            return Err(PtyStartError::backend_initialization(error));
         }
 
         Ok(Self {

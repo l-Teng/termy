@@ -19,7 +19,7 @@ use std::{
 #[cfg(test)]
 use std::os::windows::ffi::OsStringExt;
 
-use crate::Size;
+use crate::{PtyStartError, Size};
 
 type Bool = i32;
 type Dword = u32;
@@ -714,33 +714,47 @@ impl Pty {
         size: Size,
         mut on_output: impl FnMut(&[u8]) -> Vec<u8> + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
-    ) -> io::Result<Self> {
+    ) -> Result<Self, PtyStartError> {
         let api = conpty_api().ok_or_else(|| {
-            io::Error::new(
+            PtyStartError::backend_initialization(io::Error::new(
                 ErrorKind::Unsupported,
                 "Windows ConPTY exports are unavailable on this system",
-            )
+            ))
         })?;
-        let coord = Coord::try_from(size)?;
-        let working_directory = normalize_working_directory(config.working_directory.as_deref())?;
-        let lookup_directory = working_directory
-            .clone()
-            .map_or_else(normalized_current_directory, Ok)?;
-        let launch = resolve_launch_command(&config, &lookup_directory)?;
-        let application = wide_nul(launch.application.as_os_str(), "terminal program")?;
+        let coord = Coord::try_from(size).map_err(PtyStartError::backend_initialization)?;
+        let working_directory = normalize_working_directory(config.working_directory.as_deref())
+            .map_err(PtyStartError::launch)?;
+        let lookup_directory = match working_directory.clone() {
+            Some(directory) => directory,
+            None => {
+                normalized_current_directory().map_err(PtyStartError::backend_initialization)?
+            }
+        };
+        let launch =
+            resolve_launch_command(&config, &lookup_directory).map_err(PtyStartError::launch)?;
+        let application = wide_nul(launch.application.as_os_str(), "terminal program")
+            .map_err(PtyStartError::launch)?;
         let mut command_line = launch.command_line;
-        let mut environment = child_environment(&config.environment, working_directory.as_deref())?;
+        let mut environment = child_environment(&config.environment, working_directory.as_deref())
+            .map_err(PtyStartError::launch)?;
         let current_directory = working_directory
             .as_deref()
             .map(|path| wide_nul(path.as_os_str(), "working directory"))
-            .transpose()?;
+            .transpose()
+            .map_err(PtyStartError::launch)?;
 
-        let (pseudo_input, input_writer) = create_pipe()?;
-        let (output_reader, pseudo_output) = create_pipe()?;
-        let pseudo_console = PseudoConsole::create(api, coord, &pseudo_input, &pseudo_output)?;
+        let (pseudo_input, input_writer) =
+            create_pipe().map_err(PtyStartError::backend_initialization)?;
+        let (output_reader, pseudo_output) =
+            create_pipe().map_err(PtyStartError::backend_initialization)?;
+        let pseudo_console = PseudoConsole::create(api, coord, &pseudo_input, &pseudo_output)
+            .map_err(PtyStartError::backend_initialization)?;
 
-        let mut attributes = AttributeList::new(1)?;
-        attributes.set_pseudo_console(pseudo_console.raw())?;
+        let mut attributes =
+            AttributeList::new(1).map_err(PtyStartError::backend_initialization)?;
+        attributes
+            .set_pseudo_console(pseudo_console.raw())
+            .map_err(PtyStartError::backend_initialization)?;
         let mut startup = StartupInfoExW {
             startup_info: StartupInfoW::zeroed(),
             attribute_list: attributes.as_mut_ptr(),
@@ -783,14 +797,14 @@ impl Pty {
             drop(pseudo_input);
             drop(pseudo_output);
             drop(pseudo_console);
-            return Err(error);
+            return Err(PtyStartError::launch(error));
         }
 
         let Some(process) = OwnedHandle::new(process_info.process) else {
             close_raw_handle(process_info.thread);
-            return Err(io::Error::other(
+            return Err(PtyStartError::backend_initialization(io::Error::other(
                 "CreateProcessW returned an invalid process handle",
-            ));
+            )));
         };
         let process_thread = OwnedHandle::new(process_info.thread);
         drop(process_thread);
@@ -832,7 +846,7 @@ impl Pty {
             Err(error) => {
                 writer.close();
                 cleanup_unstarted_resources(&resources);
-                return Err(error);
+                return Err(PtyStartError::backend_initialization(error));
             }
         };
 
@@ -858,7 +872,7 @@ impl Pty {
                 writer.close();
                 cleanup_unstarted_resources(&resources);
                 let _ = reader_thread.join();
-                return Err(error);
+                return Err(PtyStartError::backend_initialization(error));
             }
         };
 
@@ -886,7 +900,7 @@ impl Pty {
             cleanup_unstarted_resources(&resources);
             let _ = writer_thread.join();
             let _ = reader_thread.join();
-            return Err(error);
+            return Err(PtyStartError::backend_initialization(error));
         }
 
         gate.release(StartState::Running);

@@ -355,9 +355,9 @@ every unrelated soft-deleted image.
 
 Native process handling also expanded outside the measured parser path. Tmon
 now provides both its Unix PTY and a dependency-free Windows ConPTY backend that
-loads the required entry points dynamically. The exact
-`TERMY_EXPERIMENTAL_TMON_ENGINE=1` gate selects it only when available; the
-Alacritty default and fallback remain unchanged. Shell command lifecycle events
+loads the required entry points dynamically. At the time of this measurement,
+the desktop used an exact opt-in gate and otherwise retained its Alacritty
+default. Shell command lifecycle events
 have priority in the bounded event queue, and Unix child exit now captures its
 readable output tail before a short bounded drain. Both PTY writers admit at
 most 8 MiB across 4,096 queued-or-active nonempty writes, reserve borrowed input

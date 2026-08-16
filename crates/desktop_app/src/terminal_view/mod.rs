@@ -96,7 +96,7 @@ use appearance::{
 use backend::{
     ClipboardTextCache, GpuiClipboardReplyHost, NativeTerminalInstance, Terminal, TerminalCellRef,
     TerminalLineRange, TerminalRenderDamageSnapshot, TerminalViewportScroll,
-    TerminalViewportScrollDirection, terminal_engine_label,
+    TerminalViewportScrollDirection, terminal_engine_label, terminal_engine_selection_label,
 };
 use command_palette::{
     CommandPaletteMode, CommandPaletteState, PluginLifecycleState, TmuxSessionIntent,
@@ -3963,6 +3963,13 @@ impl TerminalView {
             }
         }
 
+        let benchmark_engine = terminal_engine_label(view.active_terminal());
+        let benchmark_engine_selection = terminal_engine_selection_label(view.active_terminal());
+        if let Some(benchmark_session) = view.benchmark_session.as_mut() {
+            benchmark_session
+                .record_engine_selection(benchmark_engine, &benchmark_engine_selection);
+        }
+
         if view.benchmark_session.is_some() {
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 loop {
@@ -4902,6 +4909,15 @@ mod tests {
         assert_eq!(terminal_engine_label(Some(&tmux)), "alacritty");
         assert_eq!(terminal_engine_label(Some(&native)), "tmon");
         assert_eq!(terminal_engine_label(None), "-");
+        assert_eq!(
+            terminal_engine_selection_label(Some(&tmux)),
+            "tmux-display-parser"
+        );
+        assert_eq!(
+            terminal_engine_selection_label(Some(&native)),
+            "display-default"
+        );
+        assert_eq!(terminal_engine_selection_label(None), "-");
     }
 
     #[test]

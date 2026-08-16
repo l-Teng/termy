@@ -739,6 +739,10 @@ fn unix_pty_reports_chdir_failure_synchronously() {
     .err()
     .expect("a missing child working directory should fail the spawn handshake");
     assert!(
+        !error.is_backend_initialization_failure(),
+        "invalid working directories must never be eligible for engine fallback"
+    );
+    assert!(
         error
             .to_string()
             .contains("failed to change terminal working directory"),

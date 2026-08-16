@@ -540,17 +540,17 @@ enum TermyBenchmarkEngine {
 
 impl TermyBenchmarkEngine {
     fn from_env() -> Self {
-        if env::var_os("TERMY_EXPERIMENTAL_TMON_ENGINE").as_deref() == Some(OsStr::new("1")) {
-            Self::Tmon
-        } else {
+        if env::var_os("TERMY_FORCE_ALACRITTY_ENGINE").as_deref() == Some(OsStr::new("1")) {
             Self::Alacritty
+        } else {
+            Self::Tmon
         }
     }
 
     fn env_value(self) -> &'static str {
         match self {
-            Self::Alacritty => "0",
-            Self::Tmon => "1",
+            Self::Alacritty => "1",
+            Self::Tmon => "0",
         }
     }
 
@@ -1107,6 +1107,10 @@ fn run_alt_screen_anim(duration: Duration) -> Result<()> {
 struct AppSummary {
     build_label: Option<String>,
     git_sha: Option<String>,
+    #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
+    engine_selection: Option<String>,
     scenario: String,
     duration_ms: u64,
     sample_count: u64,
@@ -1415,10 +1419,17 @@ fn run_single_benchmark(
         None
     };
 
+    let runtime_name = app_summary
+        .as_ref()
+        .and_then(|summary: &AppSummary| summary.engine.as_deref())
+        .map_or_else(
+            || build.runtime_name().to_string(),
+            |engine| format!("native/{engine}"),
+        );
     Ok(RunResult {
         build_label: build.label.to_string(),
         target_name: build.display_name().to_string(),
-        runtime_name: build.runtime_name().to_string(),
+        runtime_name,
         git_sha: build.git_sha.clone(),
         scenario: scenario.as_str().to_string(),
         app_summary,
@@ -1620,7 +1631,7 @@ fn termy_trace_command(
     if let Some(value) = build.engine_env {
         command
             .arg("--env")
-            .arg(format!("TERMY_EXPERIMENTAL_TMON_ENGINE={value}"));
+            .arg(format!("TERMY_FORCE_ALACRITTY_ENGINE={value}"));
     }
     command
         .arg("--launch")
@@ -2775,6 +2786,26 @@ fn render_report(summary: &ComparisonSummary) -> String {
     for scenario in &summary.scenarios {
         let idle_blink = scenario.scenario == "idle-blink";
         report.push_str(&format!("## {}\n\n", scenario.scenario));
+        report.push_str(&format!(
+            "- Baseline actual runtime: `{}`{}\n",
+            scenario.baseline.runtime_name,
+            scenario
+                .baseline
+                .app_summary
+                .as_ref()
+                .and_then(|summary| summary.engine_selection.as_deref())
+                .map_or_else(String::new, |selection| format!(" (`{selection}`)"))
+        ));
+        report.push_str(&format!(
+            "- Candidate actual runtime: `{}`{}\n\n",
+            scenario.candidate.runtime_name,
+            scenario
+                .candidate
+                .app_summary
+                .as_ref()
+                .and_then(|summary| summary.engine_selection.as_deref())
+                .map_or_else(String::new, |selection| format!(" (`{selection}`)"))
+        ));
         report.push_str("### Shared external metrics\n\n");
         report.push_str("| Metric | Baseline | Candidate | Delta |\n");
         report.push_str("| --- | ---: | ---: | ---: |\n");
@@ -3374,9 +3405,9 @@ mod tests {
             TermyBenchmarkEngine::Alacritty.runtime_name(),
             "native/alacritty"
         );
-        assert_eq!(TermyBenchmarkEngine::Alacritty.env_value(), "0");
+        assert_eq!(TermyBenchmarkEngine::Alacritty.env_value(), "1");
         assert_eq!(TermyBenchmarkEngine::Tmon.runtime_name(), "native/tmon");
-        assert_eq!(TermyBenchmarkEngine::Tmon.env_value(), "1");
+        assert_eq!(TermyBenchmarkEngine::Tmon.env_value(), "0");
     }
 
     #[test]
@@ -3388,7 +3419,7 @@ mod tests {
             executable_path: PathBuf::from("/tmp/termy/target/release/termy"),
             git_sha: Some("abc123".to_string()),
             runtime_name: "native/alacritty",
-            engine_env: Some("0"),
+            engine_env: Some("1"),
         };
         let command = termy_trace_command(
             &build,
@@ -3416,7 +3447,7 @@ mod tests {
         );
         assert!(
             args.iter()
-                .any(|arg| arg == "TERMY_EXPERIMENTAL_TMON_ENGINE=0")
+                .any(|arg| arg == "TERMY_FORCE_ALACRITTY_ENGINE=1")
         );
         assert_eq!(
             args.last().map(String::as_str),
@@ -3691,6 +3722,8 @@ mod tests {
                     app_summary: Some(super::AppSummary {
                         build_label: Some("baseline".to_string()),
                         git_sha: Some("abc".to_string()),
+                        engine: Some("alacritty".to_string()),
+                        engine_selection: Some("forced-alacritty".to_string()),
                         scenario: "idle-burst".to_string(),
                         duration_ms: 3000,
                         sample_count: 2,

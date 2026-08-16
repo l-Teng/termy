@@ -1,11 +1,11 @@
 # Tmon
 
-Tmon is Termy's experimental lightweight terminal engine, located in the
-`crates/tmon` directory so its implementation stays independent of GPUI and
-the desktop application.
+Tmon is Termy's lightweight terminal engine, located in the `crates/tmon`
+directory so its implementation stays independent of GPUI and the desktop
+application.
 
-The current prototype is an independent engine with no production Cargo
-dependencies. It owns its incremental VT parser, bounded primary/alternate
+The engine has no production Cargo dependencies. It owns its incremental VT
+parser, bounded primary/alternate
 grids and scrollback, damage tracking, renderer-neutral cell types, and native
 process lifecycle. It does not depend on `termy_core` or GPUI. Native process
 I/O uses direct platform APIs: a PTY backend on Linux, Android, and macOS, plus
@@ -15,10 +15,10 @@ zlib/DEFLATE decoder.
 
 ## Owner
 
-This crate owns the experimental Tmon parser, grids and scrollback, terminal
-state, damage model, graphics protocol, and native PTY/ConPTY lifecycle. It
-must remain renderer-neutral and independently usable without Termy's desktop
-application or the existing Alacritty-backed core.
+This crate owns the Tmon parser, grids and scrollback, terminal state, damage
+model, graphics protocol, and native PTY/ConPTY lifecycle. It must remain
+renderer-neutral and independently usable without Termy's desktop application
+or the retained Alacritty-backed core.
 
 ## Validation
 
@@ -44,27 +44,28 @@ pushes to `main` and manual dispatches.
 `alacritty_terminal` and `unicode-width` are development-only dependencies for
 semantic parity checks; Tmon's production dependency section remains empty.
 
-Run the desktop app with Tmon selected:
+Run the desktop app with the default Tmon engine:
 
 ```sh
-TERMY_EXPERIMENTAL_TMON_ENGINE=1 just run
+just run
 ```
 
 Open Termy's inspector and select the **Terminal** tab; the **Engine** row reads
-`tmon` when the experimental backend is active and `alacritty` otherwise. The
-startup log also prints `using experimental Tmon terminal engine` when selected.
+`tmon` for the normal native path. **Engine Selection** records whether Tmon was
+the default or Alacritty was selected by the temporary rollout fallback. Startup
+logs and desktop benchmark summaries record the same actual engine and reason.
 
-The environment variable affects native terminals only. Tmux display panes
+`TERMY_FORCE_ALACRITTY_ENGINE` affects native terminals only. Tmux display panes
 continue to use their existing parser. Windows Tmon CI launches live ConPTY
 children directly through Tmon and verifies final-output draining before the
 exit callback, immediate resize plus stdin round-trip, and batch-wrapper launch
 in a normalized working directory. It does not exercise desktop engine
-selection or GPUI rendering through a live Windows terminal. An exact `1`
-selects Tmon when the required ConPTY APIs are available; otherwise Termy logs a
-warning and falls back to the unchanged Alacritty-backed native engine. Without
-an exact `1`, Alacritty remains the default on every platform. Other Unix
-targets also keep that fallback because Tmon does not advertise an unsupported
-native PTY ABI there.
+selection or GPUI rendering through a live Windows terminal. When the required
+ConPTY APIs are unavailable, Termy logs a warning and falls back to the retained
+Alacritty-backed native engine. Backend initialization failures are also
+eligible for fallback; invalid launch or configuration data is returned
+unchanged. During the rollout, an exact `TERMY_FORCE_ALACRITTY_ENGINE=1` forces
+the fallback for native terminals. Other values keep Tmon as the default.
 
 ## Direction
 
@@ -72,12 +73,12 @@ native PTY ABI there.
 - Keep one bounded grid allocation and bounded scrollback.
 - Emit damage-scoped frame updates rather than full-grid redraws.
 - Keep PTY reads and parsing off the UI thread.
-- Keep expanding VT/OSC/DCS and graphics compatibility behind the opt-in gate.
+- Keep expanding VT/OSC/DCS and graphics compatibility under differential tests.
 - Differential-test common shells and TUIs against the existing native engine.
 
-Tmon is still experimental. The existing Alacritty-backed native engine remains
-the default and tmux panes keep their existing behavior unless the environment
-variable is exactly `1`.
+Tmon is the default native engine during the guarded rollout. The retained
+Alacritty backend is temporary rollback machinery, and tmux panes keep their
+existing parser until their display path moves behind core.
 
 Renderers that can move cached rows use `take_render_damage_snapshot()`. Its
 scroll operations are chronological and its partial spans describe final

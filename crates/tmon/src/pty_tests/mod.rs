@@ -53,7 +53,7 @@ fn write_test_file(path: &Path, contents: &[u8], mode: u32) {
         .expect("test file permissions should be set");
 }
 
-fn assert_spawn_error(config: SpawnConfig, expected_kind: ErrorKind) -> io::Error {
+fn assert_spawn_error(config: SpawnConfig, expected_kind: ErrorKind) -> PtyStartError {
     let output_count = Arc::new(AtomicUsize::new(0));
     let callback_output_count = output_count.clone();
     let exit_count = Arc::new(AtomicUsize::new(0));
