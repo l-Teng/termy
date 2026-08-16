@@ -43,6 +43,25 @@ let frame = terminal.snapshot();
 `TermyFrame` contains a flat row-major `Vec<TermyCell>`, cursor state, scroll
 state, and cell colors as simple RGBA bytes.
 
+Rust renderers that need more than the stable flat-cell contract can use
+`Terminal::render_read`. Its `TerminalRenderRead` contains coherent viewport
+metadata, a revisioned live palette, complete cell text, exact underline style
+and color, ordered viewport scroll damage, and a render generation. For a
+damage-first renderer, call `take_render_damage_snapshot` and then
+`visit_viewport_ranges_at_generation`; a `false` result means the generation
+changed and the renderer must take a fresh read. The `visit_viewport_cells` and
+`visit_line_cells` methods provide engine-neutral full-viewport and buffer-line
+access without copying an implementation-specific grid into the host. The
+`visit_line_cells` callback runs under the terminal lock to keep a full-buffer
+read coherent and allocation-bounded; it must not call back into that terminal.
+
+The underlying terminal engine is not part of the Rust embedding contract.
+`termy_core` 0.2 removes `Terminal::with_term`,
+`TerminalOptions::term_config`, and the raw Alacritty conversion helpers. Use `TerminalColor`,
+`TerminalRenderCell`, `TerminalQueryColors`, and the public `Terminal` methods
+instead. This is an intentional Rust source break; the flat frame types and C
+ABI remain unchanged.
+
 Use `termy_core::measure_cell(font_family, font_size, line_height)` or
 `termy_core::measure_cell_from_config(&app_config)` to derive the
 `TerminalSize` cell width and height from Termy's font metrics instead of

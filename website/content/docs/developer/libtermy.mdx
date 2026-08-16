@@ -105,6 +105,23 @@ cells in dirty-span order, allowing a retained renderer to patch only the rows
 and rectangles that changed. `Terminal::snapshot()` remains useful for one-off
 captures and simple prototypes.
 
+### Rich Rust rendering and the engine boundary
+
+The flat `TermyFrame` and `TermyFrameUpdate` types remain the stable Rust/C
+compatibility contract. Rust renderers that need complete combining text,
+underline variants and colors, live palette revisions, ordered viewport scroll
+damage, or generation-checked partial reads can use `Terminal::render_read`,
+`Terminal::take_render_damage_snapshot`, and the `visit_*` methods.
+`visit_line_cells` streams a coherent buffer range while holding the terminal
+lock, so its callback must not call back into the same terminal.
+
+The terminal engine itself is private. `termy_core` 0.2 removes `Terminal::with_term`,
+`TerminalOptions::term_config`, and the exported raw Alacritty conversion
+helpers as part of the renderer-neutral core API change. Use core-owned
+`TerminalColor`, `TerminalRenderCell`, and `TerminalQueryColors` values plus the
+public `Terminal` methods instead. This is an intentional Rust source break;
+the flat frame layout and C ABI did not change.
+
 ### Display-only terminals
 
 When another process owns the session—such as a tmux control-mode client—create

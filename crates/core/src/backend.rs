@@ -331,37 +331,29 @@ pub(crate) fn line_bounds<T: EventListener>(term: &EngineTerm<T>) -> (i32, i32) 
 
 type RenderLineBounds = (i32, i32, usize);
 
-pub(crate) struct RenderLineCell {
-    pub(crate) line: i32,
-    pub(crate) col: usize,
-    pub(crate) cell: TerminalRenderCell,
-}
-
-pub(crate) fn line_cells<T: EventListener>(
+pub(crate) fn visit_line_cells<T: EventListener>(
     term: &EngineTerm<T>,
     requested_first: i32,
     requested_last: i32,
-) -> (RenderLineBounds, Vec<RenderLineCell>) {
+    mut visitor: impl FnMut(RenderLineBounds, i32, usize, &TerminalRenderCell),
+) -> RenderLineBounds {
     let grid = term.grid();
     let (first_line, last_line) = line_bounds(term);
     let columns = grid.columns();
-    let mut cells = Vec::new();
+    let bounds = (first_line, last_line, columns);
     if requested_first <= requested_last {
         let first = requested_first.max(first_line);
         let last = requested_last.min(last_line);
         if first <= last {
             for line in first..=last {
                 for col in 0..columns {
-                    cells.push(RenderLineCell {
-                        line,
-                        col,
-                        cell: render_cell(&grid[Line(line)][Column(col)]),
-                    });
+                    let cell = render_cell(&grid[Line(line)][Column(col)]);
+                    visitor(bounds, line, col, &cell);
                 }
             }
         }
     }
-    ((first_line, last_line, columns), cells)
+    bounds
 }
 
 pub(crate) fn hyperlink_at<T: EventListener>(

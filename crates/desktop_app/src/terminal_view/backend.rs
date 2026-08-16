@@ -147,14 +147,10 @@ impl TerminalCellRef<'_> {
 
     pub(super) fn combining(self) -> Option<SharedString> {
         match self {
-            Self::Alacritty(_) => None,
-            Self::Core(cell) => cell
-                .text
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .filter(|&start| start < cell.text.len())
-                .map(|start| SharedString::from(cell.text[start..].to_string())),
+            // Native core terminals still represent the legacy Alacritty path
+            // during this rollout stage. Keep its historical desktop behavior
+            // until both native engines converge on the core render contract.
+            Self::Alacritty(_) | Self::Core(_) => None,
             Self::Tmon(_, combining) => combining
                 .map(tmon::Combining::to_owned_string)
                 .map(SharedString::from),
@@ -163,14 +159,7 @@ impl TerminalCellRef<'_> {
 
     pub(super) fn append_combining_to(self, text: &mut String) {
         match self {
-            Self::Alacritty(_) => {}
-            Self::Core(cell) => {
-                if let Some(start) = cell.text.chars().next().map(char::len_utf8)
-                    && start < cell.text.len()
-                {
-                    text.push_str(&cell.text[start..]);
-                }
-            }
+            Self::Alacritty(_) | Self::Core(_) => {}
             Self::Tmon(_, combining) => {
                 if let Some(combining) = combining {
                     combining.append_to(text);
@@ -259,5 +248,29 @@ impl TerminalReplyHost for GpuiClipboardReplyHost<'_, '_> {
         // targets resolve through the same adapter.
         self.clipboard_text
             .get_or_read(|| self.cx.read_from_clipboard().and_then(|item| item.text()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalCellRef;
+
+    #[test]
+    fn core_cells_keep_legacy_native_combining_policy_until_convergence() {
+        let terminal = termy_core::Terminal::new_display(termy_core::TerminalSize::default(), None);
+        terminal.feed_output("e\u{301}".as_bytes());
+
+        let mut observed = false;
+        terminal.visit_viewport_cells(|_, _, _, cell| {
+            let cell = TerminalCellRef::Core(cell);
+            if cell.character() == 'e' {
+                observed = true;
+                assert!(cell.combining().is_none());
+                let mut suffix = String::new();
+                cell.append_combining_to(&mut suffix);
+                assert!(suffix.is_empty());
+            }
+        });
+        assert!(observed);
     }
 }
