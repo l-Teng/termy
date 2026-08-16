@@ -7711,7 +7711,6 @@ dependencies = [
 name = "termy"
 version = "0.2.38"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "bincode",
  "cocoa 0.26.0",
@@ -7933,7 +7932,6 @@ dependencies = [
 name = "termy_terminal_ui"
 version = "0.1.0"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "flume",
  "gpui",

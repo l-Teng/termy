@@ -77,9 +77,16 @@ impl TerminalView {
         pane: &TmuxPaneState,
         options: TerminalOptions,
         cell_size: Option<Size<Pixels>>,
+        event_wakeup_tx: &Sender<()>,
     ) -> (Terminal, Option<String>) {
-        let terminal =
-            Terminal::new_tmux(Self::terminal_size_for_pane_state(pane, cell_size), options);
+        let wakeup_tx = event_wakeup_tx.clone();
+        let terminal = Terminal::new_tmux_with_wakeup_notifier(
+            Self::terminal_size_for_pane_state(pane, cell_size),
+            options,
+            TerminalWakeupNotifier::new(move || {
+                let _ = wakeup_tx.try_send(());
+            }),
+        );
 
         // Always rebuild panes from full tmux history and let terminal content
         // define cursor state. Snapshot cursor coordinates can drift relative to
@@ -93,7 +100,7 @@ impl TerminalView {
 
         match capture {
             Ok(capture) => {
-                terminal.feed_output(&capture);
+                terminal.hydrate_output(&capture);
                 (terminal, None)
             }
             Err(error) => {
@@ -186,6 +193,7 @@ impl TerminalView {
                             pane_state,
                             hydration_options,
                             self.cached_cell_size_for_font_size(self.font_size),
+                            &self.event_wakeup_tx,
                         );
                         (terminal, hydration_error.is_some(), hydration_error)
                     };

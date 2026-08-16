@@ -1,6 +1,4 @@
 use super::*;
-#[cfg(test)]
-use alacritty_terminal::grid::Dimensions;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::terminal_view) struct HoveredLink {
@@ -155,72 +153,6 @@ fn cell_has_visible_foreground_text(line: &[Option<char>], col: usize) -> bool {
         None if col > 0 => line[col - 1].is_some_and(|c| !c.is_whitespace()),
         None => false,
     }
-}
-
-#[cfg(test)]
-fn is_hidden_or_spacer(flags: Flags) -> bool {
-    flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN)
-}
-
-/// Trailing spacer occupies the right half of a wide character on the same
-/// line.  Only this variant should trigger the "go back one column" fallback
-/// when a selection endpoint or double-click lands on it.
-#[cfg(test)]
-fn is_trailing_wide_char_spacer(flags: Flags) -> bool {
-    flags.contains(Flags::WIDE_CHAR_SPACER) && !flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-}
-
-#[cfg(test)]
-fn terminal_line_bounds(
-    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
-) -> Option<(i32, i32)> {
-    let screen_lines = i32::try_from(grid.screen_lines()).ok()?;
-    let total_lines = i32::try_from(grid.total_lines()).ok()?;
-    if screen_lines <= 0 || total_lines <= 0 {
-        return None;
-    }
-
-    let min_line = -(total_lines - screen_lines);
-    let max_line = screen_lines - 1;
-    Some((min_line, max_line))
-}
-
-#[cfg(test)]
-fn grid_line_text(
-    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
-    line_idx: i32,
-    cols: usize,
-) -> Option<Vec<Option<char>>> {
-    use alacritty_terminal::index::{Column, Line};
-
-    let (min_line, max_line) = terminal_line_bounds(grid)?;
-    if line_idx < min_line || line_idx > max_line {
-        return None;
-    }
-
-    let max_cols = cols.min(grid.columns());
-    let mut line = vec![Some(' '); cols];
-    let line_ref = &grid[Line(line_idx)];
-    for col in 0..max_cols {
-        let cell = &line_ref[Column(col)];
-        if is_trailing_wide_char_spacer(cell.flags) {
-            // Right half of a wide char — mark as None so it is filtered
-            // during copy and triggers the col-1 fallback for selection.
-            line[col] = None;
-            continue;
-        }
-        if is_hidden_or_spacer(cell.flags) {
-            // Leading spacer (wide char wrapped to next line) or hidden
-            // cell — keep as space so it does not trigger col-1 fallback.
-            continue;
-        }
-
-        let c = cell.c;
-        if c != '\0' {
-            line[col] = Some(if c.is_control() { ' ' } else { c });
-        }
-    }
-    Some(line)
 }
 
 type TerminalLineText = Vec<Option<String>>;
@@ -1280,28 +1212,24 @@ mod tests {
     }
 
     fn non_empty_grid_lines(terminal: &Terminal) -> Vec<(i32, String)> {
-        let mut lines = Vec::new();
-        let cols = usize::from(terminal.size().cols);
-        let _ = terminal.with_tmux_grid(|grid| {
-            let Some((min_line, max_line)) = terminal_line_bounds(grid) else {
-                return;
-            };
-            for line_idx in min_line..=max_line {
-                let Some(chars) = grid_line_text(grid, line_idx, cols) else {
-                    continue;
-                };
-                let rendered = chars
+        let Some((min_line, max_line)) = terminal.line_bounds() else {
+            return Vec::new();
+        };
+        let Some((_range, lines)) = terminal_line_texts(terminal, min_line, max_line) else {
+            return Vec::new();
+        };
+        lines
+            .into_iter()
+            .filter_map(|(line, cells)| {
+                let rendered = cells
                     .iter()
-                    .filter_map(|c| *c)
+                    .filter_map(|cell| cell.as_deref())
                     .collect::<String>()
                     .trim_end()
                     .to_string();
-                if !rendered.is_empty() {
-                    lines.push((line_idx, rendered));
-                }
-            }
-        });
-        lines
+                (!rendered.is_empty()).then_some((line, rendered))
+            })
+            .collect()
     }
 
     #[test]
@@ -1566,73 +1494,6 @@ mod tests {
     fn line_clickable_end_col_includes_trailing_wide_spacer_cell() {
         let line = vec![Some('好'), None, Some(' ')];
         assert_eq!(line_clickable_end_col(&line), Some(1));
-    }
-
-    #[test]
-    fn grid_line_text_marks_trailing_wide_char_spacer_as_none() {
-        let size = TerminalSize {
-            cols: 10,
-            rows: 3,
-            ..TerminalSize::default()
-        };
-        let terminal = Terminal::new_tmux(
-            size,
-            TerminalOptions {
-                scrollback_history: 128,
-                ..TerminalOptions::default()
-            },
-        );
-        // "你好" — each char occupies 2 cells: char + trailing spacer.
-        terminal.feed_output("你好".as_bytes());
-
-        let line = terminal
-            .with_tmux_grid(|grid| grid_line_text(grid, 0, 10))
-            .flatten()
-            .expect("line 0 should exist");
-
-        assert_eq!(line[0], Some('你'));
-        assert_eq!(line[1], None, "trailing spacer should be None");
-        assert_eq!(line[2], Some('好'));
-        assert_eq!(line[3], None, "trailing spacer should be None");
-    }
-
-    #[test]
-    fn leading_wide_char_spacer_preserved_as_space() {
-        // Use a narrow terminal so a wide char at the end wraps to the next line.
-        let size = TerminalSize {
-            cols: 5,
-            rows: 3,
-            ..TerminalSize::default()
-        };
-        let terminal = Terminal::new_tmux(
-            size,
-            TerminalOptions {
-                scrollback_history: 128,
-                ..TerminalOptions::default()
-            },
-        );
-        // "src/文" — 4 ASCII chars fill cols 0-3, '文' needs 2 cols but
-        // only 1 remains; it wraps to the next line.
-        // Line 0 col 4: LEADING_WIDE_CHAR_SPACER (should stay Some(' '))
-        // Line 1 col 0: '文', col 1: trailing spacer (None)
-        terminal.feed_output("src/文".as_bytes());
-
-        let line0 = terminal
-            .with_tmux_grid(|grid| grid_line_text(grid, 0, 5))
-            .flatten()
-            .expect("line 0");
-        assert_eq!(
-            line0[4],
-            Some(' '),
-            "leading spacer should be Some(' '), not None"
-        );
-
-        let line1 = terminal
-            .with_tmux_grid(|grid| grid_line_text(grid, 1, 5))
-            .flatten()
-            .expect("line 1");
-        assert_eq!(line1[0], Some('文'));
-        assert_eq!(line1[1], None, "trailing spacer should be None");
     }
 
     #[test]

@@ -2292,8 +2292,8 @@ mod alacritty_backend {
             if bytes.is_empty() {
                 return;
             }
-            self.feed_output_to_parser(bytes);
-            if self.pty_tx.is_none() {
+            let committed = self.feed_output_to_parser(bytes);
+            if self.pty_tx.is_none() && committed {
                 self.listener.send_event(AlacEvent::Wakeup);
             }
         }
@@ -2330,10 +2330,28 @@ mod alacritty_backend {
 
             self.listener.set_replay_suppressed(true);
             self.feed_output_to_parser(bytes);
+            // A capture or persisted replay is a complete stream boundary.
+            // Commit any unterminated synchronized update, then discard only
+            // parser/interceptor fragments so they cannot consume live bytes.
+            {
+                let mut parser = self.parser.lock();
+                if parser.sync_bytes_count() > 0 {
+                    let mut term = self.term.lock();
+                    stop_synchronized_update(
+                        &mut parser,
+                        &mut term,
+                        &self.render_generation,
+                        &self.palette_revision,
+                        &self.palette_snapshot,
+                    );
+                }
+                *parser = ansi::Processor::new();
+            }
+            *self.kitty_graphics_interceptor.lock() = KittyGraphicsInterceptor::default();
             self.listener.set_replay_suppressed(false);
         }
 
-        fn feed_output_to_parser(&self, bytes: &[u8]) {
+        fn feed_output_to_parser(&self, bytes: &[u8]) -> bool {
             let mut interceptor = self.kitty_graphics_interceptor.lock();
             let mut cursor_tracker = self.kitty_graphics_cursor_tracker.lock();
             let mut parser = self.parser.lock();
@@ -2401,6 +2419,7 @@ mod alacritty_backend {
             if term_mutated {
                 self.record_render_mutation(&term);
             }
+            parser.sync_bytes_count() == 0
         }
 
         /// Write a string to the PTY
@@ -4406,6 +4425,64 @@ mod tests {
                 alacritty_terminal::event::Event::Wakeup
             ))
         ));
+    }
+
+    #[test]
+    fn alacritty_display_hydration_discards_truncated_parser_state() {
+        let terminal = Terminal::new_alacritty_display_for_test(test_terminal_size(), None);
+        terminal.hydrate_output(b"capture\r\n\x1b[31");
+        terminal.feed_output(b"LIVE");
+
+        let mut text = String::new();
+        terminal.visit_viewport_cells(|_, _, _, cell| {
+            if !cell.wide_character_spacer {
+                text.push_str(cell.text.as_str());
+            }
+        });
+        assert!(text.contains("capture"));
+        assert!(text.contains("LIVE"));
+    }
+
+    #[test]
+    fn alacritty_display_wakes_only_after_synchronized_update_commit() {
+        let terminal = Terminal::new_alacritty_display_for_test(test_terminal_size(), None);
+        let mut reply_host = RecordingReplyHost::default();
+
+        terminal.feed_output(b"\x1b[?2026hSTAGED");
+        let (events, has_more) = terminal.drain_events(&mut reply_host);
+        assert!(!has_more);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, TerminalEvent::Wakeup))
+        );
+
+        terminal.feed_output(b"\x1b[?2026l");
+        let (events, has_more) = terminal.drain_events(&mut reply_host);
+        assert!(!has_more);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TerminalEvent::Wakeup))
+        );
+    }
+
+    #[test]
+    fn alacritty_display_routes_clipboard_queries_through_the_reply_host() {
+        let terminal = Terminal::new_alacritty_display_for_test(test_terminal_size(), None);
+        terminal.feed_output(b"\x1b]52;c;?\x07");
+        let mut reply_host = RecordingReplyHost {
+            clipboard_text: Some("clipboard".to_string()),
+            ..RecordingReplyHost::default()
+        };
+
+        let (_, has_more) = terminal.drain_events(&mut reply_host);
+
+        assert!(!has_more);
+        assert_eq!(
+            reply_host.requested_targets,
+            [TerminalClipboardTarget::Clipboard]
+        );
     }
 
     #[test]

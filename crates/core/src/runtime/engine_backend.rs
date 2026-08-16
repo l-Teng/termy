@@ -105,6 +105,29 @@ fn select_native_backend<T>(
     }
 }
 
+fn select_display_backend<T>(
+    request: NativeBackendRequest,
+    mut start_alacritty: impl FnMut() -> T,
+    mut start_tmon: impl FnMut() -> T,
+) -> (T, TerminalEngineSelectionReason) {
+    match request {
+        NativeBackendRequest::TestOverride(BackendChoice::Alacritty) => (
+            start_alacritty(),
+            TerminalEngineSelectionReason::TestOverride,
+        ),
+        NativeBackendRequest::TestOverride(BackendChoice::Tmon) => {
+            (start_tmon(), TerminalEngineSelectionReason::TestOverride)
+        }
+        NativeBackendRequest::ForcedAlacritty => (
+            start_alacritty(),
+            TerminalEngineSelectionReason::ForcedAlacritty,
+        ),
+        NativeBackendRequest::PreferTmon => {
+            (start_tmon(), TerminalEngineSelectionReason::DisplayDefault)
+        }
+    }
+}
+
 pub(super) struct BackendSelection {
     pub(super) backend: Backend,
     pub(super) diagnostics: TerminalEngineDiagnostics,
@@ -267,40 +290,27 @@ impl Backend {
         runtime_config: Option<&TerminalRuntimeConfig>,
         wakeup_notifier: Option<TerminalWakeupNotifier>,
     ) -> BackendSelection {
-        let (backend, reason) = match BackendChoice::from_test_value(
-            env::var_os(TEST_BACKEND_ENV).as_deref(),
-        ) {
-            Some(BackendChoice::Alacritty) => (
+        let (backend, reason) = select_display_backend(
+            NativeBackendRequest::current(),
+            || {
                 Self::Alacritty(Box::new(
                     super::alacritty_backend::AlacrittyBackend::new_display_with_wakeup_notifier(
                         size,
                         runtime_config,
-                        wakeup_notifier,
+                        wakeup_notifier.clone(),
                     ),
-                )),
-                TerminalEngineSelectionReason::TestOverride,
-            ),
-            Some(BackendChoice::Tmon) => (
+                ))
+            },
+            || {
                 Self::Tmon(Box::new(
                     super::tmon_backend::TmonBackend::new_display_with_wakeup_notifier(
                         size,
                         runtime_config,
-                        wakeup_notifier,
+                        wakeup_notifier.clone(),
                     ),
-                )),
-                TerminalEngineSelectionReason::TestOverride,
-            ),
-            None => (
-                Self::Tmon(Box::new(
-                    super::tmon_backend::TmonBackend::new_display_with_wakeup_notifier(
-                        size,
-                        runtime_config,
-                        wakeup_notifier,
-                    ),
-                )),
-                TerminalEngineSelectionReason::DisplayDefault,
-            ),
-        };
+                ))
+            },
+        );
         BackendSelection::new(backend, reason, None)
     }
 
@@ -750,6 +760,28 @@ mod tests {
             NativeBackendRequest::from_values(Some(std::ffi::OsStr::new("alacritty")), None,),
             NativeBackendRequest::TestOverride(BackendChoice::Alacritty)
         );
+    }
+
+    #[test]
+    fn display_selector_honors_exact_force_and_private_override_precedence() {
+        let (backend, reason) = select_display_backend(
+            NativeBackendRequest::from_values(None, Some(std::ffi::OsStr::new("1"))),
+            || "alacritty",
+            || "tmon",
+        );
+        assert_eq!(backend, "alacritty");
+        assert_eq!(reason, TerminalEngineSelectionReason::ForcedAlacritty);
+
+        let (backend, reason) = select_display_backend(
+            NativeBackendRequest::from_values(
+                Some(std::ffi::OsStr::new("tmon")),
+                Some(std::ffi::OsStr::new("1")),
+            ),
+            || "alacritty",
+            || "tmon",
+        );
+        assert_eq!(backend, "tmon");
+        assert_eq!(reason, TerminalEngineSelectionReason::TestOverride);
     }
 
     #[test]

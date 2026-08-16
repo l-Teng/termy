@@ -3,7 +3,7 @@ use alacritty_terminal::{
     grid::{Dimensions, Scroll},
     index::{Column, Line},
     term::{
-        Config as TermConfig, LineDamageBounds, Term, TermDamage, TermMode, cell::Flags,
+        Config as TermConfig, LineDamageBounds, Osc52, Term, TermDamage, TermMode, cell::Flags,
         color::Colors,
     },
     vte::ansi::{
@@ -36,6 +36,7 @@ pub(crate) fn term_config(options: TerminalOptions) -> EngineTermConfig {
             blinking: false,
         },
         kitty_keyboard: true,
+        osc52: Osc52::CopyPaste,
         ..TermConfig::default()
     }
 }

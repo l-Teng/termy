@@ -9,7 +9,7 @@ Termy is a single repository with several product surfaces. Keep changes in the 
 - `crates/core/` owns the reusable headless libtermy runtime/API used by embedders. It must stay independent of GPUI and app UI code.
 - `crates/tmon/` owns the renderer-neutral terminal engine and native PTY/ConPTY runtime.
 - `crates/plugin_runtime/` owns plugin discovery, descriptor/action validation, and the on-demand Bun host with one Worker per plugin. It must stay independent of GPUI and desktop command execution.
-- `crates/terminal_ui/` owns the GPUI terminal grid and keystroke adapters plus tmux pane display/client support used by the desktop app. Shared headless terminal types are imported directly from `termy_core`.
+- `crates/terminal_ui/` owns the GPUI terminal grid and keystroke adapters plus tmux pane display/client support used by the desktop app. Its `PaneTerminal` delegates parsing and render state to `termy_core` display mode instead of owning an engine.
 - `crates/tmux_control_core/` owns the UI-agnostic tmux control-mode protocol and transport shared by terminal UI and FFI.
 - `crates/ui/` owns Termy's design system in GPUI: theme-derived color tokens, layout metrics, and stateless chrome components. It must stay free of config, command, plugin, and SSH domain crates.
 - `crates/config_core/`, `crates/command_core/`, `crates/theme_core/`, and `crates/search/` own pure domain logic shared by the app, CLI, docs generation, and embedding surfaces.

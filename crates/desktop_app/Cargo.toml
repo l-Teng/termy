@@ -17,9 +17,6 @@ workspace = true
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 
-# Terminal emulation
-alacritty_terminal = { workspace = true }
-
 # Async/concurrency
 flume = { workspace = true }
 smol = "2.0"

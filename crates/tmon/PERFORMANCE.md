@@ -318,12 +318,11 @@ and style resets, long combining text plus hyperlinks, edits, erasure, wide
 cell cleanup, reflow, scrollback, saved cursors, and alternate screens. The
 next Actions artifact is the first performance acceptance measurement for this
 layout; no speed claim is inferred from the unchanged static size.
-Termy's Tmon-only render path now retains the five styles and explicit color.
+Termy's renderer-neutral core path now retains the five styles and explicit color.
 Straight and curly styles use GPUI decorations; double, dotted, and dashed
 styles paint one bounded path per text batch. Style and color participate in
-batch/cache identity, while the native Alacritty and tmux mapping deliberately
-keeps its prior straight-foreground behavior. This painting work is likewise
-outside the saved parser/grid measurements.
+batch/cache identity for both native and tmux cells. This painting work is
+likewise outside the saved parser/grid measurements.
 
 Graphics decoding is now portable and dependency-free. A safe, std-only
 zlib/DEFLATE implementation validates PNG payloads and Kitty `o=z` data on every

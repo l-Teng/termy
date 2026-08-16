@@ -55,17 +55,18 @@ Open Termy's inspector and select the **Terminal** tab; the **Engine** row reads
 the default or Alacritty was selected by the temporary rollout fallback. Startup
 logs and desktop benchmark summaries record the same actual engine and reason.
 
-`TERMY_FORCE_ALACRITTY_ENGINE` affects native terminals only. Tmux display panes
-continue to use their existing parser. Windows Tmon CI launches live ConPTY
-children directly through Tmon and verifies final-output draining before the
-exit callback, immediate resize plus stdin round-trip, and batch-wrapper launch
-in a normalized working directory. It does not exercise desktop engine
-selection or GPUI rendering through a live Windows terminal. When the required
-ConPTY APIs are unavailable, Termy logs a warning and falls back to the retained
+Tmux pane displays also use Tmon through `termy_core::Terminal` display mode.
+During the rollout, an exact `TERMY_FORCE_ALACRITTY_ENGINE=1` forces the retained
+fallback for native terminals and tmux display parsing together; other values
+keep Tmon as the default. Windows Tmon CI launches live ConPTY children directly
+through Tmon and verifies final-output draining before the exit callback,
+immediate resize plus stdin round-trip, and batch-wrapper launch in a normalized
+working directory. It does not exercise desktop engine selection or GPUI
+rendering through a live Windows terminal. When the required ConPTY APIs are
+unavailable, Termy logs a warning and falls back to the retained
 Alacritty-backed native engine. Backend initialization failures are also
-eligible for fallback; invalid launch or configuration data is returned
-unchanged. During the rollout, an exact `TERMY_FORCE_ALACRITTY_ENGINE=1` forces
-the fallback for native terminals. Other values keep Tmon as the default.
+eligible for native fallback; invalid launch or configuration data is returned
+unchanged.
 
 ## Direction
 
@@ -76,9 +77,8 @@ the fallback for native terminals. Other values keep Tmon as the default.
 - Keep expanding VT/OSC/DCS and graphics compatibility under differential tests.
 - Differential-test common shells and TUIs against the existing native engine.
 
-Tmon is the default native engine during the guarded rollout. The retained
-Alacritty backend is temporary rollback machinery, and tmux panes keep their
-existing parser until their display path moves behind core.
+Tmon is the default native and tmux display engine during the guarded rollout.
+The retained Alacritty backend is temporary rollback machinery behind core.
 
 Renderers that can move cached rows use `take_render_damage_snapshot()`. Its
 scroll operations are chronological and its partial spans describe final
@@ -159,10 +159,9 @@ RGB SGR 58 colors; SGR 24, 59, and 0 reset the same independent pieces as the
 pinned VTE parser. Underline color remains directly readable from a copied cell.
 Combining text and OSC 8 identity share one tagged rare-metadata word, keeping
 `Cell` at 24 bytes even when both features are supported together.
-The desktop Tmon adapter carries that state into Termy's renderer: single and
-curly underlines use GPUI's native straight/wavy decoration, while double,
-dotted, and dashed styles use bounded batched paths. Native Alacritty and tmux
-cells retain their previous single-underline rendering behavior.
+The desktop core adapter carries that state into Termy's renderer for native and
+tmux cells: single and curly underlines use GPUI's native straight/wavy
+decoration, while double, dotted, and dashed styles use bounded batched paths.
 
 ## Compact scrollback
 
