@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn native_semantic_cell_snapshot_preserves_pending_damage() {
+    let terminal = termy_core::Terminal::new_display(test_size(12, 4), None);
+    let _ = terminal.take_damage_snapshot();
+    terminal.feed_output(b"abc");
+    let _ = terminal.take_damage_snapshot();
+
+    terminal.feed_output("\x1b[2;5H界".as_bytes());
+    let before_damage = native_cells(&terminal);
+    let damage = terminal.take_damage_snapshot();
+
+    assert_eq!(before_damage[12 + 4].character, '界');
+    assert!(matches!(
+        damage,
+        TerminalDamageSnapshot::Partial(spans)
+            if spans.iter().any(|span| {
+                span.row == 1 && span.left_col <= 4 && span.right_col >= 4
+            })
+    ));
+}
+
+#[test]
 fn damage_covers_all_observable_changes_for_both_engines() {
     let initial = test_size(12, 4);
     let mut native = termy_core::Terminal::new_display(initial, None);

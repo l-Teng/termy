@@ -196,12 +196,9 @@ fn tmon_cell(cell: &tmon::Cell, combining: Option<tmon::Combining<'_>>) -> Seman
 }
 
 fn native_cells(terminal: &termy_core::Terminal) -> Vec<SemanticCell> {
-    terminal
-        .render_read(true)
-        .cells
-        .iter()
-        .map(native_cell)
-        .collect()
+    let mut cells = Vec::new();
+    terminal.visit_viewport_cells(|_, _, _, cell| cells.push(native_cell(cell)));
+    cells
 }
 
 fn tmon_cells(terminal: &tmon::Terminal) -> Vec<SemanticCell> {
