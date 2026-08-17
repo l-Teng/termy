@@ -34,8 +34,23 @@ pub const CLAUDE_CODE_2_1_233_INITIAL_FRAME: TerminalTrace = TerminalTrace {
 /// Expected viewport position of Claude Code's reverse-video cursor cell.
 pub const CLAUDE_CODE_2_1_233_CURSOR_CELL: (usize, usize) = (21, 2);
 
+/// A clean Neovim frame with line numbers, a highlighted cursor line,
+/// truecolor syntax, Unicode text, and a colored undercurl.
+pub const NEOVIM_0_12_4_RUST_FRAME: TerminalTrace = TerminalTrace {
+    id: "neovim-0.12.4-rust-frame",
+    application: "Neovim",
+    application_version: "0.12.4",
+    cols: 80,
+    rows: 24,
+    encoded: include_str!("traces/neovim_0_12_4_rust_frame.hex"),
+};
+
+/// Expected viewport position of Neovim's steady block cursor.
+pub const NEOVIM_0_12_4_CURSOR_CELL: (usize, usize) = (1, 20);
+
 /// Every trace in the compatibility corpus.
-pub const TERMINAL_TRACES: &[TerminalTrace] = &[CLAUDE_CODE_2_1_233_INITIAL_FRAME];
+pub const TERMINAL_TRACES: &[TerminalTrace] =
+    &[CLAUDE_CODE_2_1_233_INITIAL_FRAME, NEOVIM_0_12_4_RUST_FRAME];
 
 fn decode_hex(encoded: &str) -> Vec<u8> {
     let mut decoded = Vec::new();
@@ -64,8 +79,20 @@ mod tests {
 
     #[test]
     fn every_trace_decodes_and_matches_its_declared_terminal_size() {
+        let mut ids = std::collections::BTreeSet::new();
         for trace in TERMINAL_TRACES {
+            assert!(ids.insert(trace.id), "duplicate trace ID: {}", trace.id);
             assert!(!trace.bytes().is_empty(), "{} is empty", trace.id);
+            assert!(
+                !trace.application.is_empty(),
+                "{} has no application",
+                trace.id
+            );
+            assert!(
+                !trace.application_version.is_empty(),
+                "{} has no application version",
+                trace.id
+            );
             assert!(trace.cols > 0, "{} has no columns", trace.id);
             assert!(trace.rows > 0, "{} has no rows", trace.id);
         }
@@ -80,5 +107,25 @@ mod tests {
         assert!(bytes.windows(5).any(|window| window == b"\x1b[27m"));
         assert!(!bytes.windows(11).any(|window| window == b"~/Dev/termy"));
         assert!(bytes.windows(11).any(|window| window == b"~/workspace"));
+    }
+
+    #[test]
+    fn neovim_fixture_keeps_real_tui_modes_and_rich_styles() {
+        let bytes = NEOVIM_0_12_4_RUST_FRAME.bytes();
+        let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
+
+        assert_eq!(bytes.len(), 6_258);
+        assert!(contains(b"\x1b[?1049h"));
+        assert!(!contains(b"\x1b[?1049l"));
+        assert!(contains(b"\x1b[?2026h"));
+        assert!(contains(b"\x1b[?2026l"));
+        assert!(contains(b"\x1b[4:3m"));
+        assert!(contains(b"\x1b[58:2::246:193:119m"));
+        assert!(contains(b"Termy"));
+        assert!(contains("✓".as_bytes()));
+        assert!(contains("界".as_bytes()));
+        assert!(!contains(b"/Users/"));
+        assert!(!contains(b"/private/tmp"));
+        assert!(!contains(b"E303:"));
     }
 }

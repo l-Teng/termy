@@ -1,7 +1,51 @@
 use super::*;
 use termy_terminal_test_support::{
-    CLAUDE_CODE_2_1_233_CURSOR_CELL, CLAUDE_CODE_2_1_233_INITIAL_FRAME,
+    CLAUDE_CODE_2_1_233_CURSOR_CELL, CLAUDE_CODE_2_1_233_INITIAL_FRAME, NEOVIM_0_12_4_CURSOR_CELL,
+    NEOVIM_0_12_4_RUST_FRAME, TerminalTrace,
 };
+
+fn replay_terminal_trace(trace: TerminalTrace, bytes: &[u8], chunk_size: usize) -> Terminal {
+    let terminal = Terminal::new_display(
+        Size {
+            cols: trace.cols,
+            rows: trace.rows,
+            ..Size::default()
+        },
+        Config::default(),
+    );
+    for chunk in bytes.chunks(chunk_size) {
+        terminal.feed_output(chunk);
+    }
+    terminal
+}
+
+fn assert_terminal_trace_is_chunk_invariant(
+    trace: TerminalTrace,
+    chunk_sizes: &[usize],
+) -> Terminal {
+    let bytes = trace.bytes();
+    let baseline = replay_terminal_trace(trace, &bytes, bytes.len());
+    let expected_snapshot = baseline.snapshot();
+    let expected_state = baseline.state_snapshot();
+
+    for &chunk_size in chunk_sizes {
+        let terminal = replay_terminal_trace(trace, &bytes, chunk_size);
+        assert_eq!(
+            terminal.snapshot(),
+            expected_snapshot,
+            "{} chunk size {chunk_size}",
+            trace.id
+        );
+        assert_eq!(
+            terminal.state_snapshot(),
+            expected_state,
+            "{} chunk size {chunk_size}",
+            trace.id
+        );
+    }
+
+    baseline
+}
 
 #[test]
 fn display_terminal_uses_independent_parser_and_grid() {
@@ -23,53 +67,87 @@ fn display_terminal_uses_independent_parser_and_grid() {
 
 #[test]
 fn real_tui_claude_code_cursor_trace_is_chunk_invariant() {
-    let trace = CLAUDE_CODE_2_1_233_INITIAL_FRAME;
-    let bytes = trace.bytes();
-    let replay = |chunk_size| {
-        let terminal = Terminal::new_display(
-            Size {
-                cols: trace.cols,
-                rows: trace.rows,
-                ..Size::default()
-            },
-            Config::default(),
-        );
-        for chunk in bytes.chunks(chunk_size) {
-            terminal.feed_output(chunk);
+    let terminal = assert_terminal_trace_is_chunk_invariant(
+        CLAUDE_CODE_2_1_233_INITIAL_FRAME,
+        &[1, 2, 7, 64, 257],
+    );
+    let (row, col) = CLAUDE_CODE_2_1_233_CURSOR_CELL;
+    let cell = terminal
+        .with_viewport_cell(row, col, |_, line, cell| {
+            assert_eq!(line, row as i32);
+            *cell
+        })
+        .expect("Claude Code cursor cell should be inside the viewport");
+    assert_eq!(cell.character, ' ');
+    assert_eq!(cell.foreground, Color::Default);
+    assert_eq!(cell.background, Color::Default);
+    assert!(cell.attributes.inverse());
+    assert_eq!(terminal.cursor_state(), None);
+    assert!(terminal.alternate_screen_mode());
+}
+
+#[test]
+fn real_tui_neovim_trace_preserves_modes_truecolor_wide_text_and_undercurl() {
+    let terminal = assert_terminal_trace_is_chunk_invariant(
+        NEOVIM_0_12_4_RUST_FRAME,
+        &[1, 2, 7, 64, 257, 1024],
+    );
+    let (row, col) = NEOVIM_0_12_4_CURSOR_CELL;
+    assert_eq!(
+        terminal.cursor_state(),
+        Some(CursorState {
+            col,
+            row,
+            style: CursorStyle::Block,
+        })
+    );
+    assert!(terminal.alternate_screen_mode());
+    assert!(terminal.bracketed_paste_mode());
+    let mouse = terminal.mouse_mode();
+    assert!(mouse.enabled);
+    assert!(mouse.report_drag);
+    assert!(mouse.sgr_encoding);
+
+    let cursor_cell = terminal
+        .with_viewport_cell(row, col, |_, _, cell| *cell)
+        .expect("Neovim cursor cell should be inside the viewport");
+    assert_eq!(cursor_cell.character, 'T');
+    assert_eq!(
+        cursor_cell.foreground,
+        Color::Rgb {
+            r: 31,
+            g: 36,
+            b: 48,
         }
-        terminal
-    };
-    let baseline = replay(bytes.len());
-    let expected_snapshot = baseline.snapshot();
-    let expected_state = baseline.state_snapshot();
+    );
+    assert_eq!(
+        cursor_cell.background,
+        Color::Rgb {
+            r: 246,
+            g: 193,
+            b: 119,
+        }
+    );
+    assert!(cursor_cell.attributes.bold());
 
-    for chunk_size in [bytes.len(), 1, 2, 7, 64, 257] {
-        let terminal = replay(chunk_size);
-        assert_eq!(
-            terminal.snapshot(),
-            expected_snapshot,
-            "chunk size {chunk_size}"
-        );
-        assert_eq!(
-            terminal.state_snapshot(),
-            expected_state,
-            "chunk size {chunk_size}"
-        );
-
-        let (row, col) = CLAUDE_CODE_2_1_233_CURSOR_CELL;
-        let cell = terminal
-            .with_viewport_cell(row, col, |_, line, cell| {
-                assert_eq!(line, row as i32);
-                *cell
-            })
-            .expect("Claude Code cursor cell should be inside the viewport");
-        assert_eq!(cell.character, ' ');
-        assert_eq!(cell.foreground, Color::Default);
-        assert_eq!(cell.background, Color::Default);
-        assert!(cell.attributes.inverse());
-        assert_eq!(terminal.cursor_state(), None);
-        assert!(terminal.alternate_screen_mode());
-    }
+    let wide = terminal
+        .with_viewport_cell(1, 28, |_, _, cell| *cell)
+        .expect("Neovim wide cell should be inside the viewport");
+    let spacer = terminal
+        .with_viewport_cell(1, 29, |_, _, cell| *cell)
+        .expect("Neovim wide spacer should be inside the viewport");
+    assert_eq!(wide.character, '界');
+    assert_eq!(wide.attributes.underline_style(), UnderlineStyle::Curly);
+    assert_eq!(
+        wide.underline_color,
+        Some(Color::Rgb {
+            r: 246,
+            g: 193,
+            b: 119,
+        })
+    );
+    assert!(spacer.wide_spacer());
+    assert_eq!(spacer.attributes.underline_style(), UnderlineStyle::Curly);
 }
 
 #[test]

@@ -1253,7 +1253,60 @@ mod tests {
     };
     use termy_terminal_test_support::{
         CLAUDE_CODE_2_1_233_CURSOR_CELL, CLAUDE_CODE_2_1_233_INITIAL_FRAME,
+        NEOVIM_0_12_4_CURSOR_CELL, NEOVIM_0_12_4_RUST_FRAME, TerminalTrace,
     };
+
+    fn replay_real_tui_trace(trace: TerminalTrace, bytes: &[u8], chunk_size: usize) -> Terminal {
+        let terminal = Terminal::new_display(
+            TerminalSize {
+                cols: trace.cols,
+                rows: trace.rows,
+                ..TerminalSize::default()
+            },
+            None,
+        );
+        for chunk in bytes.chunks(chunk_size) {
+            terminal.feed_output(chunk);
+        }
+        terminal
+    }
+
+    fn assert_real_tui_trace_is_chunk_invariant(
+        trace: TerminalTrace,
+        chunk_sizes: &[usize],
+    ) -> Terminal {
+        let bytes = trace.bytes();
+        let baseline = replay_real_tui_trace(trace, &bytes, bytes.len());
+        let expected_cells = baseline.render_read(true).cells;
+        let expected_cursor = baseline.cursor_state();
+        let expected_mouse = baseline.mouse_mode();
+        let expected_keyboard = baseline.keyboard_mode();
+        let expected_scrolling = baseline.scroll_state();
+
+        for &chunk_size in chunk_sizes {
+            let terminal = replay_real_tui_trace(trace, &bytes, chunk_size);
+            assert_eq!(
+                terminal.render_read(true).cells,
+                expected_cells,
+                "{} chunk size {chunk_size}",
+                trace.id
+            );
+            assert_eq!(terminal.cursor_state(), expected_cursor);
+            assert_eq!(terminal.mouse_mode(), expected_mouse);
+            assert_eq!(terminal.keyboard_mode(), expected_keyboard);
+            assert_eq!(terminal.scroll_state(), expected_scrolling);
+            assert_eq!(
+                terminal.alternate_screen_mode(),
+                baseline.alternate_screen_mode()
+            );
+            assert_eq!(
+                terminal.bracketed_paste_mode(),
+                baseline.bracketed_paste_mode()
+            );
+        }
+
+        baseline
+    }
 
     #[test]
     fn terminal_size_clamps_absurd_dimensions() {
@@ -1289,44 +1342,82 @@ mod tests {
     #[test]
     fn real_tui_claude_code_trace_is_chunk_invariant() {
         let trace = CLAUDE_CODE_2_1_233_INITIAL_FRAME;
-        let bytes = trace.bytes();
-        let replay = |chunk_size| {
-            let terminal = Terminal::new_display(
-                TerminalSize {
-                    cols: trace.cols,
-                    rows: trace.rows,
-                    ..TerminalSize::default()
-                },
-                None,
-            );
-            for chunk in bytes.chunks(chunk_size) {
-                terminal.feed_output(chunk);
-            }
-            terminal
-        };
-        let baseline = replay(bytes.len());
-        let expected_cells = baseline.render_read(true).cells;
+        let terminal = assert_real_tui_trace_is_chunk_invariant(trace, &[1, 7, 64, 257]);
+        let cells = terminal.render_read(true).cells;
+        let (expected_row, expected_col) = CLAUDE_CODE_2_1_233_CURSOR_CELL;
+        let cursor_cell = &cells[expected_row * usize::from(trace.cols) + expected_col];
+        assert_eq!(cursor_cell.text, " ");
+        assert_eq!(
+            cursor_cell.foreground,
+            crate::TerminalRenderColor::DefaultForeground
+        );
+        assert_eq!(
+            cursor_cell.background,
+            crate::TerminalRenderColor::DefaultBackground
+        );
+        assert!(cursor_cell.inverse);
+        assert_eq!(terminal.cursor_state(), None);
+        assert!(terminal.alternate_screen_mode());
+    }
 
-        for chunk_size in [bytes.len(), 1, 7, 64] {
-            let terminal = replay(chunk_size);
-            let cells = terminal.render_read(true).cells;
-            assert_eq!(cells, expected_cells, "chunk size {chunk_size}");
+    #[test]
+    fn real_tui_neovim_trace_preserves_rich_render_cells_and_modes() {
+        let trace = NEOVIM_0_12_4_RUST_FRAME;
+        let terminal = assert_real_tui_trace_is_chunk_invariant(trace, &[1, 7, 64, 257, 1024]);
+        let cells = terminal.render_read(true).cells;
+        let index = |row, col| row * usize::from(trace.cols) + col;
+        let (cursor_row, cursor_col) = NEOVIM_0_12_4_CURSOR_CELL;
 
-            let (expected_row, expected_col) = CLAUDE_CODE_2_1_233_CURSOR_CELL;
-            let cursor_cell = &cells[expected_row * usize::from(trace.cols) + expected_col];
-            assert_eq!(cursor_cell.text, " ");
-            assert_eq!(
-                cursor_cell.foreground,
-                crate::TerminalRenderColor::DefaultForeground
-            );
-            assert_eq!(
-                cursor_cell.background,
-                crate::TerminalRenderColor::DefaultBackground
-            );
-            assert!(cursor_cell.inverse);
-            assert_eq!(terminal.cursor_state(), None);
-            assert!(terminal.alternate_screen_mode());
-        }
+        assert_eq!(
+            terminal.cursor_state(),
+            Some(TerminalCursorState {
+                col: cursor_col,
+                row: cursor_row,
+                style: TerminalCursorStyle::Block,
+            })
+        );
+        assert!(terminal.alternate_screen_mode());
+        assert!(terminal.bracketed_paste_mode());
+        let mouse = terminal.mouse_mode();
+        assert!(mouse.enabled);
+        assert!(mouse.report_drag);
+        assert!(mouse.sgr_encoding);
+
+        let cursor_cell = &cells[index(cursor_row, cursor_col)];
+        assert_eq!(cursor_cell.text, "T");
+        assert_eq!(
+            cursor_cell.foreground,
+            crate::TerminalRenderColor::Rgb(crate::TerminalColor {
+                r: 31,
+                g: 36,
+                b: 48
+            })
+        );
+        assert_eq!(
+            cursor_cell.background,
+            crate::TerminalRenderColor::Rgb(crate::TerminalColor {
+                r: 246,
+                g: 193,
+                b: 119,
+            })
+        );
+        assert!(cursor_cell.bold);
+
+        assert_eq!(cells[index(1, 26)].text, "✓");
+        let wide = &cells[index(1, 28)];
+        let spacer = &cells[index(1, 29)];
+        assert_eq!(wide.text, "界");
+        assert_eq!(wide.underline_style, crate::TerminalUnderlineStyle::Curly);
+        assert_eq!(
+            wide.underline_color,
+            Some(crate::TerminalRenderColor::Rgb(crate::TerminalColor {
+                r: 246,
+                g: 193,
+                b: 119,
+            }))
+        );
+        assert!(spacer.wide_character_spacer);
+        assert_eq!(spacer.underline_style, crate::TerminalUnderlineStyle::Curly);
     }
 
     #[test]

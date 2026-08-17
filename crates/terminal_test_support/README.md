@@ -15,6 +15,21 @@ with `#`. New traces must be minimized when practical, identify the source
 application and version, keep the control-byte ordering that triggered the
 behavior, and remove credentials, user input, machine names, and local paths.
 
+## Corpus
+
+| Application | Version | Coverage |
+| --- | --- | --- |
+| Claude Code | 2.1.233 | Hidden hardware cursor with a reverse-video prompt cursor |
+| Neovim | 0.12.4 | Alternate screen, synchronized updates, mouse and paste modes, truecolor, Unicode width, and colored undercurl |
+
+The Neovim fixture was captured at 80x24 from the
+[official macOS ARM64 release](https://github.com/neovim/neovim/releases/tag/v0.12.4)
+with `-u` pointing at a deterministic minimal configuration and all XDG state
+isolated outside the repository. The capture harness answered the same terminal
+capability queries Tmon supports, then stopped after Neovim committed its final
+synchronized frame. The fixture contains output bytes only, never terminal
+replies sent back to Neovim.
+
 ## Validation
 
 ```sh

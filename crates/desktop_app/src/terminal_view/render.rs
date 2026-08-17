@@ -4088,6 +4088,7 @@ impl Render for TerminalView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use termy_terminal_test_support::TerminalTrace;
 
     #[test]
     fn terminal_progress_loader_fill_uses_percentage_width() {
@@ -4257,6 +4258,19 @@ mod tests {
             }
         });
         result.expect("output should render a cell")
+    }
+
+    fn replay_real_tui_trace(trace: TerminalTrace) -> NativeTerminal {
+        let terminal = NativeTerminal::new_display(
+            TerminalSize {
+                cols: trace.cols,
+                rows: trace.rows,
+                ..TerminalSize::default()
+            },
+            None,
+        );
+        terminal.feed_output(&trace.bytes());
+        terminal
     }
 
     #[test]
@@ -5017,15 +5031,7 @@ mod tests {
         };
 
         let trace = CLAUDE_CODE_2_1_233_INITIAL_FRAME;
-        let terminal = NativeTerminal::new_display(
-            TerminalSize {
-                cols: trace.cols,
-                rows: trace.rows,
-                ..TerminalSize::default()
-            },
-            None,
-        );
-        terminal.feed_output(&trace.bytes());
+        let terminal = replay_real_tui_trace(trace);
 
         let mut cursor_cell = None;
         let (expected_row, expected_col) = CLAUDE_CODE_2_1_233_CURSOR_CELL;
@@ -5044,6 +5050,84 @@ mod tests {
         assert_eq!(resolved.bg, context.colors.foreground);
         assert!(!resolved.uses_terminal_default_bg);
         assert!((resolved.bg.a - 1.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn neovim_trace_renders_truecolor_undercurl_and_wide_spacer() {
+        use termy_terminal_test_support::{NEOVIM_0_12_4_CURSOR_CELL, NEOVIM_0_12_4_RUST_FRAME};
+
+        let trace = NEOVIM_0_12_4_RUST_FRAME;
+        let terminal = replay_real_tui_trace(trace);
+        let cells = terminal.render_read(true).cells;
+        let index = |row, col| row * usize::from(trace.cols) + col;
+        let wide = &cells[index(1, 28)];
+        let spacer = &cells[index(1, 29)];
+
+        assert_eq!(wide.text, "界");
+        assert_eq!(
+            wide.underline_style,
+            termy_core::TerminalUnderlineStyle::Curly
+        );
+        assert_eq!(
+            wide.underline_color,
+            Some(termy_core::TerminalRenderColor::Rgb(TerminalColor {
+                r: 246,
+                g: 193,
+                b: 119,
+            }))
+        );
+        assert!(spacer.wide_character_spacer);
+
+        let context = test_build_context(0.2);
+        let underline =
+            terminal_cell_underline(wide.into(), context).expect("Neovim undercurl should render");
+        assert_eq!(
+            underline.style,
+            termy_terminal_ui::TerminalUnderlineStyle::Curly
+        );
+        assert_eq!(
+            underline.color,
+            Some(
+                gpui::Rgba {
+                    r: 246.0 / 255.0,
+                    g: 193.0 / 255.0,
+                    b: 119.0 / 255.0,
+                    a: 1.0,
+                }
+                .into()
+            )
+        );
+
+        let resolved = resolve_cell_colors(wide, context);
+        assert_eq!(
+            resolved.fg,
+            gpui::Rgba {
+                r: 179.0 / 255.0,
+                g: 246.0 / 255.0,
+                b: 192.0 / 255.0,
+                a: 1.0,
+            }
+        );
+        assert_eq!(
+            resolved.bg,
+            gpui::Rgba {
+                r: 42.0 / 255.0,
+                g: 49.0 / 255.0,
+                b: 66.0 / 255.0,
+                a: 1.0,
+            }
+        );
+        assert!(!resolved.uses_terminal_default_bg);
+
+        let (row, col) = NEOVIM_0_12_4_CURSOR_CELL;
+        assert_eq!(
+            terminal.cursor_state(),
+            Some(TerminalCursorState {
+                col,
+                row,
+                style: TerminalCursorStyle::Block,
+            })
+        );
     }
 
     #[test]
