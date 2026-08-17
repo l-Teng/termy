@@ -631,8 +631,8 @@ impl KittyGraphicsState {
             .iter_mut()
             .filter(|placement| placement.screen == KittyGraphicsScreen::Primary)
         {
-            // Alacritty grows history when a partial DECSTBM region starts at
-            // the top. Kitty placements are not region-aware, so cancel that
+            // The terminal grows history when a partial DECSTBM region starts
+            // at the top. Kitty placements are not region-aware, so cancel that
             // global history offset rather than moving fixed footer images.
             placement.anchor_line = placement.anchor_line.saturating_add(lines);
         }

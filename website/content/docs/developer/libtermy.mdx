@@ -123,16 +123,14 @@ damage, or generation-checked partial reads can use `Terminal::render_read`,
 lock, so its callback must not call back into the same terminal.
 
 The terminal engine itself is private. `termy_core` 0.2 removes `Terminal::with_term`,
-`TerminalOptions::term_config`, and the exported raw Alacritty conversion
+`TerminalOptions::term_config`, and the exported raw engine conversion
 helpers as part of the renderer-neutral core API change. Use core-owned
 `TerminalColor`, `TerminalRenderCell`, and `TerminalQueryColors` values plus the
 public `Terminal` methods instead. This is an intentional Rust source break;
 the flat frame layout and C ABI did not change.
 
-> **Tmon rollout note:** Native terminals currently default to Tmon. Launching
-> with exact `TERMY_FORCE_ALACRITTY_ENGINE=1` selects the temporary Alacritty
-> fallback. This is a release rollback switch, not a permanent configuration
-> key; launch and configuration errors are never hidden by an engine retry.
+Native and display-only terminals use Tmon exclusively. Launch, configuration,
+PTY, and backend-initialization errors are returned without an engine retry.
 
 ### Display-only terminals
 

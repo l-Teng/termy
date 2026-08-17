@@ -1353,77 +1353,25 @@ mod tests {
     use crate::terminal_view::PaneResizeAxis;
     use crate::workspace_store::{StoredPane, StoredTab, StoredWorkspace};
 
-    const CROSS_ENGINE_HELPER_ROLE: &str = "TERMY_PERSISTENCE_CROSS_ENGINE_ROLE";
-    const CROSS_ENGINE_HELPER_PATH: &str = "TERMY_PERSISTENCE_CROSS_ENGINE_PATH";
-    const CROSS_ENGINE_HELPER_BACKEND: &str = "TERMY_PERSISTENCE_CROSS_ENGINE_BACKEND";
-    const CROSS_ENGINE_HELPER_TEST: &str =
-        "terminal_view::persistence::tests::cross_engine_persistence_subprocess_helper";
-
     #[test]
-    fn persisted_text_written_by_each_engine_opens_under_the_other() {
-        let directory = tempfile::tempdir().expect("cross-engine test directory");
-        for (writer, reader) in [("tmon", "alacritty"), ("alacritty", "tmon")] {
-            let path = directory.path().join(format!("{writer}-to-{reader}.txt"));
-            for (role, backend) in [("write", writer), ("read", reader)] {
-                let status = std::process::Command::new(
-                    std::env::current_exe().expect("current desktop test executable"),
-                )
-                .arg("--exact")
-                .arg(CROSS_ENGINE_HELPER_TEST)
-                .arg("--nocapture")
-                .env("TERMY_CORE_TEST_BACKEND", backend)
-                .env(CROSS_ENGINE_HELPER_ROLE, role)
-                .env(CROSS_ENGINE_HELPER_PATH, &path)
-                .env(CROSS_ENGINE_HELPER_BACKEND, backend)
-                .status()
-                .expect("cross-engine persistence helper should start");
-                assert!(
-                    status.success(),
-                    "{role} helper failed for {writer} -> {reader}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn cross_engine_persistence_subprocess_helper() {
-        let Ok(role) = std::env::var(CROSS_ENGINE_HELPER_ROLE) else {
-            return;
-        };
-        let path = std::path::PathBuf::from(
-            std::env::var_os(CROSS_ENGINE_HELPER_PATH).expect("helper persistence path"),
-        );
-        let expected_backend =
-            std::env::var(CROSS_ENGINE_HELPER_BACKEND).expect("helper backend label");
+    fn persisted_text_round_trips_through_tmon() {
         let size = TerminalSize {
             cols: 32,
             rows: 2,
             ..TerminalSize::default()
         };
-        let terminal = Terminal::new_test_display(size);
-        assert_eq!(
-            super::terminal_engine_label(Some(&terminal)),
-            expected_backend
-        );
+        let writer = Terminal::new_test_display(size);
+        writer.hydrate_output("persisted-界-state".as_bytes());
+        let text = TerminalView::extract_persisted_buffer_line(&writer, 0)
+            .expect("writer line should exist");
 
-        match role.as_str() {
-            "write" => {
-                terminal.hydrate_output("persisted-界-state".as_bytes());
-                let text = TerminalView::extract_persisted_buffer_line(&terminal, 0)
-                    .expect("writer line should exist");
-                std::fs::write(path, text).expect("writer should save persisted text");
-            }
-            "read" => {
-                let text =
-                    std::fs::read_to_string(path).expect("reader should load persisted text");
-                terminal.hydrate_output(text.as_bytes());
-                assert_eq!(
-                    TerminalView::extract_persisted_buffer_line(&terminal, 0).as_deref(),
-                    Some("persisted-界-state")
-                );
-            }
-            other => panic!("unknown persistence helper role {other}"),
-        }
+        let reader = Terminal::new_test_display(size);
+        reader.hydrate_output(text.as_bytes());
+
+        assert_eq!(
+            TerminalView::extract_persisted_buffer_line(&reader, 0).as_deref(),
+            Some("persisted-界-state")
+        );
     }
 
     #[test]

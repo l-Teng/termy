@@ -1,4 +1,5 @@
 use super::*;
+use crate::render_metrics::increment_runtime_wakeup_count;
 use crate::{
     DetectedLink, DetectedViewportLink, TerminalClipboardTarget, TerminalColor, TerminalPalette,
     TerminalRenderCell, TerminalRenderColor, TerminalRenderText, TerminalUnderlineStyle,
@@ -37,8 +38,12 @@ impl TmonBackend {
             &runtime_config,
             launch,
         )?;
-        let wakeup_notifier =
-            wakeup_notifier.map(|notifier| tmon::WakeupNotifier::new(move || notifier.notify()));
+        let wakeup_notifier = wakeup_notifier.map(|notifier| {
+            tmon::WakeupNotifier::new(move || {
+                increment_runtime_wakeup_count();
+                notifier.notify();
+            })
+        });
         let terminal = tmon::Terminal::new(tmon_size(size.clamped()), config, wakeup_notifier)?;
         let last_damage_cursor = std::sync::Mutex::new(terminal.cursor_state());
         Ok(Self {
@@ -61,7 +66,10 @@ impl TmonBackend {
             Some(notifier) => tmon::Terminal::new_display_with_wakeup_notifier(
                 size,
                 config,
-                tmon::WakeupNotifier::new(move || notifier.notify()),
+                tmon::WakeupNotifier::new(move || {
+                    increment_runtime_wakeup_count();
+                    notifier.notify();
+                }),
             ),
             None => tmon::Terminal::new_display(size, config),
         };

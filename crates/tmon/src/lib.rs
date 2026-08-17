@@ -2,8 +2,8 @@
 //!
 //! Tmon deliberately uses only the Rust standard library. It owns its VT parser,
 //! bounded grid/scrollback, damage tracking, and native PTY lifecycle. It is
-//! Termy's default native engine during the guarded rollout; core retains the
-//! temporary Alacritty fallback and keeps engine selection private.
+//! Termy's sole native and display terminal engine; core keeps its implementation
+//! behind the public renderer-neutral facade.
 
 mod graphics;
 mod grid;
@@ -129,7 +129,7 @@ pub struct TerminalStateSnapshot {
 ///
 /// Native PTYs are available on Linux, Android, and macOS. Windows support
 /// is detected at runtime so loading Termy on a pre-ConPTY Windows build does
-/// not make the regular Alacritty engine unavailable.
+/// not attempt to call unavailable ConPTY entry points.
 pub fn native_pty_available() -> bool {
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     {
@@ -385,7 +385,10 @@ impl PtyStartError {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        any(target_os = "linux", target_os = "android", target_os = "macos")
+    ))]
     pub(crate) fn kind(&self) -> io::ErrorKind {
         self.inner.kind()
     }

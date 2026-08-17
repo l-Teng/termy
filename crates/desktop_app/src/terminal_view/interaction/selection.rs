@@ -689,7 +689,7 @@ impl TerminalView {
 
     /// Adjust selection positions to compensate for display_offset changes caused by
     /// new terminal content arriving while the user is scrolled into history.
-    /// Prevents the selection from visually drifting when Alacritty auto-adjusts the
+    /// Prevents the selection from visually drifting when the engine auto-adjusts the
     /// scroll offset to keep the viewport stable.
     pub(in super::super) fn adjust_selection_for_display_offset_change(
         &mut self,

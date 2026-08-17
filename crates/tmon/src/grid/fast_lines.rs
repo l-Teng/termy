@@ -133,7 +133,8 @@ impl Grid {
             );
         }
         let history_before = self.history.len();
-        if (alternate || self.history_limit == 0)
+        if !self.hyperlinks.is_empty()
+            && (alternate || self.history_limit == 0)
             && self
                 .active()
                 .cells
@@ -252,12 +253,13 @@ impl Grid {
     ) -> (usize, Option<char>) {
         let retained_new_lines = batch.line_count.min(rows.saturating_sub(1));
         let direct_discard = batch.line_count.saturating_sub(retained_new_lines);
-        if self
-            .active()
-            .cells
-            .iter()
-            .flatten()
-            .any(Cell::has_hyperlink)
+        if !self.hyperlinks.is_empty()
+            && self
+                .active()
+                .cells
+                .iter()
+                .flatten()
+                .any(Cell::has_hyperlink)
         {
             self.note_hyperlink_root_removed();
         }

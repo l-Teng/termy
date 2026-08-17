@@ -62,10 +62,10 @@ Start with [Customize Termy](https://termy.sh/docs/customize) or use the complet
 ## Architecture
 
 Termy is more than a window around a PTY. Its terminal emulation is powered by
-Termy's renderer-neutral Tmon engine behind a reusable headless runtime. During
-the guarded rollout, the previous Alacritty-backed implementation remains a
-temporary emergency fallback. The repository also contains a GPUI desktop
-application, CLI, native FFI, website, and release tooling.
+Termy's renderer-neutral Tmon engine behind a reusable headless runtime. Tmon
+owns the parser, grid, scrollback, PTY/ConPTY lifecycle, and damage tracking.
+The repository also contains a GPUI desktop application, CLI, native FFI,
+website, and release tooling.
 
 ```text
 desktop / embedding hosts

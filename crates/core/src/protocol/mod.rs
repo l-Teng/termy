@@ -1,7 +1,22 @@
-// Centralize PTY reply handling so protocol-specific branches stay out of runtime.rs.
 mod query_colors;
-mod replies;
 
 pub use query_colors::TerminalQueryColors;
-pub(crate) use replies::reply_bytes_for_event;
-pub use replies::{TerminalClipboardTarget, TerminalReplyHost};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalClipboardTarget {
+    Clipboard,
+    Selection,
+}
+
+pub trait TerminalReplyHost {
+    fn load_clipboard(&mut self, target: TerminalClipboardTarget) -> Option<String>;
+}
+
+impl<F> TerminalReplyHost for F
+where
+    F: FnMut(TerminalClipboardTarget) -> Option<String>,
+{
+    fn load_clipboard(&mut self, target: TerminalClipboardTarget) -> Option<String> {
+        self(target)
+    }
+}

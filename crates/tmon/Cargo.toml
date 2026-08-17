@@ -11,5 +11,5 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
-alacritty_terminal = { workspace = true }
+alacritty_terminal = "0.26"
 unicode-width = { workspace = true }

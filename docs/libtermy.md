@@ -65,16 +65,13 @@ read coherent and allocation-bounded; it must not call back into that terminal.
 
 The underlying terminal engine is not part of the Rust embedding contract.
 `termy_core` 0.2 removes `Terminal::with_term`,
-`TerminalOptions::term_config`, and the raw Alacritty conversion helpers. Use `TerminalColor`,
+`TerminalOptions::term_config`, and the raw engine conversion helpers. Use `TerminalColor`,
 `TerminalRenderCell`, `TerminalQueryColors`, and the public `Terminal` methods
 instead. This is an intentional Rust source break; the flat frame types and C
 ABI remain unchanged.
 
-> **Tmon rollout note:** Native and display-only terminals currently default to
-> Tmon. Launching with exact `TERMY_FORCE_ALACRITTY_ENGINE=1` selects the
-> temporary Alacritty fallback for both. This is a release rollback switch, not
-> a permanent configuration key; launch and configuration errors are never
-> hidden by an engine retry.
+Native and display-only terminals use Tmon exclusively. Launch, configuration,
+PTY, and backend-initialization errors are returned without an engine retry.
 
 Use `termy_core::measure_cell(font_family, font_size, line_height)` or
 `termy_core::measure_cell_from_config(&app_config)` to derive the

@@ -18,7 +18,7 @@ zlib/DEFLATE decoder.
 This crate owns the Tmon parser, grids and scrollback, terminal state, damage
 model, graphics protocol, and native PTY/ConPTY lifecycle. It must remain
 renderer-neutral and independently usable without Termy's desktop application
-or the retained Alacritty-backed core.
+or `termy_core`.
 
 ## Validation
 
@@ -27,10 +27,10 @@ cargo test -p tmon
 cargo clippy -p tmon --all-targets -- -D warnings
 ```
 
-The cross-engine benchmark harness lives in `crates/xtask` so this crate does
-not depend on `termy_core`. Its timed mode can run locally with
-`just benchmark-tmon`; GitHub Actions runs the same comparison for relevant
-pushes to `main` and manual dispatches.
+The isolated three-engine benchmark harness lives in
+`tools/tmon-ghostty-memory`, outside the workspace dependency graph. It compares
+direct Tmon, Alacritty, and libghostty-vt adapters without making either
+competitor a product dependency.
 
 ## Forbidden Dependencies
 
@@ -51,22 +51,16 @@ just run
 ```
 
 Open Termy's inspector and select the **Terminal** tab; the **Engine** row reads
-`tmon` for the normal native path. **Engine Selection** records whether Tmon was
-the default or Alacritty was selected by the temporary rollout fallback. Startup
-logs and desktop benchmark summaries record the same actual engine and reason.
+`tmon` for native and display-only terminals. Startup logs and desktop benchmark
+summaries record the same engine and selection reason.
 
 Tmux pane displays also use Tmon through `termy_core::Terminal` display mode.
-During the rollout, an exact `TERMY_FORCE_ALACRITTY_ENGINE=1` forces the retained
-fallback for native terminals and tmux display parsing together; other values
-keep Tmon as the default. Windows Tmon CI launches live ConPTY children directly
-through Tmon and verifies final-output draining before the exit callback,
-immediate resize plus stdin round-trip, and batch-wrapper launch in a normalized
-working directory. It does not exercise desktop engine selection or GPUI
-rendering through a live Windows terminal. When the required ConPTY APIs are
-unavailable, Termy logs a warning and falls back to the retained
-Alacritty-backed native engine. Backend initialization failures are also
-eligible for native fallback; invalid launch or configuration data is returned
-unchanged.
+Windows Tmon CI launches live ConPTY children directly through Tmon and verifies
+final-output draining before the exit callback, immediate resize plus stdin
+round-trip, and batch-wrapper launch in a normalized working directory. It does
+not exercise GPUI rendering through a live Windows terminal. Missing platform
+APIs, backend initialization failures, and invalid launch or configuration data
+are returned to the caller.
 
 ## Direction
 
@@ -75,10 +69,7 @@ unchanged.
 - Emit damage-scoped frame updates rather than full-grid redraws.
 - Keep PTY reads and parsing off the UI thread.
 - Keep expanding VT/OSC/DCS and graphics compatibility under differential tests.
-- Differential-test common shells and TUIs against the existing native engine.
-
-Tmon is the default native and tmux display engine during the guarded rollout.
-The retained Alacritty backend is temporary rollback machinery behind core.
+- Differential-test common shells and TUIs against isolated reference engines.
 
 Renderers that can move cached rows use `take_render_damage_snapshot()`. Its
 scroll operations are chronological and its partial spans describe final
@@ -90,8 +81,8 @@ that do not understand row movement.
 
 ## Compatibility boundary
 
-Tmon is differential-tested against Termy's Alacritty-backed native wrapper for
-the VT sequences that wrapper implements. It intentionally implements several
+Tmon is differential-tested against a pinned, dev-only Alacritty oracle for the
+VT sequences that oracle implements. It intentionally implements several
 standards and xterm extensions that the pinned parser ignores: legacy
 alternate-screen/cursor modes 47, 1047, and 1048; DEC selective erase and
 DECST8C tab-stop reset; ISO 2022 G1/G2/G3 designation and single shifts; and
@@ -99,9 +90,9 @@ DECRQSS/XTGETTCAP replies. OSC 52 additionally accepts valid unpadded or
 whitespace-separated base64. These are compatibility extensions, not benchmark
 shortcuts, and are tested separately from strict differential fixtures.
 
-Tmon also keeps combining marks available to selection and search. Termy's
-existing Alacritty cell adapter omits that out-of-line text; its default behavior
-is deliberately unchanged by the experiment. OSC/DCS payloads are bounded to
+Tmon also keeps combining marks available to selection and search. The dev-only
+oracle omits that out-of-line text, so combining behavior has focused native
+tests instead of being normalized away. OSC/DCS payloads are bounded to
 64 KiB so an unterminated control string cannot grow without limit.
 Combining text retained by one cell is capped at 4 KiB on a UTF-8 boundary.
 An OSC 8 link may retain at most 64 KiB of protocol-ID-plus-target payload, and
@@ -212,76 +203,21 @@ included.
 
 ## Benchmarking
 
-Run the headless Tmon versus Alacritty parser/grid comparison and write
-`tmon-alacritty-benchmark.txt`:
-
-```sh
-just benchmark-tmon
-```
-
-The separate macOS harness compares Tmon with pinned, statically linked
-`libghostty-vt`. Its memory mode uses fresh processes for 13 empty, primary,
-alternate, interactive, and scrollback states. Its balanced feed mode compares
-eight semantically checked workloads using identical 64 KiB scrollback chunks,
-row-aligned alternate-screen chunks, or one complete interactive operation
-batch per call. Run both locally with a Ghostty source checkout, or manually
-dispatch the **Tmon vs Ghostty Benchmark** GitHub Actions workflow:
+The standalone macOS harness compares direct Tmon with isolated
+`alacritty_terminal` and pinned, statically linked `libghostty-vt` adapters.
+Neither competitor is linked into Termy. Memory mode uses fresh child processes;
+throughput mode uses identical inputs, chunks, warmups, calibrated byte targets,
+and balanced six-permutation sample ordering. An untimed preflight compares
+cursor, history, screen state, and every logical cell before timing.
 
 ```sh
 GHOSTTY_DIR=../ghostty just benchmark-tmon-ghostty-memory
 ```
 
-The `Tmon vs Alacritty Benchmark` GitHub Actions workflow runs on pushes to
-`main` that change its declared Cargo, core, Tmon, xtask, revision-gate, or
-workflow paths, and it can also be started manually with configurable workload
-sizes. When the runner
-remains available, the report is uploaded as a 30-day artifact and included in
-the job summary; its finalizer records setup outcomes even if the comparison
-cannot start. CI defaults to eight samples and rejects odd counts so each
-workload has four Tmon-first and four Alacritty-first pairs. It fails when the
-median of a workload's paired ratios misses its committed target; local runs
-print the same verdict without failing unless `TMON_BENCH_ENFORCE_TARGETS=1` is
-set. Both `just benchmark-tmon` and CI then run an isolated snapshot regression
-gate against immutable Tmon commit
-`03d7ca5c5420ca141afe56f725341faadb71af18` and append a report-only allocation
-pass to the same text report. Manual inputs are bounded so an oversized request
-fails before it can consume the job timeout and prevent report upload. The first
-measured optimization pass is documented in [PERFORMANCE.md](PERFORMANCE.md).
-
-The suite compares identical byte streams, grid dimensions, and scrollback
-limits in release mode. The report names the direct Tmon runtime and the
-Alacritty-backed `termy_core` runtime explicitly; desktop engine environment is
-not used to choose either path. Before timing, an untimed preflight compares up
-to 32
-MiB of every workload across every normalized grid and scrollback cell plus
-cursor, scroll, and screen state. It reports integrated Termy backend
-throughput, current full-frame API throughput, and static cell sizes. Feed calls
-intentionally keep the original small workload payloads so results remain
-comparable with the saved baseline. The snapshot APIs perform different
-conversion work, so that ratio is not a raw engine-to-engine snapshot
-comparison. Its ratio and retention against the supplied 19.880x baseline are
-report-only: enforcing `19.880x * 0.95` on hosted CI would not be sound because
-the APIs do different work and can react differently to runner noise. The suite
-also measures both engines through one benchmark-local normalized frame contract
-covering the same visible cells, metadata, raw colors, styles, combining text,
-exact underline styles and colors, hyperlinks, wide-cell roles, and wrapping.
-Every normalized sample runs for at
-least 250 ms, and an untimed mixed-frame preflight requires exact equality. This
-new equivalent-work ratio is report-only until its first Linux CI baseline is
-available. The suite does not measure graphics decoding, PTY I/O, GPUI painting,
-input latency, or complete terminal compatibility, and speed ratios are not a
-feature-parity score. Windows CI separately launches live ConPTY children to
-cover final-output draining, immediate resize and stdin round-trip, and a
-batch-wrapper working-directory case. It does not exercise ConPTY through the
-desktop application or measure Windows PTY performance. The first GitHub
-Actions measurement of the current follow-up work is also pending.
-
-It also prints a report-only Tmon scroll-cache measurement. Parsing and damage
-capture happen once outside both timed paths; an untimed preflight requires an
-incrementally replayed cache to equal a fresh normalized visible cache exactly.
-The metric compares cache-update work, not GPUI painting, PTY I/O, or an
-Alacritty renderer path. It has no pass/fail threshold until Linux Actions has
-established a stable baseline.
+The **Tmon, Alacritty, and Ghostty Benchmark** workflow runs the same isolated
+harness. The comparison measures parser/grid throughput and engine-state memory,
+not PTY I/O, GPUI painting, input latency, or complete terminal compatibility.
+Speed ratios are not a feature-parity score.
 
 The revision gate is a different comparison: current Tmon and the pinned
 reference call the same native `Terminal::snapshot()` API on identical terminal
@@ -294,21 +230,3 @@ immutable reference. A clear regression or an inconclusive noisy result fails
 CI instead of silently accepting uncertainty. The reference SHA is ratcheted
 only by an explicit source change after a reviewed measurement, never to the
 previous push automatically.
-
-The allocation pass rebuilds only the xtask benchmark example with the
-`benchmark-allocations` feature and requires
-`TMON_BENCH_ALLOCATIONS_ONLY=1`; that feature build refuses timed mode. Its
-`System` allocator wrapper is absent from the normal throughput binary, so the
-timed measurements have no counter overhead. For every engine and workload it
-warms 2 MiB on an uncounted terminal, constructs a fresh terminal uncounted, and
-then counts process-wide allocator requests only during the same complete-payload
-`feed_output` loop as the timed samples. It reports the exact processed byte
-count, which can slightly exceed the configured target. Snapshots and terminal
-destruction happen after the guard has disabled new hooks and waited for any
-in-flight hooks. The report includes
-successful allocation calls and requested bytes (including `alloc_zeroed`),
-deallocation calls and requested bytes, successful reallocation calls with
-old/new requested bytes, and their signed net requested-byte change. These are
-allocator-request figures, not RSS, retained or usable heap, allocator metadata,
-or physical memory; allocations from concurrent process activity can also be
-included while the guard is active. All allocation results are report-only.

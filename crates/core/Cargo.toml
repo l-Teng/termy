@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-alacritty_terminal = { workspace = true }
 base64 = "0.22"
 compact_str = "0.8.1"
 flume = { workspace = true }
@@ -17,7 +16,6 @@ log = { workspace = true }
 dirs = { workspace = true }
 flate2 = "1.1"
 fontdb = "0.23"
-polling = { workspace = true }
 png = "0.18"
 termy_config_core = { path = "../config_core" }
 termy_search = { path = "../search" }
@@ -25,9 +23,6 @@ termy_themes = { path = "../themes" }
 tmon = { path = "../tmon" }
 ttf-parser = "0.25"
 unicode-width = { workspace = true }
-
-[target.'cfg(unix)'.dependencies]
-rustix-openpty = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

@@ -4704,12 +4704,8 @@ mod tests {
             }
             assert_eq!(incremental, snapshot_rows(&terminal), "output {output:?}");
         }
-        // Tmon exposes ordered scroll operations for row-cache reuse. The
-        // temporary Alacritty rollback backend instead dirties the moved rows;
-        // both paths must still reconstruct the exact fresh snapshot above.
-        if terminal.engine_label() == "tmon" {
-            assert!(replayed_scrolls >= 4, "replayed {replayed_scrolls} scrolls");
-        }
+        // Tmon exposes ordered scroll operations for row-cache reuse.
+        assert!(replayed_scrolls >= 4, "replayed {replayed_scrolls} scrolls");
     }
 
     #[test]

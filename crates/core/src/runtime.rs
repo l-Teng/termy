@@ -1,53 +1,22 @@
-use crate::backend;
 use crate::frame::{
     TerminalRenderDamageSnapshot, TerminalRenderRead, TerminalViewportMetadata, TermyFrame,
-    TermyFrameUpdate, snapshot_from_term, snapshot_update_from_term,
+    TermyFrameUpdate,
 };
 use crate::keyboard::TerminalKeyboardMode;
 use crate::kitty_graphics::{
-    KittyGraphicsInterceptor, KittyGraphicsItem, KittyGraphicsRenderPlacement, KittyGraphicsScreen,
-    KittyGraphicsState,
+    KittyGraphicsRenderPlacement, KittyGraphicsScreen, KittyGraphicsState,
 };
 #[cfg(unix)]
 use crate::locale::{Utf8LocaleOverridePlan, preferred_utf8_locale, utf8_locale_override_plan};
 use crate::mouse_protocol::TerminalMouseMode;
-use crate::osc_intercept::{OscEvent, OscInterceptor};
 use crate::path_env::normalized_path_env;
-use crate::protocol::{TerminalQueryColors, TerminalReplyHost, reply_bytes_for_event};
-use crate::render_metrics::increment_runtime_wakeup_count;
-use crate::search::{
-    TermySearchMatch, TermySearchOptions, TermySharedSearchMatch, search_lines_shared,
-};
+use crate::protocol::{TerminalQueryColors, TerminalReplyHost};
+use crate::search::{TermySearchMatch, TermySearchOptions, TermySharedSearchMatch};
 use crate::shell_integration::ProgressState;
-use alacritty_terminal::{
-    event::{Event as AlacEvent, EventListener, OnResize, WindowSize},
-    grid::Dimensions,
-    index::{Column, Line},
-    sync::FairMutex,
-    term::{Term, TermMode, cell::Flags},
-    thread,
-    tty::{self, EventedPty, EventedReadWrite, Options as PtyOptions, Shell},
-    vte::ansi::{self, Handler, NamedPrivateMode, PrivateMode},
-};
-use flume::{Receiver, Sender, unbounded};
-use polling::{Event as PollingEvent, Events, PollMode, Poller};
+use flume::Sender;
 #[cfg(not(target_os = "windows"))]
 use std::path::Path;
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    env,
-    io::{self, ErrorKind, Read, Write},
-    num::NonZeroUsize,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, Receiver as StdReceiver, Sender as StdSender, TryRecvError},
-    },
-    time::Instant,
-};
-use unicode_width::UnicodeWidthChar;
+use std::{collections::HashMap, env, io, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub struct TabTitleShellIntegration {
@@ -171,9 +140,13 @@ pub enum TerminalLaunch {
 pub enum TerminalEngineSelectionReason {
     TmonDefault,
     DisplayDefault,
+    /// Legacy diagnostic token retained for Rust source compatibility; never emitted.
     ForcedAlacritty,
+    /// Legacy diagnostic token retained for Rust source compatibility; never emitted.
     TmonUnavailable,
+    /// Legacy diagnostic token retained for Rust source compatibility; never emitted.
     TmonInitializationFailure,
+    /// Legacy diagnostic token retained for Rust source compatibility; never emitted.
     TestOverride,
 }
 
@@ -271,7 +244,7 @@ impl KittyGraphicsScrollRegion {
     }
 
     fn set(&mut self, top: usize, bottom: Option<usize>, screen_lines: usize) {
-        // Match Alacritty: resolve an omitted bottom before validating, then
+        // Resolve an omitted bottom before validating, then
         // clamp the accepted region to the screen during use.
         if top >= bottom.unwrap_or(screen_lines) {
             return;
@@ -287,7 +260,7 @@ impl KittyGraphicsScrollRegion {
 }
 
 /// Tracks DECSTBM alongside the real terminal parser so Kitty commands can
-/// choose a scroll-safe cursor policy without reaching into Alacritty internals.
+/// choose a scroll-safe cursor policy without reaching into engine internals.
 #[derive(Default)]
 pub struct KittyGraphicsCursorTracker {
     region: KittyGraphicsScrollRegion,
@@ -308,6 +281,7 @@ impl KittyGraphicsCursorTracker {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum KittyGraphicsTextEffect {
     EnteredAlternateScreen,
     TerminalReset,
@@ -363,371 +337,6 @@ impl KittyGraphicsTextEffects {
         }
         changed
     }
-
-    fn push(&mut self, effect: KittyGraphicsTextEffect) {
-        self.effects.push(effect);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct KittyGraphicsScrollObservation {
-    screen: KittyGraphicsScreen,
-    full_screen_region: bool,
-    physical_lines: usize,
-    history_before: usize,
-}
-
-struct KittyGraphicsTrackingHandler<'a, T> {
-    term: &'a mut Term<T>,
-    tracker: &'a mut KittyGraphicsCursorTracker,
-    effects: &'a mut KittyGraphicsTextEffects,
-    resize_anchor_state: Option<&'a crate::resize_anchor::ResizeAnchorState>,
-    track_scrolls: bool,
-}
-
-impl<T: EventListener> KittyGraphicsTrackingHandler<'_, T> {
-    fn linefeed_scroll_lines(&self) -> usize {
-        let screen_lines = self.term.grid().screen_lines();
-        let (_, bottom) = self.tracker.region.bounds(screen_lines);
-        let cursor_line = self.term.grid().cursor.point.line.0.max(0) as usize;
-        usize::from(screen_lines > 0 && cursor_line.saturating_add(1) == bottom)
-    }
-
-    fn input_scroll_lines(&self, c: char) -> usize {
-        let Some(width) = c.width() else {
-            return 0;
-        };
-        if width == 0 || !self.term.mode().contains(TermMode::LINE_WRAP) {
-            return 0;
-        }
-
-        let cursor = &self.term.grid().cursor;
-        let needs_wrap = cursor.input_needs_wrap
-            || (width == 2
-                && cursor.point.column.0.saturating_add(1) >= self.term.grid().columns());
-        if needs_wrap {
-            self.linefeed_scroll_lines()
-        } else {
-            0
-        }
-    }
-
-    fn explicit_scroll_up_lines(&self, lines: usize) -> usize {
-        let screen_lines = self.term.grid().screen_lines();
-        let (top, bottom) = self.tracker.region.bounds(screen_lines);
-        lines.min(bottom.saturating_sub(top))
-    }
-
-    fn observe_scroll(&self, physical_lines: usize) -> Option<KittyGraphicsScrollObservation> {
-        if !self.track_scrolls || physical_lines == 0 {
-            return None;
-        }
-        let screen_lines = self.term.grid().screen_lines();
-        Some(KittyGraphicsScrollObservation {
-            screen: KittyGraphicsScreen::from_alternate_screen(
-                self.term.mode().contains(TermMode::ALT_SCREEN),
-            ),
-            full_screen_region: self.tracker.region.covers_full_screen(screen_lines),
-            physical_lines,
-            history_before: self.term.grid().history_size(),
-        })
-    }
-
-    fn finish_scroll(&mut self, observation: Option<KittyGraphicsScrollObservation>) {
-        let Some(observation) = observation else {
-            return;
-        };
-        let history_growth = self
-            .term
-            .grid()
-            .history_size()
-            .saturating_sub(observation.history_before);
-        match (observation.screen, observation.full_screen_region) {
-            (KittyGraphicsScreen::Primary, true) => {
-                let lines = observation.physical_lines.saturating_sub(history_growth);
-                if lines > 0 {
-                    self.effects
-                        .push(KittyGraphicsTextEffect::ScrollUpWithoutHistory {
-                            screen: KittyGraphicsScreen::Primary,
-                            lines,
-                        });
-                }
-            }
-            (KittyGraphicsScreen::Primary, false) => {
-                if history_growth > 0 {
-                    self.effects.push(
-                        KittyGraphicsTextEffect::PreservePrimaryAcrossPartialHistoryGrowth(
-                            history_growth,
-                        ),
-                    );
-                }
-            }
-            (KittyGraphicsScreen::Alternate, true) => {
-                self.effects
-                    .push(KittyGraphicsTextEffect::ScrollUpWithoutHistory {
-                        screen: KittyGraphicsScreen::Alternate,
-                        lines: observation.physical_lines,
-                    });
-            }
-            (KittyGraphicsScreen::Alternate, false) => (),
-        }
-    }
-
-    fn observe_live_output(&self) {
-        if let Some(state) = self.resize_anchor_state {
-            state.observe_live_output(self.term);
-        }
-    }
-}
-
-macro_rules! forward_kitty_graphics_handler_methods {
-    ($(fn $name:ident($($arg:ident: $ty:ty),*);)*) => {
-        $(
-            fn $name(&mut self $(, $arg: $ty)*) {
-                Handler::$name(&mut *self.term $(, $arg)*);
-            }
-        )*
-    };
-}
-
-impl<T: EventListener> Handler for KittyGraphicsTrackingHandler<'_, T> {
-    fn input(&mut self, c: char) {
-        let physical_lines = if self.track_scrolls {
-            self.input_scroll_lines(c)
-        } else {
-            0
-        };
-        let observation = self.observe_scroll(physical_lines);
-        Handler::input(&mut *self.term, c);
-        self.finish_scroll(observation);
-        self.observe_live_output();
-    }
-
-    fn put_tab(&mut self, count: u16) {
-        let physical_lines = if self.track_scrolls
-            && self.term.grid().cursor.input_needs_wrap
-            && self.term.mode().contains(TermMode::LINE_WRAP)
-        {
-            self.linefeed_scroll_lines()
-        } else {
-            0
-        };
-        let observation = self.observe_scroll(physical_lines);
-        Handler::put_tab(&mut *self.term, count);
-        self.finish_scroll(observation);
-        self.observe_live_output();
-    }
-
-    fn linefeed(&mut self) {
-        let physical_lines = if self.track_scrolls {
-            self.linefeed_scroll_lines()
-        } else {
-            0
-        };
-        let observation = self.observe_scroll(physical_lines);
-        Handler::linefeed(&mut *self.term);
-        self.finish_scroll(observation);
-        self.observe_live_output();
-    }
-
-    fn newline(&mut self) {
-        let physical_lines = if self.track_scrolls {
-            self.linefeed_scroll_lines()
-        } else {
-            0
-        };
-        let observation = self.observe_scroll(physical_lines);
-        Handler::newline(&mut *self.term);
-        self.finish_scroll(observation);
-        self.observe_live_output();
-    }
-
-    fn scroll_up(&mut self, lines: usize) {
-        let physical_lines = if self.track_scrolls {
-            self.explicit_scroll_up_lines(lines)
-        } else {
-            0
-        };
-        let observation = self.observe_scroll(physical_lines);
-        Handler::scroll_up(&mut *self.term, lines);
-        self.finish_scroll(observation);
-    }
-
-    fn reset_state(&mut self) {
-        self.tracker.reset_scroll_region();
-        if let Some(state) = self.resize_anchor_state {
-            state.reset();
-        }
-        self.effects.push(KittyGraphicsTextEffect::TerminalReset);
-        Handler::reset_state(&mut *self.term);
-    }
-
-    fn set_private_mode(&mut self, mode: PrivateMode) {
-        if mode == NamedPrivateMode::ColumnMode.into() {
-            self.tracker.reset_scroll_region();
-        }
-        if mode == NamedPrivateMode::SwapScreenAndSetRestoreCursor.into()
-            && !self.term.mode().contains(TermMode::ALT_SCREEN)
-        {
-            self.effects
-                .push(KittyGraphicsTextEffect::EnteredAlternateScreen);
-        }
-        Handler::set_private_mode(&mut *self.term, mode);
-    }
-
-    fn unset_private_mode(&mut self, mode: PrivateMode) {
-        if mode == NamedPrivateMode::ColumnMode.into() {
-            self.tracker.reset_scroll_region();
-        }
-        Handler::unset_private_mode(&mut *self.term, mode);
-    }
-
-    fn set_scrolling_region(&mut self, top: usize, bottom: Option<usize>) {
-        self.tracker
-            .region
-            .set(top, bottom, self.term.grid().screen_lines());
-        Handler::set_scrolling_region(&mut *self.term, top, bottom);
-    }
-
-    fn clear_screen(&mut self, mode: ansi::ClearMode) {
-        if let Some(state) = self.resize_anchor_state {
-            state.clear_screen(self.term, &mode);
-        }
-        let clear_viewport = if self.track_scrolls && matches!(mode, ansi::ClearMode::All) {
-            Some(KittyGraphicsTextEffect::ClearViewport {
-                screen: KittyGraphicsScreen::from_alternate_screen(
-                    self.term.mode().contains(TermMode::ALT_SCREEN),
-                ),
-                history_size: self.term.grid().history_size(),
-                rows: self.term.grid().screen_lines(),
-                cols: self.term.grid().columns(),
-            })
-        } else {
-            None
-        };
-
-        Handler::clear_screen(&mut *self.term, mode);
-        if let Some(clear_viewport) = clear_viewport {
-            self.effects.push(clear_viewport);
-        }
-    }
-
-    forward_kitty_graphics_handler_methods! {
-        fn set_title(title: Option<String>);
-        fn set_cursor_style(style: Option<ansi::CursorStyle>);
-        fn set_cursor_shape(shape: ansi::CursorShape);
-        fn goto(line: i32, col: usize);
-        fn goto_line(line: i32);
-        fn goto_col(col: usize);
-        fn insert_blank(count: usize);
-        fn move_up(rows: usize);
-        fn move_down(rows: usize);
-        fn identify_terminal(intermediate: Option<char>);
-        fn device_status(status: usize);
-        fn move_forward(cols: usize);
-        fn move_backward(cols: usize);
-        fn move_down_and_cr(rows: usize);
-        fn move_up_and_cr(rows: usize);
-        fn backspace();
-        fn carriage_return();
-        fn bell();
-        fn substitute();
-        fn set_horizontal_tabstop();
-        fn scroll_down(rows: usize);
-        fn insert_blank_lines(lines: usize);
-        fn delete_lines(lines: usize);
-        fn erase_chars(count: usize);
-        fn delete_chars(count: usize);
-        fn move_backward_tabs(count: u16);
-        fn move_forward_tabs(count: u16);
-        fn save_cursor_position();
-        fn restore_cursor_position();
-        fn clear_line(mode: ansi::LineClearMode);
-        fn clear_tabs(mode: ansi::TabulationClearMode);
-        fn set_tabs(interval: u16);
-        fn reverse_index();
-        fn terminal_attribute(attr: ansi::Attr);
-        fn set_mode(mode: ansi::Mode);
-        fn unset_mode(mode: ansi::Mode);
-        fn report_mode(mode: ansi::Mode);
-        fn report_private_mode(mode: ansi::PrivateMode);
-        fn set_keypad_application_mode();
-        fn unset_keypad_application_mode();
-        fn set_active_charset(index: ansi::CharsetIndex);
-        fn configure_charset(index: ansi::CharsetIndex, charset: ansi::StandardCharset);
-        fn set_color(index: usize, color: ansi::Rgb);
-        fn dynamic_color_sequence(prefix: String, index: usize, terminator: &str);
-        fn reset_color(index: usize);
-        fn clipboard_store(clipboard: u8, data: &[u8]);
-        fn clipboard_load(clipboard: u8, terminator: &str);
-        fn decaln();
-        fn push_title();
-        fn pop_title();
-        fn text_area_size_pixels();
-        fn text_area_size_chars();
-        fn set_hyperlink(hyperlink: Option<ansi::Hyperlink>);
-        fn set_mouse_cursor_icon(icon: ansi::cursor_icon::CursorIcon);
-        fn report_keyboard_mode();
-        fn push_keyboard_mode(mode: ansi::KeyboardModes);
-        fn pop_keyboard_modes(to_pop: u16);
-        fn set_keyboard_mode(mode: ansi::KeyboardModes, behavior: ansi::KeyboardModesApplyBehavior);
-        fn set_modify_other_keys(mode: ansi::ModifyOtherKeys);
-        fn report_modify_other_keys();
-        fn set_scp(char_path: ansi::ScpCharPath, update_mode: ansi::ScpUpdateMode);
-    }
-}
-
-fn advance_terminal_text<T: EventListener>(
-    tracker: &mut KittyGraphicsCursorTracker,
-    parser: &mut ansi::Processor,
-    term: &mut Term<T>,
-    bytes: &[u8],
-    track_scrolls: bool,
-    resize_anchor_state: Option<&crate::resize_anchor::ResizeAnchorState>,
-) -> KittyGraphicsTextEffects {
-    let mut effects = KittyGraphicsTextEffects::default();
-    {
-        let mut handler = KittyGraphicsTrackingHandler {
-            term,
-            tracker,
-            effects: &mut effects,
-            resize_anchor_state,
-            track_scrolls,
-        };
-        parser.advance(&mut handler, bytes);
-    }
-    effects
-}
-
-/// Apply Kitty's default post-placement cursor movement.
-///
-/// Moving down through the terminal handler keeps the placement attached to
-/// scrollback when it reaches the bottom row. A regular CSI cursor-down would
-/// clamp at the bottom instead, leaving most of a tall image off-screen.
-///
-/// Returns the number of scrolled lines that were not represented by history
-/// growth, so graphics anchors can follow alternate-screen, zero-history, and
-/// full-history row rotation.
-/// On Windows, `CreateProcessW` splits `lpCommandLine` on spaces to find the
-/// executable name when `lpApplicationName` is `NULL`.  A shell path that contains
-/// spaces (e.g. `C:\Program Files\PowerShell\7\pwsh.exe`) must therefore be
-/// wrapped in double-quotes so the entire path is treated as a single token.
-///
-/// This function is a no-op on non-Windows platforms.
-#[cfg(target_os = "windows")]
-fn quote_shell_program_if_needed(shell_path: &str) -> String {
-    // Already fully quoted (starts and ends with a double-quote): leave unchanged.
-    if shell_path.starts_with('"') && shell_path.ends_with('"') && shell_path.len() >= 2 {
-        return shell_path.to_string();
-    }
-    // No quoting required when the path contains no spaces.
-    if !shell_path.contains(' ') {
-        return shell_path.to_string();
-    }
-    // Escape any embedded double-quotes inside the path, then wrap in outer quotes.
-    // (Windows file names cannot legally contain '"', but we handle it defensively.)
-    let escaped = shell_path.replace('"', "\\\"");
-    format!("\"{}\"", escaped)
 }
 
 fn login_shell_args(shell_path: &str) -> Vec<String> {
@@ -752,7 +361,7 @@ fn login_shell_args(shell_path: &str) -> Vec<String> {
     // On Linux (and other non-macOS Unix), the user is already in a login
     // session, so sourcing all login scripts on every terminal open adds
     // unnecessary startup latency.  Launch an interactive non-login shell
-    // instead, which is the convention used by alacritty and other Linux
+    // instead, which is the convention used by Tmon and other Linux
     // terminal emulators.
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     match Path::new(shell_path)
@@ -931,15 +540,6 @@ fn default_shell_launch(runtime_config: &TerminalRuntimeConfig) -> ResolvedTermi
             args: login_shell_args(&shell_path),
         }
     }
-}
-
-fn launch_to_shell(launch: ResolvedTerminalLaunch) -> Shell {
-    #[cfg(target_os = "windows")]
-    let program = quote_shell_program_if_needed(&launch.program);
-    #[cfg(not(target_os = "windows"))]
-    let program = launch.program;
-
-    Shell::new(program, launch.args)
 }
 
 pub fn resolve_terminal_launch(
@@ -1183,16 +783,6 @@ fn default_working_directory_with_fallback(fallback: WorkingDirFallback) -> Opti
     env::current_dir().ok()
 }
 
-#[cfg(target_os = "windows")]
-fn pty_child_pid(pty: &tty::Pty) -> Option<u32> {
-    pty.child_watcher().pid().map(|pid| pid.get())
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn pty_child_pid(_pty: &tty::Pty) -> Option<u32> {
-    None
-}
-
 /// Events sent from the terminal to the view
 #[derive(Debug, Clone)]
 pub enum TerminalEvent {
@@ -1264,764 +854,6 @@ pub enum TerminalDamageSnapshot {
     Partial(Vec<TerminalDirtySpan>),
 }
 
-fn search_term_buffer<T: EventListener>(
-    term: &Term<T>,
-    query: &str,
-    options: TermySearchOptions,
-) -> Vec<TermySearchMatch> {
-    search_term_buffer_shared(term, query, options)
-        .into_iter()
-        .map(Into::into)
-        .collect()
-}
-
-fn search_term_buffer_shared<T: EventListener>(
-    term: &Term<T>,
-    query: &str,
-    options: TermySearchOptions,
-) -> Vec<TermySharedSearchMatch> {
-    let grid = term.grid();
-    let cols = grid.columns();
-    let history_size = grid.history_size();
-    let total_lines = grid.total_lines();
-    if cols == 0 || total_lines == 0 {
-        return Vec::new();
-    }
-
-    let lines = (0..total_lines).map(|absolute_row| {
-        let line = Line(absolute_row as i32 - history_size as i32);
-        (absolute_row, searchable_grid_line(term, line, cols))
-    });
-    search_lines_shared(lines, query, options)
-}
-
-fn searchable_grid_line<T: EventListener>(term: &Term<T>, line: Line, cols: usize) -> String {
-    let grid = term.grid();
-    let mut text = String::with_capacity(cols);
-    for col in 0..cols {
-        let cell = &grid[line][Column(col)];
-        let render_text = !cell
-            .flags
-            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN)
-            && cell.c != '\0'
-            && !cell.c.is_control();
-        text.push(if render_text { cell.c } else { ' ' });
-    }
-    let trimmed_len = text.trim_end().len();
-    text.truncate(trimmed_len);
-    text
-}
-
-/// Event listener that forwards alacritty events to our channel
-#[derive(Clone)]
-pub struct JsonEventListener {
-    events_tx: Sender<RuntimeEvent>,
-    wakeup_notifier: Option<TerminalWakeupNotifier>,
-    replay_suppressed: Arc<AtomicBool>,
-    wakeup_queued: Arc<AtomicBool>,
-    wakeup_signal_pending: Arc<AtomicBool>,
-    wakeup_enabled: Arc<AtomicBool>,
-}
-
-impl JsonEventListener {
-    #[cfg(test)]
-    fn new(events_tx: Sender<RuntimeEvent>, wake_tx: Option<Sender<()>>) -> Self {
-        let wakeup_notifier = wake_tx.map(|wake_tx| {
-            TerminalWakeupNotifier::new(move || {
-                let _ = wake_tx.try_send(());
-            })
-        });
-        Self::new_with_wakeup_notifier(events_tx, wakeup_notifier)
-    }
-
-    fn new_with_wakeup_notifier(
-        events_tx: Sender<RuntimeEvent>,
-        wakeup_notifier: Option<TerminalWakeupNotifier>,
-    ) -> Self {
-        Self {
-            events_tx,
-            wakeup_notifier,
-            replay_suppressed: Arc::new(AtomicBool::new(false)),
-            wakeup_queued: Arc::new(AtomicBool::new(false)),
-            wakeup_signal_pending: Arc::new(AtomicBool::new(false)),
-            wakeup_enabled: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    fn set_replay_suppressed(&self, suppressed: bool) {
-        self.replay_suppressed.store(suppressed, Ordering::Release);
-    }
-
-    fn set_wakeup_enabled(&self, enabled: bool) {
-        let was_enabled = self.wakeup_enabled.swap(enabled, Ordering::AcqRel);
-        if !enabled && was_enabled {
-            // A wake signal issued just before this terminal became hidden may
-            // be consumed without its queued event being drained. Remember that
-            // edge so reactivation nudges the host once more.
-            if self.wakeup_queued.load(Ordering::Acquire) {
-                self.wakeup_signal_pending.store(true, Ordering::Release);
-            }
-        } else if enabled && !was_enabled {
-            self.signal_pending_wakeup_if_enabled();
-        }
-    }
-
-    fn reset_wakeup_queued(&self) -> bool {
-        // Clear pending-signal state first. Any producer that observes the
-        // subsequent queued=false transition will publish fresh pending state,
-        // so this ordering cannot erase a newly queued wakeup.
-        self.wakeup_signal_pending.store(false, Ordering::Release);
-        self.wakeup_queued.swap(false, Ordering::AcqRel)
-    }
-
-    fn signal_pending_wakeup_if_enabled(&self) {
-        if self.wakeup_enabled.load(Ordering::Acquire)
-            && self.wakeup_signal_pending.swap(false, Ordering::AcqRel)
-        {
-            self.send_wake_signal();
-        }
-    }
-
-    fn send_wake_signal(&self) {
-        if let Some(wakeup_notifier) = &self.wakeup_notifier {
-            wakeup_notifier.notify();
-        }
-    }
-
-    fn send_terminal_event(&self, event: TerminalEvent) {
-        self.send_runtime_event(RuntimeEvent::Terminal(event));
-        self.send_wake_signal();
-    }
-
-    /// Queues an event unless the host has stopped draining and the event is
-    /// safe to shed. The channel is unbounded because the producer may hold
-    /// the terminal lock while sending and the drain path takes the same lock,
-    /// so blocking backpressure could deadlock; this soft cap is what keeps a
-    /// non-draining host (hidden pane, stalled UI) from growing the queue
-    /// without bound instead.
-    fn send_runtime_event(&self, event: RuntimeEvent) {
-        if should_drop_event(self.events_tx.len(), &event) {
-            return;
-        }
-        let _ = self.events_tx.send(event);
-    }
-}
-
-/// Soft cap on pending, undrained runtime events. Well above what a draining
-/// host ever accumulates (the per-frame drain batch is 2048), so shedding only
-/// starts once the host has clearly stopped consuming.
-const EVENT_QUEUE_SOFT_CAP: usize = 8192;
-
-/// Absolute ceiling on pending, undrained runtime events. Beyond the soft cap,
-/// reply-bearing events (query responses the child may block on) are normally
-/// never shed — but a host that has genuinely stopped draining (a hidden or
-/// stalled pane) running a child that spams device/color queries would grow the
-/// queue without bound, since those replies are exempt from the soft cap. This
-/// hard cap sheds *everything* once the backlog is this deep, trading a lost
-/// reply on an already-broken pane for a bounded memory footprint. A draining
-/// pane never approaches it (the per-frame drain batch is 2048, ~32x below
-/// this), so foreground correctness is unaffected.
-const EVENT_QUEUE_HARD_CAP: usize = 65_536;
-
-/// Decide whether a runtime event should be dropped rather than queued, given
-/// the current queue depth. Split out as a pure function so the shedding policy
-/// is unit-testable without a live event loop.
-fn should_drop_event(queue_len: usize, event: &RuntimeEvent) -> bool {
-    // Absolute ceiling: once the queue is this deep the host has clearly stopped
-    // draining, so shed even non-droppable (reply-bearing) events to keep memory
-    // bounded against a hostile child.
-    if queue_len >= EVENT_QUEUE_HARD_CAP {
-        return true;
-    }
-    // Soft cap: shed only latest-wins / cosmetic events; reply-bearing events
-    // stay queued so a responsive-but-busy host never loses a child's reply.
-    queue_len >= EVENT_QUEUE_SOFT_CAP && droppable_when_backlogged(event)
-}
-
-/// Whether an event can be shed once the queue is backlogged. State-refresh
-/// events are safe: they either carry latest-wins state that the next
-/// occurrence re-synchronizes (title, working directory, progress) or are
-/// cosmetic (bell, cursor state, shell integration marks). Everything else —
-/// exit, clipboard, and the query events whose drain-time replies the child
-/// process may block on — is always queued.
-fn droppable_when_backlogged(event: &RuntimeEvent) -> bool {
-    match event {
-        RuntimeEvent::Alacritty(event) => matches!(
-            event,
-            AlacEvent::Title(_)
-                | AlacEvent::ResetTitle
-                | AlacEvent::Bell
-                | AlacEvent::CursorBlinkingChange
-                | AlacEvent::MouseCursorDirty
-        ),
-        RuntimeEvent::Terminal(_) => true,
-    }
-}
-
-impl EventListener for JsonEventListener {
-    fn send_event(&self, event: AlacEvent) {
-        if self.replay_suppressed.load(Ordering::Acquire) {
-            return;
-        }
-        if matches!(event, AlacEvent::Wakeup) {
-            increment_runtime_wakeup_count();
-            if self.wakeup_queued.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            let _ = self.events_tx.send(RuntimeEvent::Alacritty(event));
-            // Publish pending state after queueing, then let either this producer
-            // or a concurrent hidden-to-visible transition claim the one signal.
-            self.wakeup_signal_pending.store(true, Ordering::Release);
-            self.signal_pending_wakeup_if_enabled();
-            return;
-        }
-        self.send_runtime_event(RuntimeEvent::Alacritty(event));
-        // This channel only nudges the UI thread to drain terminal events promptly.
-        self.send_wake_signal();
-    }
-}
-
-/// Sized to hold one `NATIVE_EVENT_LOOP_MAX_LOCKED_READ` parse budget: reads
-/// accumulate here while the UI holds the terminal lock, and once a full
-/// budget is buffered the reader blocks on the lock anyway (the kernel PTY
-/// buffer absorbs the rest), so larger sizes only dirty more per-pane thread
-/// stack for the lifetime of the session.
-const NATIVE_EVENT_LOOP_READ_BUFFER_SIZE: usize = 0x1_0000;
-const NATIVE_EVENT_LOOP_MAX_LOCKED_READ: usize = u16::MAX as usize;
-const NATIVE_EVENT_LOOP_POLL_EVENT_CAPACITY: usize = 8;
-#[cfg(not(target_os = "windows"))]
-const NATIVE_EVENT_LOOP_READ_WRITE_TOKEN: usize = 0;
-#[cfg(not(target_os = "windows"))]
-const NATIVE_EVENT_LOOP_CHILD_EVENT_TOKEN: usize = 1;
-#[cfg(target_os = "windows")]
-const NATIVE_EVENT_LOOP_READ_WRITE_TOKEN: usize = 2;
-#[cfg(target_os = "windows")]
-const NATIVE_EVENT_LOOP_CHILD_EVENT_TOKEN: usize = 1;
-
-#[derive(Debug, Clone)]
-enum RuntimeEvent {
-    Alacritty(AlacEvent),
-    Terminal(TerminalEvent),
-}
-
-#[derive(Debug)]
-enum EventLoopMsg {
-    Input(Cow<'static, [u8]>),
-    Shutdown,
-    Resize(WindowSize),
-    NudgeResize(WindowSize),
-}
-
-#[derive(Clone)]
-struct EventLoopSender {
-    sender: StdSender<EventLoopMsg>,
-    poller: Arc<Poller>,
-}
-
-impl EventLoopSender {
-    fn send(&self, msg: EventLoopMsg) -> io::Result<()> {
-        self.sender
-            .send(msg)
-            .map_err(|error| io::Error::new(ErrorKind::BrokenPipe, error.to_string()))?;
-        self.poller.notify()
-    }
-}
-
-struct Writing {
-    source: Cow<'static, [u8]>,
-    written: usize,
-}
-
-impl Writing {
-    fn new(source: Cow<'static, [u8]>) -> Self {
-        Self { source, written: 0 }
-    }
-
-    fn advance(&mut self, count: usize) {
-        self.written += count;
-    }
-
-    fn remaining_bytes(&self) -> &[u8] {
-        &self.source[self.written..]
-    }
-
-    fn finished(&self) -> bool {
-        self.written >= self.source.len()
-    }
-}
-
-struct PeekableReceiver<T> {
-    rx: StdReceiver<T>,
-    peeked: Option<T>,
-}
-
-impl<T> PeekableReceiver<T> {
-    fn new(rx: StdReceiver<T>) -> Self {
-        Self { rx, peeked: None }
-    }
-
-    fn peek(&mut self) -> Option<&T> {
-        if self.peeked.is_none() {
-            self.peeked = self.rx.try_recv().ok();
-        }
-
-        self.peeked.as_ref()
-    }
-
-    fn recv(&mut self) -> Option<T> {
-        if self.peeked.is_some() {
-            self.peeked.take()
-        } else {
-            match self.rx.try_recv() {
-                Err(TryRecvError::Disconnected) => panic!("event loop channel closed"),
-                res => res.ok(),
-            }
-        }
-    }
-}
-
-#[derive(Default)]
-struct NativeEventLoopState {
-    write_list: std::collections::VecDeque<Cow<'static, [u8]>>,
-    writing: Option<Writing>,
-    parser: ansi::Processor,
-    osc_interceptor: OscInterceptor,
-    kitty_graphics_interceptor: KittyGraphicsInterceptor,
-    kitty_graphics_cursor_tracker: KittyGraphicsCursorTracker,
-}
-
-impl NativeEventLoopState {
-    fn ensure_next(&mut self) {
-        if self.writing.is_none() {
-            self.goto_next();
-        }
-    }
-
-    fn goto_next(&mut self) {
-        self.writing = self.write_list.pop_front().map(Writing::new);
-    }
-
-    fn take_current(&mut self) -> Option<Writing> {
-        self.writing.take()
-    }
-
-    fn needs_write(&self) -> bool {
-        self.writing.is_some() || !self.write_list.is_empty()
-    }
-
-    fn set_current(&mut self, current: Option<Writing>) {
-        self.writing = current;
-    }
-}
-
-struct NativeRenderState {
-    terminal: Arc<FairMutex<Term<JsonEventListener>>>,
-    generation: Arc<AtomicU64>,
-    palette_revision: Arc<AtomicU64>,
-    palette_snapshot: Arc<FairMutex<crate::TerminalPalette>>,
-}
-
-impl NativeRenderState {
-    fn record_mutation<T: EventListener>(&self, term: &Term<T>) {
-        record_render_mutation(
-            term,
-            &self.generation,
-            &self.palette_revision,
-            &self.palette_snapshot,
-        );
-    }
-}
-
-fn refresh_palette_revision<T: EventListener>(
-    term: &Term<T>,
-    palette_revision: &AtomicU64,
-    palette_snapshot: &FairMutex<crate::TerminalPalette>,
-) {
-    let mut snapshot = palette_snapshot.lock();
-    if backend::palette_changed(term, &snapshot) {
-        let revision = palette_revision
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1);
-        *snapshot = backend::palette(term, revision);
-    }
-}
-
-fn record_render_mutation<T: EventListener>(
-    term: &Term<T>,
-    generation: &AtomicU64,
-    palette_revision: &AtomicU64,
-    palette_snapshot: &FairMutex<crate::TerminalPalette>,
-) {
-    generation.fetch_add(1, Ordering::Relaxed);
-    refresh_palette_revision(term, palette_revision, palette_snapshot);
-}
-
-fn stop_synchronized_update<T: EventListener>(
-    parser: &mut ansi::Processor,
-    term: &mut Term<T>,
-    generation: &AtomicU64,
-    palette_revision: &AtomicU64,
-    palette_snapshot: &FairMutex<crate::TerminalPalette>,
-) {
-    parser.stop_sync(term);
-    record_render_mutation(term, generation, palette_revision, palette_snapshot);
-}
-
-fn capture_viewport_ranges_at_generation<T: EventListener>(
-    term: &Term<T>,
-    current_generation: &AtomicU64,
-    requested_generation: u64,
-    spans: &[TerminalDirtySpan],
-) -> Option<Vec<backend::ViewportRangeCell>> {
-    (current_generation.load(Ordering::Relaxed) == requested_generation)
-        .then(|| backend::viewport_ranges(term, spans))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn move_graphics_cursor_and_record<T: EventListener>(
-    term: &mut Term<T>,
-    cols: u32,
-    rows: u32,
-    full_screen_scroll_region: bool,
-    generation: &AtomicU64,
-    palette_revision: &AtomicU64,
-    palette_snapshot: &FairMutex<crate::TerminalPalette>,
-) -> usize {
-    let untracked_scroll =
-        backend::move_graphics_cursor(term, cols, rows, full_screen_scroll_region);
-    record_render_mutation(term, generation, palette_revision, palette_snapshot);
-    untracked_scroll
-}
-
-struct NativeEventLoop {
-    poll: Arc<Poller>,
-    pty: tty::Pty,
-    rx: PeekableReceiver<EventLoopMsg>,
-    tx: StdSender<EventLoopMsg>,
-    render_state: NativeRenderState,
-    kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
-    kitty_graphics_revision: Arc<AtomicU64>,
-    resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
-    terminal_size: Arc<FairMutex<TerminalSize>>,
-    event_proxy: JsonEventListener,
-    drain_on_exit: bool,
-}
-
-impl NativeEventLoop {
-    fn new(
-        render_state: NativeRenderState,
-        kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
-        kitty_graphics_revision: Arc<AtomicU64>,
-        resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
-        terminal_size: Arc<FairMutex<TerminalSize>>,
-        event_proxy: JsonEventListener,
-        pty: tty::Pty,
-        drain_on_exit: bool,
-    ) -> io::Result<Self> {
-        let (tx, rx) = mpsc::channel();
-        Ok(Self {
-            poll: Poller::new()?.into(),
-            pty,
-            rx: PeekableReceiver::new(rx),
-            tx,
-            render_state,
-            kitty_graphics,
-            kitty_graphics_revision,
-            resize_anchor_state,
-            terminal_size,
-            event_proxy,
-            drain_on_exit,
-        })
-    }
-
-    fn channel(&self) -> EventLoopSender {
-        EventLoopSender {
-            sender: self.tx.clone(),
-            poller: self.poll.clone(),
-        }
-    }
-
-    fn drain_recv_channel(&mut self, state: &mut NativeEventLoopState) -> bool {
-        while let Some(msg) = self.rx.recv() {
-            match msg {
-                EventLoopMsg::Input(input) => state.write_list.push_back(input),
-                EventLoopMsg::Resize(window_size) => {
-                    state.kitty_graphics_cursor_tracker.reset_scroll_region();
-                    self.pty.on_resize(window_size);
-                }
-                EventLoopMsg::NudgeResize(window_size) => self.pty.on_resize(window_size),
-                EventLoopMsg::Shutdown => return false,
-            }
-        }
-
-        true
-    }
-
-    fn handle_osc_events(&self, osc_events: Vec<OscEvent>) {
-        for osc_event in osc_events {
-            self.event_proxy
-                .send_terminal_event(terminal_event_from_osc(osc_event));
-        }
-    }
-
-    fn pty_read(&mut self, state: &mut NativeEventLoopState, buf: &mut [u8]) -> io::Result<()> {
-        let mut parsed = 0usize;
-        let mut processed = 0usize;
-        let mut unprocessed = 0usize;
-        let mut graphics_changed = false;
-        let mut term_mutated = false;
-
-        let _terminal_lease = Some(self.render_state.terminal.lease());
-        let mut terminal = None;
-
-        loop {
-            // Whether this iteration pulled new bytes off the PTY. When the
-            // PTY is dry and the terminal lock is contended, looping back to
-            // read() would hot-spin a core; block on the lock instead.
-            let mut read_progressed = false;
-            match self.pty.reader().read(&mut buf[unprocessed..]) {
-                Ok(0) if unprocessed == 0 => break,
-                Ok(got) => {
-                    read_progressed = got > 0;
-                    unprocessed += got;
-                }
-                Err(err) => match err.kind() {
-                    ErrorKind::Interrupted | ErrorKind::WouldBlock => {
-                        if unprocessed == 0 {
-                            break;
-                        }
-                    }
-                    _ => return Err(err),
-                },
-            }
-
-            let terminal = match &mut terminal {
-                Some(terminal) => terminal,
-                None => terminal.insert(match self.render_state.terminal.try_lock_unfair() {
-                    None if !read_progressed
-                        || unprocessed >= NATIVE_EVENT_LOOP_READ_BUFFER_SIZE =>
-                    {
-                        self.render_state.terminal.lock_unfair()
-                    }
-                    None => continue,
-                    Some(terminal) => terminal,
-                }),
-            };
-
-            let (filtered, osc_events) = state.osc_interceptor.process(&buf[..unprocessed]);
-            processed = processed.saturating_add(filtered.len());
-            self.handle_osc_events(osc_events);
-
-            for item in state.kitty_graphics_interceptor.process(&filtered) {
-                match item {
-                    KittyGraphicsItem::Text(text) => {
-                        parsed = parsed.saturating_add(text.len());
-                        term_mutated = true;
-                        let track_scrolls = self.kitty_graphics.lock().has_placements();
-                        let effects = advance_terminal_text(
-                            &mut state.kitty_graphics_cursor_tracker,
-                            &mut state.parser,
-                            &mut **terminal,
-                            &text,
-                            track_scrolls,
-                            Some(&self.resize_anchor_state),
-                        );
-                        if !effects.is_empty() {
-                            graphics_changed |= effects.apply_to(&mut self.kitty_graphics.lock());
-                        }
-                    }
-                    KittyGraphicsItem::Command(command) => {
-                        let cursor = terminal.grid().cursor.point;
-                        let history_size = terminal.grid().history_size();
-                        let screen_lines = terminal.grid().screen_lines();
-                        let full_screen_scroll_region = state
-                            .kitty_graphics_cursor_tracker
-                            .region_covers_full_screen(screen_lines);
-                        let screen = KittyGraphicsScreen::from_alternate_screen(
-                            terminal.mode().contains(TermMode::ALT_SCREEN),
-                        );
-                        let size = *self.terminal_size.lock();
-                        let result = self.kitty_graphics.lock().apply_on_screen(
-                            command,
-                            cursor.column.0,
-                            cursor.line.0.max(0) as usize,
-                            history_size,
-                            size,
-                            screen,
-                        );
-                        graphics_changed |= result.changed;
-                        if let Some(response) = result.response {
-                            state.write_list.push_back(Cow::Owned(response));
-                        }
-                        if result.cursor_advance_screen == Some(screen)
-                            && let Some((cols, rows)) = result.cursor_advance
-                        {
-                            let untracked_scroll = move_graphics_cursor_and_record(
-                                &mut **terminal,
-                                cols,
-                                rows,
-                                full_screen_scroll_region,
-                                &self.render_state.generation,
-                                &self.render_state.palette_revision,
-                                &self.render_state.palette_snapshot,
-                            );
-                            if untracked_scroll > 0 {
-                                graphics_changed |= self
-                                    .kitty_graphics
-                                    .lock()
-                                    .scroll_up_without_history_on_screen(untracked_scroll, screen);
-                            }
-                        }
-                    }
-                }
-            }
-
-            unprocessed = 0;
-            if processed >= NATIVE_EVENT_LOOP_MAX_LOCKED_READ {
-                break;
-            }
-        }
-
-        if graphics_changed {
-            self.kitty_graphics_revision.fetch_add(1, Ordering::Relaxed);
-        }
-        if term_mutated && let Some(terminal) = terminal.as_deref() {
-            self.render_state.record_mutation(terminal);
-        }
-        if graphics_changed || (state.parser.sync_bytes_count() < parsed && parsed > 0) {
-            self.event_proxy.send_event(AlacEvent::Wakeup);
-        }
-
-        Ok(())
-    }
-
-    fn pty_write(&mut self, state: &mut NativeEventLoopState) -> io::Result<()> {
-        state.ensure_next();
-
-        'write_many: while let Some(mut current) = state.take_current() {
-            'write_one: loop {
-                match self.pty.writer().write(current.remaining_bytes()) {
-                    Ok(0) => {
-                        state.set_current(Some(current));
-                        break 'write_many;
-                    }
-                    Ok(count) => {
-                        current.advance(count);
-                        if current.finished() {
-                            state.goto_next();
-                            break 'write_one;
-                        }
-                    }
-                    Err(err) => {
-                        state.set_current(Some(current));
-                        match err.kind() {
-                            ErrorKind::Interrupted | ErrorKind::WouldBlock => break 'write_many,
-                            _ => return Err(err),
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn spawn(mut self) {
-        let _ = thread::spawn_named("PTY reader", move || {
-            let mut state = NativeEventLoopState::default();
-            let mut buf = [0u8; NATIVE_EVENT_LOOP_READ_BUFFER_SIZE];
-            let poll_mode = PollMode::Level;
-            let mut interest = PollingEvent::readable(NATIVE_EVENT_LOOP_READ_WRITE_TOKEN);
-
-            if unsafe { self.pty.register(&self.poll, interest, poll_mode) }.is_err() {
-                return;
-            }
-
-            // Only the PTY read/write source and child-exit source are
-            // registered. Reserving 1024 event slots dirtied tens of KiB per
-            // pane for a poll result that normally contains one or two items.
-            let mut events = Events::with_capacity(
-                NonZeroUsize::new(NATIVE_EVENT_LOOP_POLL_EVENT_CAPACITY).expect("non-zero"),
-            );
-
-            'event_loop: loop {
-                let timeout = self
-                    .rx
-                    .peek()
-                    .is_none()
-                    .then(|| state.parser.sync_timeout().sync_timeout())
-                    .flatten()
-                    .map(|deadline| deadline.saturating_duration_since(Instant::now()));
-
-                events.clear();
-                if self.poll.wait(&mut events, timeout).is_err() {
-                    break 'event_loop;
-                }
-
-                if events.is_empty() && self.rx.peek().is_none() {
-                    let mut term = self.render_state.terminal.lock();
-                    stop_synchronized_update(
-                        &mut state.parser,
-                        &mut term,
-                        &self.render_state.generation,
-                        &self.render_state.palette_revision,
-                        &self.render_state.palette_snapshot,
-                    );
-                    self.event_proxy.send_event(AlacEvent::Wakeup);
-                    continue;
-                }
-
-                if !self.drain_recv_channel(&mut state) {
-                    break 'event_loop;
-                }
-
-                for event in events.iter() {
-                    match event.key {
-                        NATIVE_EVENT_LOOP_CHILD_EVENT_TOKEN => {
-                            if let Some(tty::ChildEvent::Exited(_)) = self.pty.next_child_event() {
-                                if self.drain_on_exit {
-                                    let _ = self.pty_read(&mut state, &mut buf);
-                                }
-                                self.render_state.terminal.lock().exit();
-                                self.event_proxy.send_event(AlacEvent::Wakeup);
-                                break 'event_loop;
-                            }
-                        }
-                        NATIVE_EVENT_LOOP_READ_WRITE_TOKEN => {
-                            if event.is_interrupt() {
-                                continue;
-                            }
-
-                            if event.readable && self.pty_read(&mut state, &mut buf).is_err() {
-                                break 'event_loop;
-                            }
-
-                            if event.writable && self.pty_write(&mut state).is_err() {
-                                break 'event_loop;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                let needs_write = state.needs_write();
-                if needs_write != interest.writable {
-                    interest.writable = needs_write;
-                    if self
-                        .pty
-                        .reregister(&self.poll, interest, poll_mode)
-                        .is_err()
-                    {
-                        break 'event_loop;
-                    }
-                }
-            }
-
-            let _ = self.pty.deregister(&self.poll);
-        });
-    }
-}
-
 /// Terminal dimensions in cells and pixels
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TerminalSize {
@@ -2058,48 +890,6 @@ impl TerminalSize {
     }
 }
 
-impl From<TerminalSize> for WindowSize {
-    fn from(size: TerminalSize) -> Self {
-        // Kitty clients (and Grok's fit_image_to_cells) read TIOCGWINSZ
-        // ws_xpixel/ws_ypixel via these cell metrics. A zero here makes
-        // `cols * cell_width == 0`, which often causes clients to fall back
-        // to treating image pixels as cell counts and request full-screen
-        // placements.
-        WindowSize {
-            num_cols: size.cols,
-            num_lines: size.rows,
-            cell_width: size.cell_width.round().clamp(1.0, u16::MAX as f32) as u16,
-            cell_height: size.cell_height.round().clamp(1.0, u16::MAX as f32) as u16,
-        }
-    }
-}
-
-impl Dimensions for TerminalSize {
-    fn total_lines(&self) -> usize {
-        self.rows as usize
-    }
-
-    fn screen_lines(&self) -> usize {
-        self.rows as usize
-    }
-
-    fn columns(&self) -> usize {
-        self.cols as usize
-    }
-
-    fn last_column(&self) -> alacritty_terminal::index::Column {
-        alacritty_terminal::index::Column(self.cols.saturating_sub(1) as usize)
-    }
-
-    fn bottommost_line(&self) -> alacritty_terminal::index::Line {
-        alacritty_terminal::index::Line(i32::from(self.rows.saturating_sub(1)))
-    }
-
-    fn topmost_line(&self) -> alacritty_terminal::index::Line {
-        alacritty_terminal::index::Line(0)
-    }
-}
-
 /// The terminal state wrapper
 pub struct Terminal {
     backend: engine_backend::Backend,
@@ -2108,788 +898,6 @@ pub struct Terminal {
 
 mod engine_backend;
 mod tmon_backend;
-
-mod alacritty_backend {
-    use super::*;
-
-    /// Complete state for the retained Alacritty implementation.
-    ///
-    /// Keeping engine-owned state in one private value gives the public
-    /// terminal facade a single replacement boundary for the temporary
-    /// dual-backend phase.
-    pub(super) struct AlacrittyBackend {
-        term: Arc<FairMutex<Term<JsonEventListener>>>,
-        listener: JsonEventListener,
-        parser: FairMutex<ansi::Processor>,
-        kitty_graphics_interceptor: FairMutex<KittyGraphicsInterceptor>,
-        kitty_graphics_cursor_tracker: FairMutex<KittyGraphicsCursorTracker>,
-        kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
-        kitty_graphics_revision: Arc<AtomicU64>,
-        render_generation: Arc<AtomicU64>,
-        palette_revision: Arc<AtomicU64>,
-        palette_snapshot: Arc<FairMutex<crate::TerminalPalette>>,
-        resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
-        graphics_size: Arc<FairMutex<TerminalSize>>,
-        pty_tx: Option<EventLoopSender>,
-        events_rx: Receiver<RuntimeEvent>,
-        size: TerminalSize,
-        query_colors: TerminalQueryColors,
-        default_cursor_style: TerminalCursorStyle,
-        child_pid: Option<u32>,
-    }
-
-    impl AlacrittyBackend {
-        /// Create a terminal whose child is selected with a typed launch contract.
-        pub fn new_with_launch_and_wakeup_notifier(
-            size: TerminalSize,
-            configured_working_dir: Option<&str>,
-            wakeup_notifier: Option<TerminalWakeupNotifier>,
-            tab_title_shell_integration: Option<&TabTitleShellIntegration>,
-            runtime_config: Option<&TerminalRuntimeConfig>,
-            launch: Option<&TerminalLaunch>,
-        ) -> anyhow::Result<Self> {
-            let size = size.clamped();
-            let (events_tx, events_rx) = unbounded();
-            let runtime_config = runtime_config.cloned().unwrap_or_default();
-            let shell = launch_to_shell(resolve_terminal_launch(&runtime_config, launch)?);
-
-            let working_directory = resolve_launch_working_directory(
-                configured_working_dir,
-                runtime_config.working_dir_fallback,
-            );
-
-            let pty_options = PtyOptions {
-                shell: Some(shell),
-                working_directory,
-                env: terminal_environment_overrides(tab_title_shell_integration, &runtime_config),
-                drain_on_exit: true,
-                #[cfg(target_os = "windows")]
-                escape_args: true,
-            };
-
-            let term_config = backend::term_config(runtime_config.term_options());
-
-            let listener = JsonEventListener::new_with_wakeup_notifier(events_tx, wakeup_notifier);
-            let term = Term::new(term_config, &size, listener.clone());
-            let palette_snapshot = backend::palette(&term, 0);
-            let term = Arc::new(FairMutex::new(term));
-            let kitty_graphics = Arc::new(FairMutex::new(KittyGraphicsState::default()));
-            let kitty_graphics_revision = Arc::new(AtomicU64::new(0));
-            let render_generation = Arc::new(AtomicU64::new(0));
-            let palette_revision = Arc::new(AtomicU64::new(0));
-            let palette_snapshot = Arc::new(FairMutex::new(palette_snapshot));
-            let resize_anchor_state = Arc::new(crate::resize_anchor::ResizeAnchorState::default());
-            let graphics_size = Arc::new(FairMutex::new(size));
-
-            let window_id = 0;
-            let pty = tty::new(&pty_options, size.into(), window_id)?;
-            #[cfg(unix)]
-            let child_pid = Some(pty.child().id());
-            #[cfg(not(unix))]
-            let child_pid = pty_child_pid(&pty);
-
-            let event_loop = NativeEventLoop::new(
-                NativeRenderState {
-                    terminal: term.clone(),
-                    generation: render_generation.clone(),
-                    palette_revision: palette_revision.clone(),
-                    palette_snapshot: palette_snapshot.clone(),
-                },
-                kitty_graphics.clone(),
-                kitty_graphics_revision.clone(),
-                resize_anchor_state.clone(),
-                graphics_size.clone(),
-                listener.clone(),
-                pty,
-                pty_options.drain_on_exit,
-            )?;
-            let pty_tx = event_loop.channel();
-            event_loop.spawn();
-            log::info!(
-                "terminal runtime started; kitty graphics logging active (RUST_LOG=termy_core=debug for per-command detail)"
-            );
-
-            Ok(Self {
-                term,
-                listener,
-                parser: FairMutex::new(ansi::Processor::new()),
-                kitty_graphics_interceptor: FairMutex::new(KittyGraphicsInterceptor::default()),
-                kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
-                kitty_graphics,
-                kitty_graphics_revision,
-                render_generation,
-                palette_revision,
-                palette_snapshot,
-                resize_anchor_state,
-                graphics_size,
-                pty_tx: Some(pty_tx),
-                events_rx,
-                size,
-                query_colors: runtime_config.query_colors,
-                default_cursor_style: runtime_config.default_cursor_style,
-                child_pid,
-            })
-        }
-
-        /// Create a display-only terminal: a grid + parser with no PTY/shell. Its
-        /// content is supplied with [`Terminal::feed_output`] (e.g. tmux `%output`).
-        /// All rendering, sizing, and event draining work as for a normal terminal;
-        /// input (`write`) is a no-op since there is no child process.
-        #[cfg(test)]
-        pub fn new_display(
-            size: TerminalSize,
-            runtime_config: Option<&TerminalRuntimeConfig>,
-        ) -> Self {
-            Self::new_display_with_wakeup_notifier(size, runtime_config, None)
-        }
-
-        pub fn new_display_with_wakeup_notifier(
-            size: TerminalSize,
-            runtime_config: Option<&TerminalRuntimeConfig>,
-            wakeup_notifier: Option<TerminalWakeupNotifier>,
-        ) -> Self {
-            let size = size.clamped();
-            let (events_tx, events_rx) = unbounded();
-            let runtime_config = runtime_config.cloned().unwrap_or_default();
-            let term_config = backend::term_config(runtime_config.term_options());
-            let listener = JsonEventListener::new_with_wakeup_notifier(events_tx, wakeup_notifier);
-            let term = Term::new(term_config, &size, listener.clone());
-            let palette_snapshot = backend::palette(&term, 0);
-            let term = Arc::new(FairMutex::new(term));
-            let kitty_graphics = Arc::new(FairMutex::new(KittyGraphicsState::default()));
-            let kitty_graphics_revision = Arc::new(AtomicU64::new(0));
-            let render_generation = Arc::new(AtomicU64::new(0));
-            let palette_revision = Arc::new(AtomicU64::new(0));
-            let palette_snapshot = Arc::new(FairMutex::new(palette_snapshot));
-            let resize_anchor_state = Arc::new(crate::resize_anchor::ResizeAnchorState::default());
-
-            Self {
-                term,
-                listener,
-                parser: FairMutex::new(ansi::Processor::new()),
-                kitty_graphics_interceptor: FairMutex::new(KittyGraphicsInterceptor::default()),
-                kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
-                kitty_graphics,
-                kitty_graphics_revision,
-                render_generation,
-                palette_revision,
-                palette_snapshot,
-                resize_anchor_state,
-                graphics_size: Arc::new(FairMutex::new(size)),
-                pty_tx: None,
-                events_rx,
-                size,
-                query_colors: runtime_config.query_colors,
-                default_cursor_style: runtime_config.default_cursor_style,
-                child_pid: None,
-            }
-        }
-
-        /// Advance the grid with output bytes without involving a PTY. Used by
-        /// display-only terminals (tmux `%output`); damage is recorded so the next
-        /// render picks up the change.
-        pub fn feed_output(&self, bytes: &[u8]) {
-            if bytes.is_empty() {
-                return;
-            }
-            let committed = self.feed_output_to_parser(bytes);
-            if self.pty_tx.is_none() && committed {
-                self.listener.send_event(AlacEvent::Wakeup);
-            }
-        }
-
-        pub fn child_pid(&self) -> Option<u32> {
-            self.child_pid
-        }
-
-        pub fn set_wakeup_enabled(&self, enabled: bool) {
-            self.listener.set_wakeup_enabled(enabled);
-        }
-
-        /// Write bytes to the PTY (user input). No-op for display-only terminals.
-        pub fn write(&self, input: &[u8]) {
-            let _ = self.try_write(input);
-        }
-
-        /// Try to enqueue bytes for the PTY event loop.
-        pub fn try_write(&self, input: &[u8]) -> io::Result<()> {
-            if input.is_empty() || self.pty_tx.is_none() {
-                return Ok(());
-            }
-            self.try_write_owned(input.to_vec())
-        }
-
-        /// Try to enqueue owned bytes for the PTY event loop without copying.
-        /// No-op for display-only terminals.
-        pub fn try_write_owned(&self, input: Vec<u8>) -> io::Result<()> {
-            if input.is_empty() {
-                return Ok(());
-            }
-            if let Some(pty_tx) = &self.pty_tx {
-                pty_tx.send(EventLoopMsg::Input(input.into()))?;
-            }
-            Ok(())
-        }
-
-        /// Rehydrate saved terminal output into the in-memory grid without sending input to the PTY.
-        pub fn hydrate_output(&self, bytes: &[u8]) {
-            if bytes.is_empty() {
-                return;
-            }
-
-            self.listener.set_replay_suppressed(true);
-            self.feed_output_to_parser(bytes);
-            // A capture or persisted replay is a complete stream boundary.
-            // Commit any unterminated synchronized update, then discard only
-            // parser/interceptor fragments so they cannot consume live bytes.
-            {
-                let mut parser = self.parser.lock();
-                if parser.sync_bytes_count() > 0 {
-                    let mut term = self.term.lock();
-                    stop_synchronized_update(
-                        &mut parser,
-                        &mut term,
-                        &self.render_generation,
-                        &self.palette_revision,
-                        &self.palette_snapshot,
-                    );
-                }
-                *parser = ansi::Processor::new();
-            }
-            *self.kitty_graphics_interceptor.lock() = KittyGraphicsInterceptor::default();
-            self.listener.set_replay_suppressed(false);
-        }
-
-        fn feed_output_to_parser(&self, bytes: &[u8]) -> bool {
-            let mut interceptor = self.kitty_graphics_interceptor.lock();
-            let mut cursor_tracker = self.kitty_graphics_cursor_tracker.lock();
-            let mut parser = self.parser.lock();
-            let mut term = self.term.lock();
-            let mut graphics_changed = false;
-            let mut term_mutated = false;
-            for item in interceptor.process(bytes) {
-                match item {
-                    KittyGraphicsItem::Text(text) => {
-                        term_mutated = true;
-                        let track_scrolls = self.kitty_graphics.lock().has_placements();
-                        let effects = advance_terminal_text(
-                            &mut cursor_tracker,
-                            &mut parser,
-                            &mut term,
-                            &text,
-                            track_scrolls,
-                            Some(&self.resize_anchor_state),
-                        );
-                        if !effects.is_empty() {
-                            graphics_changed |= effects.apply_to(&mut self.kitty_graphics.lock());
-                        }
-                    }
-                    KittyGraphicsItem::Command(command) => {
-                        let cursor = term.grid().cursor.point;
-                        let full_screen_scroll_region =
-                            cursor_tracker.region_covers_full_screen(term.grid().screen_lines());
-                        let screen = KittyGraphicsScreen::from_alternate_screen(
-                            term.mode().contains(TermMode::ALT_SCREEN),
-                        );
-                        let result = self.kitty_graphics.lock().apply_on_screen(
-                            command,
-                            cursor.column.0,
-                            cursor.line.0.max(0) as usize,
-                            term.grid().history_size(),
-                            self.size,
-                            screen,
-                        );
-                        graphics_changed |= result.changed;
-                        if result.cursor_advance_screen == Some(screen)
-                            && let Some((cols, rows)) = result.cursor_advance
-                        {
-                            let untracked_scroll = move_graphics_cursor_and_record(
-                                &mut *term,
-                                cols,
-                                rows,
-                                full_screen_scroll_region,
-                                &self.render_generation,
-                                &self.palette_revision,
-                                &self.palette_snapshot,
-                            );
-                            if untracked_scroll > 0 {
-                                graphics_changed |= self
-                                    .kitty_graphics
-                                    .lock()
-                                    .scroll_up_without_history_on_screen(untracked_scroll, screen);
-                            }
-                        }
-                    }
-                }
-            }
-            if graphics_changed {
-                self.kitty_graphics_revision.fetch_add(1, Ordering::Relaxed);
-            }
-            if term_mutated {
-                self.record_render_mutation(&term);
-            }
-            parser.sync_bytes_count() == 0
-        }
-
-        pub fn try_write_str(&self, input: &str) -> io::Result<()> {
-            self.try_write(input.as_bytes())
-        }
-
-        /// Try to enqueue a PTY resize before changing the in-memory grid.
-        /// Identical sizes are ignored; use [`Self::try_nudge_resize`] when the
-        /// child needs a fresh `SIGWINCH` without a dimension change.
-        pub fn try_resize(&mut self, new_size: TerminalSize) -> io::Result<()> {
-            let new_size = new_size.clamped();
-            if self.size == new_size {
-                return Ok(());
-            }
-            if let Some(pty_tx) = &self.pty_tx {
-                pty_tx.send(EventLoopMsg::Resize(new_size.into()))?;
-            }
-            self.size = new_size;
-            *self.graphics_size.lock() = new_size;
-            let mut term = self.term.lock();
-            term.resize(new_size);
-            self.kitty_graphics_cursor_tracker
-                .lock()
-                .reset_scroll_region();
-            // Keep content bottom-anchored like Ghostty/Kitty: reflow can strand
-            // the prompt mid-screen above blank rows while the start of the
-            // output sits in scrollback — pull it back in.
-            if self.resize_anchor_state.allows_restore() {
-                crate::resize_anchor::restore_bottom_anchor(&mut term, new_size);
-            }
-            self.record_render_mutation(&term);
-            Ok(())
-        }
-
-        /// Re-send the current size to the PTY without touching the term grid.
-        pub fn try_nudge_resize(&self) -> io::Result<()> {
-            if let Some(pty_tx) = &self.pty_tx {
-                pty_tx.send(EventLoopMsg::NudgeResize(self.size.into()))?;
-            }
-            Ok(())
-        }
-
-        /// Get the current terminal size
-        pub fn size(&self) -> TerminalSize {
-            self.size
-        }
-
-        /// Snapshot visible Kitty graphics placements for a renderer.
-        pub fn kitty_graphics_placements(&self) -> Vec<KittyGraphicsRenderPlacement> {
-            self.kitty_graphics_snapshot().1
-        }
-
-        /// Monotonic revision for Kitty image or placement state.
-        pub fn kitty_graphics_revision(&self) -> u64 {
-            self.kitty_graphics_revision.load(Ordering::Relaxed)
-        }
-
-        /// Snapshot the current Kitty revision and visible placements together.
-        pub fn kitty_graphics_snapshot(&self) -> (u64, Vec<KittyGraphicsRenderPlacement>) {
-            let term = self.term.lock();
-            let grid = term.grid();
-            let screen = KittyGraphicsScreen::from_alternate_screen(
-                term.mode().contains(TermMode::ALT_SCREEN),
-            );
-            let placements = self.kitty_graphics.lock().render_placements_on_screen(
-                grid.history_size(),
-                grid.display_offset(),
-                grid.screen_lines(),
-                grid.columns(),
-                screen,
-            );
-            (
-                self.kitty_graphics_revision.load(Ordering::Relaxed),
-                placements,
-            )
-        }
-
-        /// Drain pending Alacritty events, writing reply bytes back to the PTY when required.
-        /// Returns the collected events and whether more events remain (batch limit hit).
-        pub fn drain_events(
-            &self,
-            host: &mut impl TerminalReplyHost,
-        ) -> (Vec<TerminalEvent>, bool) {
-            // Reset before probing the queue. A previous drain can consume a Wakeup
-            // queued concurrently while leaving the coalescing flag set. Another
-            // PTY update can then be folded into that flag without queueing a new
-            // event, so an empty queue still requires one final redraw.
-            let wakeup_was_queued = self.listener.reset_wakeup_queued();
-
-            // Consume the first item before allocating drain state so a coalesced
-            // or otherwise spurious host drain stays allocation-free without an
-            // `is_empty`/`try_recv` race.
-            let Ok(first_event) = self.events_rx.try_recv() else {
-                let events = if wakeup_was_queued {
-                    vec![TerminalEvent::Wakeup]
-                } else {
-                    Vec::new()
-                };
-                return (events, false);
-            };
-
-            drain_runtime_events(
-                first_event,
-                &self.events_rx,
-                self.size,
-                &self.term,
-                self.query_colors,
-                host,
-                |response| self.write(response),
-            )
-        }
-
-        pub fn set_query_colors(&mut self, query_colors: TerminalQueryColors) {
-            self.query_colors = query_colors;
-        }
-
-        fn record_render_mutation<T: EventListener>(&self, term: &Term<T>) {
-            record_render_mutation(
-                term,
-                &self.render_generation,
-                &self.palette_revision,
-                &self.palette_snapshot,
-            );
-        }
-
-        fn refresh_palette_revision<T: EventListener>(&self, term: &Term<T>) {
-            refresh_palette_revision(term, &self.palette_revision, &self.palette_snapshot);
-        }
-
-        pub fn palette(&self) -> crate::TerminalPalette {
-            let term = self.term.lock();
-            self.refresh_palette_revision(&term);
-            self.palette_snapshot.lock().clone()
-        }
-
-        /// Capture a renderer-neutral snapshot of the visible terminal frame.
-        pub fn snapshot(&self) -> TermyFrame {
-            self.with_term(|term| snapshot_from_term(term, self.size, self.query_colors))
-        }
-
-        /// Capture a damage-scoped visible-frame update for incremental renderers.
-        pub fn frame_update(&self, force_full: bool) -> TermyFrameUpdate {
-            self.with_term_mut(|term| {
-                let damage = if force_full {
-                    term.reset_damage();
-                    TerminalDamageSnapshot::Full
-                } else {
-                    backend::take_damage_snapshot(term)
-                };
-                snapshot_update_from_term(term, self.size, self.query_colors, damage)
-            })
-        }
-
-        /// Consume renderer-neutral damage with a generation for coherent partial reads.
-        pub fn take_render_damage_snapshot(&self) -> TerminalRenderDamageSnapshot {
-            let mut term = self.term.lock();
-            self.refresh_palette_revision(&term);
-            let damage = backend::take_damage_snapshot(&mut term);
-            TerminalRenderDamageSnapshot {
-                damage,
-                scrolls: Vec::new(),
-                generation: self.render_generation.load(Ordering::Relaxed),
-                palette_revision: self.palette_revision.load(Ordering::Relaxed),
-            }
-        }
-
-        /// Capture a coherent rich viewport read without exposing engine types.
-        pub fn render_read(&self, force_full: bool) -> TerminalRenderRead {
-            let mut term = self.term.lock();
-            self.refresh_palette_revision(&term);
-            let damage = if force_full {
-                term.reset_damage();
-                TerminalDamageSnapshot::Full
-            } else {
-                backend::take_damage_snapshot(&mut term)
-            };
-            let generation = self.render_generation.load(Ordering::Relaxed);
-            let cells = backend::visible_render_cells(&term);
-            let (display_offset, history_size) = backend::scroll_state(&term);
-            TerminalRenderRead {
-                metadata: TerminalViewportMetadata {
-                    cols: self.size.cols,
-                    rows: self.size.rows,
-                    cursor: backend::cursor_state(&term),
-                    display_offset,
-                    history_size,
-                    palette_revision: self.palette_revision.load(Ordering::Relaxed),
-                    generation,
-                },
-                palette: self.palette_snapshot.lock().clone(),
-                cells,
-                update: TerminalRenderDamageSnapshot {
-                    damage,
-                    scrolls: Vec::new(),
-                    generation,
-                    palette_revision: self.palette_revision.load(Ordering::Relaxed),
-                },
-            }
-        }
-
-        /// Visit visible rich cells and return coherent viewport metadata.
-        pub fn visit_viewport_cells(
-            &self,
-            mut visitor: impl FnMut(usize, i32, usize, &crate::TerminalRenderCell),
-        ) -> TerminalViewportMetadata {
-            let (metadata, batch) = {
-                let term = self.term.lock();
-                self.refresh_palette_revision(&term);
-                let batch = backend::viewport_cells(&term);
-                let (_, history_size) = backend::scroll_state(&term);
-                let metadata = TerminalViewportMetadata {
-                    cols: self.size.cols,
-                    rows: self.size.rows,
-                    cursor: backend::cursor_state(&term),
-                    display_offset: batch.display_offset,
-                    history_size,
-                    palette_revision: self.palette_revision.load(Ordering::Relaxed),
-                    generation: self.render_generation.load(Ordering::Relaxed),
-                };
-                (metadata, batch)
-            };
-            let cols = usize::from(metadata.cols);
-            for (index, cell) in batch.cells.iter().enumerate() {
-                let row = index / cols;
-                let line = row as i32 - batch.display_offset as i32;
-                visitor(batch.display_offset, line, index % cols, cell);
-            }
-            metadata
-        }
-
-        pub fn visit_viewport_ranges_at_generation(
-            &self,
-            generation: u64,
-            spans: &[TerminalDirtySpan],
-            mut visitor: impl FnMut(usize, usize, i32, usize, &crate::TerminalRenderCell),
-        ) -> bool {
-            let Some(cells) = ({
-                let term = self.term.lock();
-                capture_viewport_ranges_at_generation(
-                    &term,
-                    &self.render_generation,
-                    generation,
-                    spans,
-                )
-            }) else {
-                return false;
-            };
-            for cell in &cells {
-                visitor(
-                    cell.row,
-                    cell.display_offset,
-                    cell.line,
-                    cell.col,
-                    &cell.cell,
-                );
-            }
-            true
-        }
-
-        pub fn line_bounds(&self) -> (i32, i32) {
-            let term = self.term.lock();
-            backend::line_bounds(&term)
-        }
-
-        /// Visit a requested inclusive buffer-line range from one coherent engine state.
-        ///
-        /// The callback runs while the backend is locked and must not call back into
-        /// this terminal. Streaming cells under that lock keeps full-scrollback
-        /// persistence bounded instead of cloning every rich cell first.
-        pub fn visit_line_cells(
-            &self,
-            requested_first: i32,
-            requested_last: i32,
-            visitor: impl FnMut((i32, i32, usize), i32, usize, &crate::TerminalRenderCell),
-        ) -> (i32, i32, usize) {
-            let term = self.term.lock();
-            backend::visit_line_cells(&term, requested_first, requested_last, visitor)
-        }
-
-        /// Search the full terminal buffer and return match ranges in scrollback-relative rows.
-        pub fn search(&self, query: &str) -> Vec<TermySearchMatch> {
-            self.search_with_options(query, TermySearchOptions::default())
-        }
-
-        /// Search the full terminal buffer with explicit matching options.
-        pub fn search_with_options(
-            &self,
-            query: &str,
-            options: TermySearchOptions,
-        ) -> Vec<TermySearchMatch> {
-            self.with_term(|term| search_term_buffer(term, query, options))
-        }
-
-        /// Search the full terminal buffer while sharing line storage between
-        /// matches on the same row.
-        pub fn search_shared(&self, query: &str) -> Vec<TermySharedSearchMatch> {
-            self.search_shared_with_options(query, TermySearchOptions::default())
-        }
-
-        /// Allocation-efficient variant of [`Self::search_with_options`].
-        pub fn search_shared_with_options(
-            &self,
-            query: &str,
-            options: TermySearchOptions,
-        ) -> Vec<TermySharedSearchMatch> {
-            self.with_term(|term| search_term_buffer_shared(term, query, options))
-        }
-
-        /// The OSC 8 hyperlink under the given viewport cell, if any, expanded to
-        /// the contiguous same-link run on that row.
-        pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<crate::links::DetectedLink> {
-            self.with_term(|term| backend::hyperlink_at(term, row, col))
-        }
-
-        /// The OSC 8 or detected text link under the given viewport cell,
-        /// including links spanning soft-wrapped rows.
-        pub fn link_at(
-            &self,
-            row: usize,
-            col: usize,
-        ) -> Option<crate::links::DetectedViewportLink> {
-            self.with_term(|term| backend::link_at(term, row, col))
-        }
-
-        fn with_term<R>(&self, f: impl FnOnce(&Term<JsonEventListener>) -> R) -> R {
-            let term = self.term.lock();
-            f(&term)
-        }
-
-        /// Access the terminal for in-place mutation.
-        fn with_term_mut<R>(&self, f: impl FnOnce(&mut Term<JsonEventListener>) -> R) -> R {
-            let mut term = self.term.lock();
-            f(&mut term)
-        }
-
-        /// Consume and normalize terminal damage spans for incremental rendering.
-        pub fn take_damage_snapshot(&self) -> TerminalDamageSnapshot {
-            self.with_term_mut(backend::take_damage_snapshot)
-        }
-
-        /// Scroll the displayed viewport through scrollback history.
-        /// Positive deltas move up into history, negative deltas move down toward live output.
-        pub fn scroll_display(&self, delta_lines: i32) -> bool {
-            let mut term = self.term.lock();
-            let changed = backend::scroll_display(&mut term, delta_lines);
-            if changed {
-                self.record_render_mutation(&term);
-            }
-            changed
-        }
-
-        /// Scroll the displayed viewport to the bottom (live output) atomically.
-        /// Returns true if the scroll position changed.
-        pub fn scroll_to_bottom(&self) -> bool {
-            let mut term = self.term.lock();
-            let changed = backend::scroll_to_bottom(&mut term);
-            if changed {
-                self.record_render_mutation(&term);
-            }
-            changed
-        }
-
-        /// Purge scrollback history and snap the viewport back to live output.
-        /// Returns true if there was any history or scroll offset to clear.
-        pub fn clear_scrollback(&self) -> bool {
-            let mut term = self.term.lock();
-            let changed = backend::clear_scrollback(&mut term);
-            if changed {
-                self.record_render_mutation(&term);
-            }
-            changed
-        }
-
-        /// Return `(display_offset, history_size)` for viewport scrollbar rendering.
-        pub fn scroll_state(&self) -> (usize, usize) {
-            let term = self.term.lock();
-            backend::scroll_state(&term)
-        }
-
-        /// Get the cursor state the terminal currently intends to render.
-        pub fn cursor_state(&self) -> Option<TerminalCursorState> {
-            let term = self.term.lock();
-            backend::cursor_state(&term)
-        }
-
-        /// Returns the cursor position regardless of visibility (for IME positioning).
-        pub fn cursor_position(&self) -> (usize, usize) {
-            let term = self.term.lock();
-            backend::cursor_position(&term)
-        }
-
-        /// Check if there are pending events
-        #[allow(dead_code)]
-        pub fn has_pending_events(&self) -> bool {
-            !self.events_rx.is_empty()
-        }
-
-        /// Sync live term options derived from the current runtime configuration.
-        pub fn set_term_options(&self, options: TerminalOptions) {
-            let mut term = self.term.lock();
-            backend::apply_term_options(&mut term, options);
-            self.record_render_mutation(&term);
-        }
-
-        /// Change only the live scrollback cap, preserving cursor defaults.
-        pub fn set_scrollback_history(&self, scrollback_history: usize) {
-            self.set_term_options(TerminalOptions {
-                scrollback_history,
-                default_cursor_style: self.default_cursor_style,
-            });
-        }
-
-        /// Check if bracketed paste mode is enabled
-        pub fn bracketed_paste_mode(&self) -> bool {
-            let term = self.term.lock();
-            backend::bracketed_paste_mode(&term)
-        }
-
-        /// Return current xterm mouse-reporting mode bits.
-        pub fn mouse_mode(&self) -> TerminalMouseMode {
-            let term = self.term.lock();
-            backend::mouse_mode(*term.mode())
-        }
-
-        pub fn keyboard_mode(&self) -> TerminalKeyboardMode {
-            let term = self.term.lock();
-            backend::keyboard_mode(*term.mode())
-        }
-
-        /// Check if the terminal is currently in alternate screen mode
-        pub fn alternate_screen_mode(&self) -> bool {
-            let term = self.term.lock();
-            backend::alternate_screen_mode(&term)
-        }
-
-        #[cfg(test)]
-        pub(super) fn send_wakeup_for_test(&self) {
-            self.listener.send_event(AlacEvent::Wakeup);
-        }
-
-        #[cfg(test)]
-        pub(super) fn try_recv_event_for_test(&self) -> Option<RuntimeEvent> {
-            self.events_rx.try_recv().ok()
-        }
-
-        #[cfg(test)]
-        pub(super) fn event_queue_is_empty_for_test(&self) -> bool {
-            self.events_rx.is_empty()
-        }
-    }
-
-    impl Drop for AlacrittyBackend {
-        fn drop(&mut self) {
-            // Ensure the PTY event loop exits so PTY drop can terminate and
-            // reap the child process.
-            if let Some(pty_tx) = &self.pty_tx {
-                let _ = pty_tx.send(EventLoopMsg::Shutdown);
-            }
-        }
-    }
-}
 
 impl Terminal {
     /// The active engine name for diagnostics. Do not branch application
@@ -2978,17 +986,6 @@ impl Terminal {
             size,
             runtime_config,
             wakeup_notifier,
-        ))
-    }
-
-    #[cfg(test)]
-    fn new_alacritty_display_for_test(
-        size: TerminalSize,
-        runtime_config: Option<&TerminalRuntimeConfig>,
-    ) -> Self {
-        Self::from_backend_selection(engine_backend::Backend::new_alacritty_display_for_test(
-            size,
-            runtime_config,
         ))
     }
 
@@ -3232,148 +1229,23 @@ impl Terminal {
     }
 }
 
-/// Maximum number of alacritty events to drain in a single frame. Prevents
-/// massive output (e.g. `cat huge_file`) from blocking the render thread.
-const EVENT_DRAIN_BATCH_LIMIT: usize = 2048;
-
-/// Drain pending events, returning the collected terminal events and whether
-/// the batch limit was hit (indicating more events remain).
-fn drain_runtime_events<T: EventListener>(
-    first_event: RuntimeEvent,
-    events_rx: &Receiver<RuntimeEvent>,
-    size: TerminalSize,
-    term: &FairMutex<Term<T>>,
-    query_colors: TerminalQueryColors,
-    host: &mut impl TerminalReplyHost,
-    mut write_reply: impl FnMut(&[u8]),
-) -> (Vec<TerminalEvent>, bool) {
-    let fallback_live_colors = alacritty_terminal::term::color::Colors::default();
-    let mut events = Vec::with_capacity(16);
-    let mut drained = 0usize;
-    let mut wakeup_pending = false;
-
-    let mut next_event = Some(first_event);
-    while let Some(runtime_event) = next_event.take().or_else(|| events_rx.try_recv().ok()) {
-        match runtime_event {
-            RuntimeEvent::Alacritty(event) => {
-                let response = match &event {
-                    AlacEvent::ColorRequest(_, _) => {
-                        let term = term.lock();
-                        reply_bytes_for_event(&event, size, term.colors(), query_colors, host)
-                    }
-                    _ => reply_bytes_for_event(
-                        &event,
-                        size,
-                        &fallback_live_colors,
-                        query_colors,
-                        host,
-                    ),
-                };
-
-                if let Some(response) = response {
-                    write_reply(&response);
-                }
-
-                if let Some(event) = terminal_event_from_alacritty(event) {
-                    push_drained_terminal_event(&mut events, &mut wakeup_pending, event);
-                }
-            }
-            RuntimeEvent::Terminal(event) => {
-                push_drained_terminal_event(&mut events, &mut wakeup_pending, event);
-            }
-        }
-
-        drained += 1;
-        if drained >= EVENT_DRAIN_BATCH_LIMIT {
-            flush_pending_wakeup(&mut events, &mut wakeup_pending);
-            return (events, true);
-        }
-    }
-
-    flush_pending_wakeup(&mut events, &mut wakeup_pending);
-    (events, false)
-}
-
-fn push_drained_terminal_event(
-    events: &mut Vec<TerminalEvent>,
-    wakeup_pending: &mut bool,
-    event: TerminalEvent,
-) {
-    if matches!(event, TerminalEvent::Wakeup) {
-        *wakeup_pending = true;
-        return;
-    }
-
-    flush_pending_wakeup(events, wakeup_pending);
-    events.push(event);
-}
-
-fn flush_pending_wakeup(events: &mut Vec<TerminalEvent>, wakeup_pending: &mut bool) {
-    if *wakeup_pending {
-        events.push(TerminalEvent::Wakeup);
-        *wakeup_pending = false;
-    }
-}
-
-fn terminal_event_from_alacritty(event: AlacEvent) -> Option<TerminalEvent> {
-    match event {
-        AlacEvent::Wakeup => Some(TerminalEvent::Wakeup),
-        AlacEvent::Title(title) => Some(TerminalEvent::Title(title)),
-        AlacEvent::ResetTitle => Some(TerminalEvent::ResetTitle),
-        AlacEvent::Bell => Some(TerminalEvent::Bell),
-        AlacEvent::Exit => Some(TerminalEvent::Exit),
-        AlacEvent::ClipboardStore(_, text) => Some(TerminalEvent::ClipboardStore(text)),
-        _ => None,
-    }
-}
-
-fn terminal_event_from_osc(event: OscEvent) -> TerminalEvent {
-    match event {
-        OscEvent::WorkingDirectory(path) => TerminalEvent::WorkingDirectory(path),
-        OscEvent::Progress(state) => TerminalEvent::Progress(state),
-        OscEvent::ShellPromptStart => TerminalEvent::ShellPromptStart,
-        OscEvent::ShellCommandStart => TerminalEvent::ShellCommandStart,
-        OscEvent::ShellCommandExecuting => TerminalEvent::ShellCommandExecuting,
-        OscEvent::ShellCommandFinished(code) => TerminalEvent::ShellCommandFinished(code),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_TERM, EVENT_QUEUE_HARD_CAP, EVENT_QUEUE_SOFT_CAP, GHOSTTY_COMPAT_TERM_PROGRAM,
-        GHOSTTY_COMPAT_TERM_PROGRAM_VERSION, JsonEventListener, KittyGraphicsCursorTracker,
-        MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MAX_TERMINAL_SCROLLBACK_HISTORY, RuntimeEvent,
-        TERMY_TERM_PROGRAM, Terminal, TerminalCursorState, TerminalCursorStyle,
-        TerminalDamageSnapshot, TerminalEvent, TerminalLaunch, TerminalOptions,
-        TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
-        WorkingDirFallback, advance_terminal_text, capture_viewport_ranges_at_generation,
-        drain_runtime_events, normalize_working_directory_candidate,
+        DEFAULT_TERM, GHOSTTY_COMPAT_TERM_PROGRAM, GHOSTTY_COMPAT_TERM_PROGRAM_VERSION,
+        MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MAX_TERMINAL_SCROLLBACK_HISTORY, TERMY_TERM_PROGRAM,
+        Terminal, TerminalCursorState, TerminalCursorStyle, TerminalDamageSnapshot, TerminalLaunch,
+        TerminalOptions, TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
+        WorkingDirFallback, normalize_working_directory_candidate,
         resolve_launch_working_directory, resolve_shell_path, resolve_terminal_launch,
-        search_term_buffer, should_drop_event, stop_synchronized_update,
-        terminal_environment_overrides, terminal_event_from_osc, user_home_dir,
+        terminal_environment_overrides, user_home_dir,
     };
     #[cfg(target_os = "windows")]
-    use super::{
-        default_shell_launch, quote_shell_program_if_needed, windows_cmd_path,
-        windows_git_bash_path,
-    };
-    use crate::backend;
+    use super::{default_shell_launch, windows_cmd_path, windows_git_bash_path};
     use crate::keyboard::{
         Keystroke, Modifiers, TerminalKeyEventKind, TerminalKeyboardMode, keystroke_to_input,
     };
-    use crate::protocol::{TerminalClipboardTarget, TerminalQueryColors, TerminalReplyHost};
-    use crate::resize_anchor::ResizeAnchorState;
-    use crate::search::TermySearchOptions;
-    use alacritty_terminal::{
-        event::{Event as AlacEvent, EventListener, VoidListener, WindowSize},
-        grid::Dimensions,
-        index::{Column, Line},
-        sync::FairMutex,
-        term::{ClipboardType, Config as TermConfig, Term, TermMode},
-        vte::ansi::{self, CursorShape, NamedColor},
-    };
-    use flume::unbounded;
+    use crate::protocol::{TerminalClipboardTarget, TerminalReplyHost};
     use std::collections::HashMap;
     use std::sync::{
         Arc,
@@ -3451,54 +1323,6 @@ mod tests {
             |_, _, _, _, _| visited += 1,
         ));
         assert_eq!(visited, 0);
-    }
-
-    #[test]
-    fn synchronized_update_watchdog_replay_rejects_old_render_generation() {
-        let size = test_terminal_size();
-        let listener = VoidListener;
-        let mut term = Term::new(TermConfig::default(), &size, listener);
-        let palette_snapshot = FairMutex::new(backend::palette(&term, 0));
-        let generation = AtomicU64::new(0);
-        let palette_revision = AtomicU64::new(0);
-        let mut parser = ansi::Processor::new();
-
-        parser.advance(&mut term, b"\x1b[?2026h\x1b]4;1;#123456\x07X");
-        let old_generation = generation.load(Ordering::Relaxed);
-        assert_eq!(term.grid()[Line(0)][Column(0)].c, ' ');
-
-        stop_synchronized_update(
-            &mut parser,
-            &mut term,
-            &generation,
-            &palette_revision,
-            &palette_snapshot,
-        );
-
-        assert_eq!(term.grid()[Line(0)][Column(0)].c, 'X');
-        assert!(generation.load(Ordering::Relaxed) > old_generation);
-        assert!(
-            capture_viewport_ranges_at_generation(
-                &term,
-                &generation,
-                old_generation,
-                &[crate::TerminalDirtySpan {
-                    row: 0,
-                    left_col: 0,
-                    right_col: 0,
-                }],
-            )
-            .is_none()
-        );
-        assert!(palette_revision.load(Ordering::Relaxed) > 0);
-        assert_eq!(
-            palette_snapshot.lock().indexed[1],
-            Some(crate::TerminalColor {
-                r: 0x12,
-                g: 0x34,
-                b: 0x56,
-            })
-        );
     }
 
     #[test]
@@ -3676,167 +1500,6 @@ mod tests {
     }
 
     #[test]
-    fn deccolm_resets_tracked_scroll_region() {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser = ansi::Processor::new();
-        let mut tracker = KittyGraphicsCursorTracker::default();
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[2;3r",
-            false,
-            None,
-        );
-        assert!(!tracker.region_covers_full_screen(4));
-
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[?3h",
-            false,
-            None,
-        );
-        assert!(tracker.region_covers_full_screen(4));
-
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[2;3r\x1b[?3l",
-            false,
-            None,
-        );
-        assert!(tracker.region_covers_full_screen(4));
-    }
-
-    #[test]
-    fn primary_ed2_suppresses_resize_anchor_until_live_output_reaches_bottom() {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser = ansi::Processor::new();
-        let mut tracker = KittyGraphicsCursorTracker::default();
-        let state = ResizeAnchorState::default();
-
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[2Jx",
-            false,
-            Some(&state),
-        );
-        assert!(!state.allows_restore());
-
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\r\n1\r\n2\r\n3",
-            false,
-            Some(&state),
-        );
-        assert!(state.allows_restore());
-    }
-
-    #[test]
-    fn alternate_ed2_does_not_suppress_primary_resize_anchor() {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser = ansi::Processor::new();
-        let mut tracker = KittyGraphicsCursorTracker::default();
-        let state = ResizeAnchorState::default();
-
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[?1049h\x1b[2J",
-            false,
-            Some(&state),
-        );
-
-        assert!(state.allows_restore());
-    }
-
-    #[test]
-    fn history_clear_and_terminal_reset_release_resize_anchor_suppression() {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser = ansi::Processor::new();
-        let mut tracker = KittyGraphicsCursorTracker::default();
-        let state = ResizeAnchorState::default();
-
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[2J",
-            false,
-            Some(&state),
-        );
-        assert!(!state.allows_restore());
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[3J",
-            false,
-            Some(&state),
-        );
-        assert!(state.allows_restore());
-
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[2J",
-            false,
-            Some(&state),
-        );
-        assert!(!state.allows_restore());
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1bc",
-            false,
-            Some(&state),
-        );
-        assert!(state.allows_restore());
-    }
-
-    #[test]
-    fn invalid_omitted_bottom_decstbm_preserves_tracked_region() {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser = ansi::Processor::new();
-        let mut tracker = KittyGraphicsCursorTracker::default();
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[2;3r",
-            false,
-            None,
-        );
-        assert!(!tracker.region_covers_full_screen(4));
-
-        advance_terminal_text(
-            &mut tracker,
-            &mut parser,
-            &mut term,
-            b"\x1b[99r",
-            false,
-            None,
-        );
-
-        assert!(!tracker.region_covers_full_screen(4));
-    }
-
-    #[test]
     fn kitty_cursor_advance_does_not_scroll_partial_decstbm_region() {
         let terminal = Terminal::new_display(test_terminal_size(), None);
         terminal.feed_output(
@@ -3920,21 +1583,6 @@ mod tests {
     }
 
     #[test]
-    fn kitty_cursor_advance_caps_linefeeds_to_screen_height() {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, b"\x1b[4;1H");
-
-        let untracked_scroll = backend::move_graphics_cursor(&mut term, u32::MAX, u32::MAX, true);
-
-        assert_eq!(untracked_scroll, 0);
-        assert_eq!(term.grid().history_size(), size.rows as usize);
-        assert_eq!(term.grid().cursor.point.column.0, size.cols as usize - 1);
-        assert_eq!(term.grid().cursor.point.line.0, i32::from(size.rows) - 1);
-    }
-
-    #[test]
     fn terminal_size_clamp_leaves_realistic_dimensions_untouched() {
         let clamped = TerminalSize {
             cols: 200,
@@ -3945,27 +1593,6 @@ mod tests {
         .clamped();
         assert_eq!(clamped.cols, 200);
         assert_eq!(clamped.rows, 60);
-    }
-
-    #[test]
-    fn window_size_cell_metrics_round_and_never_report_zero() {
-        let rounded = WindowSize::from(TerminalSize {
-            cols: 80,
-            rows: 24,
-            cell_width: 9.6,
-            cell_height: 18.4,
-        });
-        assert_eq!(rounded.cell_width, 10);
-        assert_eq!(rounded.cell_height, 18);
-
-        let tiny = WindowSize::from(TerminalSize {
-            cols: 80,
-            rows: 24,
-            cell_width: 0.2,
-            cell_height: 0.0,
-        });
-        assert_eq!(tiny.cell_width, 1);
-        assert_eq!(tiny.cell_height, 1);
     }
 
     #[test]
@@ -4030,34 +1657,6 @@ mod tests {
         assert_eq!(terminal.scroll_state().1, 5);
     }
 
-    #[test]
-    fn hard_cap_sheds_reply_bearing_events_when_backlogged() {
-        // A device-attributes reply the child may block on: exempt from the soft
-        // cap, but the hard cap must shed it to keep memory bounded against a
-        // hostile child on a non-draining pane.
-        let reply = RuntimeEvent::Alacritty(AlacEvent::PtyWrite("\x1b[?6c".to_string()));
-        assert!(should_drop_event(EVENT_QUEUE_HARD_CAP, &reply));
-        assert!(should_drop_event(EVENT_QUEUE_HARD_CAP + 1, &reply));
-    }
-
-    #[test]
-    fn reply_bearing_events_survive_below_hard_cap() {
-        let reply = RuntimeEvent::Alacritty(AlacEvent::PtyWrite("\x1b[?6c".to_string()));
-        // Even past the soft cap, a reply stays queued for a responsive host
-        // until the absolute ceiling is reached.
-        assert!(!should_drop_event(0, &reply));
-        assert!(!should_drop_event(EVENT_QUEUE_SOFT_CAP, &reply));
-        assert!(!should_drop_event(EVENT_QUEUE_HARD_CAP - 1, &reply));
-    }
-
-    #[test]
-    fn cosmetic_events_shed_at_soft_cap() {
-        // Bell is latest-wins/cosmetic: shed once the soft cap is hit, kept below.
-        let bell = RuntimeEvent::Alacritty(AlacEvent::Bell);
-        assert!(!should_drop_event(EVENT_QUEUE_SOFT_CAP - 1, &bell));
-        assert!(should_drop_event(EVENT_QUEUE_SOFT_CAP, &bell));
-    }
-
     fn test_terminal_size() -> TerminalSize {
         TerminalSize {
             cols: 32,
@@ -4067,21 +1666,10 @@ mod tests {
         }
     }
 
-    fn cursor_after_bytes(input: &[u8]) -> (usize, i32) {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, input);
-        let point = term.grid().cursor.point;
-        (point.column.0, point.line.0)
-    }
-
-    fn term_after_bytes(input: &[u8]) -> Term<VoidListener> {
-        let size = test_terminal_size();
-        let mut term: Term<VoidListener> = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, input);
-        term
+    fn cursor_after_bytes(input: &[u8]) -> (usize, usize) {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        terminal.feed_output(input);
+        terminal.cursor_position()
     }
 
     #[test]
@@ -4092,17 +1680,16 @@ mod tests {
             cell_width: 9.0,
             cell_height: 18.0,
         };
-        let config = TermConfig {
-            scrolling_history: 8,
-            ..TermConfig::default()
+        let config = TerminalRuntimeConfig {
+            scrollback_history: 8,
+            ..TerminalRuntimeConfig::default()
         };
-        let mut term: Term<VoidListener> = Term::new(config, &size, VoidListener);
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        parser.advance(&mut term, b"alpha\r\nbeta\r\ngamma");
+        let terminal = Terminal::new_display(size, Some(&config));
+        terminal.feed_output(b"alpha\r\nbeta\r\ngamma");
 
-        let matches = search_term_buffer(&term, "alpha", TermySearchOptions::default());
+        let matches = terminal.search("alpha");
 
-        assert_eq!(term.grid().history_size(), 1);
+        assert_eq!(terminal.scroll_state().1, 1);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].row, 0);
         assert_eq!(matches[0].start_col, 0);
@@ -4142,8 +1729,10 @@ mod tests {
         TerminalKeyboardMode::default()
     }
 
-    fn keyboard_mode(flags: TermMode) -> TerminalKeyboardMode {
-        backend::keyboard_mode(flags)
+    fn keyboard_mode_after_bytes(input: &[u8]) -> TerminalKeyboardMode {
+        let terminal = Terminal::new_display(test_terminal_size(), None);
+        terminal.feed_output(input);
+        terminal.keyboard_mode()
     }
 
     #[derive(Default)]
@@ -4157,19 +1746,6 @@ mod tests {
             self.requested_targets.push(target);
             self.clipboard_text.clone()
         }
-    }
-
-    #[test]
-    fn terminal_size_dimensions_saturate_bottommost_line_for_zero_rows() {
-        let size = TerminalSize {
-            cols: 0,
-            rows: 0,
-            cell_width: 9.0,
-            cell_height: 18.0,
-        };
-
-        assert_eq!(size.last_column().0, 0);
-        assert_eq!(size.bottommost_line().0, 0);
     }
 
     #[test]
@@ -4209,425 +1785,6 @@ mod tests {
             normalize_working_directory_candidate(Some("~")).as_deref(),
             Some(expected.as_str())
         );
-    }
-
-    #[test]
-    fn drain_runtime_events_replays_replies_and_collects_runtime_events() {
-        let (events_tx, events_rx) = unbounded();
-        events_tx
-            .send(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::PtyWrite("\x1b[?6c".to_string()),
-            ))
-            .unwrap();
-        events_tx
-            .send(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::TextAreaSizeRequest(Arc::new(|window_size| {
-                    format!("size:{}x{}", window_size.num_cols, window_size.num_lines)
-                })),
-            ))
-            .unwrap();
-        events_tx
-            .send(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::ClipboardLoad(
-                    ClipboardType::Selection,
-                    Arc::new(|text| format!("clip:{text}")),
-                ),
-            ))
-            .unwrap();
-        events_tx
-            .send(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::ColorRequest(
-                    NamedColor::Foreground as usize,
-                    Arc::new(|color| format!("fg:{:02x}{:02x}{:02x}", color.r, color.g, color.b)),
-                ),
-            ))
-            .unwrap();
-        events_tx
-            .send(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::Wakeup,
-            ))
-            .unwrap();
-        events_tx
-            .send(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::Title("shell title".to_string()),
-            ))
-            .unwrap();
-        events_tx
-            .send(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::ClipboardStore(
-                    ClipboardType::Clipboard,
-                    "stored text".to_string(),
-                ),
-            ))
-            .unwrap();
-        events_tx
-            .send(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::Exit,
-            ))
-            .unwrap();
-        drop(events_tx);
-
-        let term = FairMutex::new(term_after_bytes(b"\x1b]10;#123456\x07"));
-        let mut reply_host = RecordingReplyHost {
-            clipboard_text: Some("payload".to_string()),
-            requested_targets: Vec::new(),
-        };
-        let mut replies = Vec::new();
-
-        let first_event = events_rx.try_recv().expect("queued runtime event");
-        let (events, _has_more) = drain_runtime_events(
-            first_event,
-            &events_rx,
-            test_terminal_size(),
-            &term,
-            TerminalQueryColors::default(),
-            &mut reply_host,
-            |response| replies.push(String::from_utf8(response.to_vec()).unwrap()),
-        );
-
-        assert_eq!(
-            replies,
-            vec![
-                "\x1b[?6c".to_string(),
-                "size:32x4".to_string(),
-                "clip:payload".to_string(),
-                "fg:123456".to_string(),
-            ]
-        );
-        assert_eq!(
-            reply_host.requested_targets,
-            vec![TerminalClipboardTarget::Selection]
-        );
-        assert!(matches!(
-            events.as_slice(),
-            [
-                TerminalEvent::Wakeup,
-                TerminalEvent::Title(title),
-                TerminalEvent::ClipboardStore(text),
-                TerminalEvent::Exit,
-            ] if title == "shell title" && text == "stored text"
-        ));
-    }
-
-    #[test]
-    fn drain_runtime_events_includes_custom_osc_progress_events() {
-        let (events_tx, events_rx) = unbounded();
-        events_tx
-            .send(RuntimeEvent::Terminal(terminal_event_from_osc(
-                crate::osc_intercept::OscEvent::Progress(
-                    crate::shell_integration::ProgressState::Indeterminate,
-                ),
-            )))
-            .unwrap();
-        drop(events_tx);
-
-        let term = FairMutex::new(term_after_bytes(b""));
-        let mut reply_host = RecordingReplyHost::default();
-
-        let first_event = events_rx.try_recv().expect("queued runtime event");
-        let (events, has_more) = drain_runtime_events(
-            first_event,
-            &events_rx,
-            test_terminal_size(),
-            &term,
-            TerminalQueryColors::default(),
-            &mut reply_host,
-            |_| {},
-        );
-
-        assert!(!has_more);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
-            TerminalEvent::Progress(crate::shell_integration::ProgressState::Indeterminate)
-        ));
-    }
-
-    #[test]
-    fn drain_runtime_events_coalesces_consecutive_wakeups() {
-        let (events_tx, events_rx) = unbounded();
-        for _ in 0..128 {
-            events_tx
-                .send(RuntimeEvent::Alacritty(
-                    alacritty_terminal::event::Event::Wakeup,
-                ))
-                .unwrap();
-        }
-        events_tx
-            .send(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::Title("ready".to_string()),
-            ))
-            .unwrap();
-        drop(events_tx);
-
-        let term = FairMutex::new(term_after_bytes(b""));
-        let mut reply_host = RecordingReplyHost::default();
-
-        let first_event = events_rx.try_recv().expect("queued runtime event");
-        let (events, has_more) = drain_runtime_events(
-            first_event,
-            &events_rx,
-            test_terminal_size(),
-            &term,
-            TerminalQueryColors::default(),
-            &mut reply_host,
-            |_| {},
-        );
-
-        assert!(!has_more);
-        assert!(matches!(
-            events.as_slice(),
-            [TerminalEvent::Wakeup, TerminalEvent::Title(title)] if title == "ready"
-        ));
-    }
-
-    #[test]
-    fn json_event_listener_coalesces_queued_wakeups_until_reset() {
-        let (events_tx, events_rx) = unbounded();
-        let (wake_tx, wake_rx) = unbounded();
-        let listener = JsonEventListener::new(events_tx, Some(wake_tx));
-
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-
-        let events: Vec<_> = events_rx.try_iter().collect();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0],
-            RuntimeEvent::Alacritty(alacritty_terminal::event::Event::Wakeup)
-        ));
-        assert_eq!(wake_rx.try_iter().count(), 1);
-
-        listener.reset_wakeup_queued();
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-
-        let events: Vec<_> = events_rx.try_iter().collect();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0],
-            RuntimeEvent::Alacritty(alacritty_terminal::event::Event::Wakeup)
-        ));
-        assert_eq!(wake_rx.try_iter().count(), 1);
-    }
-
-    #[test]
-    fn json_event_listener_routes_coalesced_wakeups_through_notifier() {
-        let (events_tx, _events_rx) = unbounded();
-        let notifications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let notification_count = notifications.clone();
-        let listener = JsonEventListener::new_with_wakeup_notifier(
-            events_tx,
-            Some(TerminalWakeupNotifier::new(move || {
-                notification_count.fetch_add(1, Ordering::Relaxed);
-            })),
-        );
-
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-        assert_eq!(notifications.load(Ordering::Relaxed), 1);
-
-        listener.reset_wakeup_queued();
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-        assert_eq!(notifications.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn empty_terminal_drain_preserves_a_coalesced_wakeup() {
-        let terminal = Terminal::new_alacritty_display_for_test(test_terminal_size(), None);
-        terminal.backend.send_wakeup_for_test();
-        assert!(matches!(
-            terminal.backend.try_recv_event_for_test(),
-            Some(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::Wakeup
-            ))
-        ));
-
-        // The queued event was already consumed, but another terminal update
-        // can still be coalesced into the listener flag before the host drains.
-        terminal.backend.send_wakeup_for_test();
-        assert!(terminal.backend.event_queue_is_empty_for_test());
-
-        let mut reply_host = RecordingReplyHost::default();
-        let (events, has_more) = terminal.drain_events(&mut reply_host);
-        assert!(matches!(events.as_slice(), [TerminalEvent::Wakeup]));
-        assert!(!has_more);
-
-        terminal.backend.send_wakeup_for_test();
-        assert!(matches!(
-            terminal.backend.try_recv_event_for_test(),
-            Some(RuntimeEvent::Alacritty(
-                alacritty_terminal::event::Event::Wakeup
-            ))
-        ));
-    }
-
-    #[test]
-    fn alacritty_display_hydration_discards_truncated_parser_state() {
-        let terminal = Terminal::new_alacritty_display_for_test(test_terminal_size(), None);
-        terminal.hydrate_output(b"capture\r\n\x1b[31");
-        terminal.feed_output(b"LIVE");
-
-        let mut text = String::new();
-        terminal.visit_viewport_cells(|_, _, _, cell| {
-            if !cell.wide_character_spacer {
-                text.push_str(cell.text.as_str());
-            }
-        });
-        assert!(text.contains("capture"));
-        assert!(text.contains("LIVE"));
-    }
-
-    #[test]
-    fn alacritty_display_wakes_only_after_synchronized_update_commit() {
-        let terminal = Terminal::new_alacritty_display_for_test(test_terminal_size(), None);
-        let mut reply_host = RecordingReplyHost::default();
-
-        terminal.feed_output(b"\x1b[?2026hSTAGED");
-        let (events, has_more) = terminal.drain_events(&mut reply_host);
-        assert!(!has_more);
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, TerminalEvent::Wakeup))
-        );
-
-        terminal.feed_output(b"\x1b[?2026l");
-        let (events, has_more) = terminal.drain_events(&mut reply_host);
-        assert!(!has_more);
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, TerminalEvent::Wakeup))
-        );
-    }
-
-    #[test]
-    fn alacritty_display_routes_clipboard_queries_through_the_reply_host() {
-        let terminal = Terminal::new_alacritty_display_for_test(test_terminal_size(), None);
-        terminal.feed_output(b"\x1b]52;c;?\x07");
-        let mut reply_host = RecordingReplyHost {
-            clipboard_text: Some("clipboard".to_string()),
-            ..RecordingReplyHost::default()
-        };
-
-        let (_, has_more) = terminal.drain_events(&mut reply_host);
-
-        assert!(!has_more);
-        assert_eq!(
-            reply_host.requested_targets,
-            [TerminalClipboardTarget::Clipboard]
-        );
-    }
-
-    #[test]
-    fn json_event_listener_can_suppress_plain_wakeup_signals() {
-        let (events_tx, events_rx) = unbounded();
-        let (wake_tx, wake_rx) = unbounded();
-        let listener = JsonEventListener::new(events_tx, Some(wake_tx));
-        listener.set_wakeup_enabled(false);
-
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-
-        let events: Vec<_> = events_rx.try_iter().collect();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0],
-            RuntimeEvent::Alacritty(alacritty_terminal::event::Event::Wakeup)
-        ));
-        assert_eq!(wake_rx.try_iter().count(), 0);
-    }
-
-    #[test]
-    fn json_event_listener_resignals_pending_wakeup_when_reenabled() {
-        let (events_tx, events_rx) = unbounded();
-        let (wake_tx, wake_rx) = unbounded();
-        let listener = JsonEventListener::new(events_tx, Some(wake_tx));
-        listener.set_wakeup_enabled(false);
-
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-
-        assert_eq!(events_rx.len(), 1);
-        assert_eq!(wake_rx.try_iter().count(), 0);
-
-        listener.set_wakeup_enabled(true);
-        listener.set_wakeup_enabled(true);
-
-        assert_eq!(wake_rx.try_iter().count(), 1);
-    }
-
-    #[test]
-    fn json_event_listener_resignals_undrained_wakeup_after_visibility_cycle() {
-        let (events_tx, events_rx) = unbounded();
-        let (wake_tx, wake_rx) = unbounded();
-        let listener = JsonEventListener::new(events_tx, Some(wake_tx));
-
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-        assert_eq!(events_rx.len(), 1);
-        assert_eq!(wake_rx.try_iter().count(), 1);
-
-        listener.set_wakeup_enabled(false);
-        listener.set_wakeup_enabled(true);
-        listener.set_wakeup_enabled(true);
-
-        assert_eq!(events_rx.len(), 1);
-        assert_eq!(wake_rx.try_iter().count(), 1);
-    }
-
-    #[test]
-    fn json_event_listener_wakes_when_output_arrives_after_reenable() {
-        let (events_tx, events_rx) = unbounded();
-        let (wake_tx, wake_rx) = unbounded();
-        let listener = JsonEventListener::new(events_tx, Some(wake_tx));
-        listener.set_wakeup_enabled(false);
-        listener.set_wakeup_enabled(true);
-
-        assert_eq!(wake_rx.try_iter().count(), 0);
-
-        listener.send_event(alacritty_terminal::event::Event::Wakeup);
-
-        assert_eq!(events_rx.len(), 1);
-        assert_eq!(wake_rx.try_iter().count(), 1);
-    }
-
-    #[test]
-    fn json_event_listener_still_wakes_for_metadata_when_wakeups_are_suppressed() {
-        let (events_tx, _events_rx) = unbounded();
-        let (wake_tx, wake_rx) = unbounded();
-        let listener = JsonEventListener::new(events_tx, Some(wake_tx));
-        listener.set_wakeup_enabled(false);
-
-        listener.send_event(alacritty_terminal::event::Event::Title("ready".to_string()));
-        listener.send_terminal_event(TerminalEvent::Progress(
-            crate::shell_integration::ProgressState::Indeterminate,
-        ));
-
-        assert_eq!(wake_rx.try_iter().count(), 2);
-    }
-
-    #[test]
-    fn backlogged_event_queue_sheds_state_refresh_events_only() {
-        let (events_tx, events_rx) = unbounded();
-        let listener = JsonEventListener::new(events_tx, None);
-
-        for _ in 0..(EVENT_QUEUE_SOFT_CAP + 100) {
-            listener.send_event(alacritty_terminal::event::Event::Title("t".to_string()));
-        }
-        assert_eq!(events_rx.len(), EVENT_QUEUE_SOFT_CAP);
-
-        // OSC-derived terminal events shed under backlog too.
-        listener.send_terminal_event(TerminalEvent::Bell);
-        assert_eq!(events_rx.len(), EVENT_QUEUE_SOFT_CAP);
-
-        // Protocol-critical events are queued even while backlogged.
-        listener.send_event(alacritty_terminal::event::Event::Exit);
-        listener.send_event(alacritty_terminal::event::Event::ClipboardStore(
-            ClipboardType::Clipboard,
-            "x".to_string(),
-        ));
-        assert_eq!(events_rx.len(), EVENT_QUEUE_SOFT_CAP + 2);
     }
 
     #[test]
@@ -5232,7 +2389,7 @@ mod tests {
 
     #[test]
     fn keyboard_mode_detects_report_all_and_event_types() {
-        let mode = keyboard_mode(TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_EVENT_TYPES);
+        let mode = keyboard_mode_after_bytes(b"\x1b[=10u");
         assert!(mode.report_all_keys_as_esc());
         assert!(mode.report_event_types());
         assert!(mode.enhanced_reporting_active());
@@ -5240,8 +2397,7 @@ mod tests {
 
     #[test]
     fn keyboard_mode_augment_only_flags_do_not_activate_enhanced_reporting() {
-        let mode =
-            keyboard_mode(TermMode::REPORT_ALTERNATE_KEYS | TermMode::REPORT_ASSOCIATED_TEXT);
+        let mode = keyboard_mode_after_bytes(b"\x1b[=20u");
         assert!(mode.report_alternate_keys());
         assert!(mode.report_associated_text());
         assert!(!mode.enhanced_reporting_active());
@@ -5525,38 +2681,6 @@ mod tests {
         assert_eq!(launch.args, vec!["-lc".to_string(), "echo hi".to_string()]);
     }
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn shell_program_with_spaces_is_quoted() {
-        let path = r"C:\Program Files\PowerShell\7\pwsh.exe";
-        let quoted = quote_shell_program_if_needed(path);
-        assert_eq!(quoted, r#""C:\Program Files\PowerShell\7\pwsh.exe""#);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn shell_program_without_spaces_is_unchanged() {
-        let path = r"C:\Windows\System32\cmd.exe";
-        assert_eq!(quote_shell_program_if_needed(path), path);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn already_quoted_shell_program_is_not_double_quoted() {
-        let path = r#""C:\Program Files\PowerShell\7\pwsh.exe""#;
-        assert_eq!(quote_shell_program_if_needed(path), path);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn shell_program_with_embedded_quotes_is_escaped() {
-        // Defensively handle a path that (illegally on Windows) contains a
-        // double-quote character alongside spaces.
-        let path = "C:\\weird \\path\"\\pwsh.exe";
-        let quoted = quote_shell_program_if_needed(path);
-        assert_eq!(quoted, r#""C:\weird \path\"\pwsh.exe""#);
-    }
-
     #[test]
     fn core_cursor_advance_matches_for_ascii_and_starship_glyph() {
         let ascii = cursor_after_bytes(b"> ");
@@ -5656,25 +2780,23 @@ mod tests {
             default_cursor_style: TerminalCursorStyle::Line,
             ..TerminalRuntimeConfig::default()
         };
-        let mut term: Term<VoidListener> = Term::new(
-            backend::term_config(initial.term_options()),
-            &size,
-            VoidListener,
-        );
+        let terminal = Terminal::new_display(size, Some(&initial));
 
         let updated = TerminalRuntimeConfig {
             scrollback_history: 8,
             ..initial
         };
-        term.set_options(backend::term_config(updated.term_options()));
-        let mut parser: ansi::Processor = ansi::Processor::new();
+        terminal.set_term_options(updated.term_options());
         let output = (0..80)
             .map(|index| format!("line-{index}\r\n"))
             .collect::<String>();
-        parser.advance(&mut term, output.as_bytes());
+        terminal.feed_output(output.as_bytes());
 
-        assert_eq!(term.grid().history_size(), 8);
-        assert_eq!(term.cursor_style().shape, CursorShape::Beam);
+        assert_eq!(terminal.scroll_state().1, 8);
+        assert_eq!(
+            terminal.cursor_state().map(|cursor| cursor.style),
+            Some(TerminalCursorStyle::Line)
+        );
     }
 
     #[test]
@@ -5684,31 +2806,26 @@ mod tests {
             scrollback_history: 256,
             ..TerminalRuntimeConfig::default()
         };
-        let mut term: Term<VoidListener> = Term::new(
-            backend::term_config(initial.term_options()),
-            &size,
-            VoidListener,
-        );
+        let terminal = Terminal::new_display(size, Some(&initial));
 
-        let mut parser: ansi::Processor = ansi::Processor::new();
         let output = (0..300)
             .map(|index| format!("line-{index}\r\n"))
             .collect::<String>();
-        parser.advance(&mut term, output.as_bytes());
-        assert_eq!(term.grid().history_size(), 256);
+        terminal.feed_output(output.as_bytes());
+        assert_eq!(terminal.scroll_state().1, 256);
 
         // Shrink (the inactive-tab path), which must also trim the raw buffer.
         let inactive = TerminalRuntimeConfig {
             scrollback_history: 16,
             ..initial.clone()
         };
-        backend::apply_term_options(&mut term, inactive.term_options());
-        assert_eq!(term.grid().history_size(), 16);
+        terminal.set_term_options(inactive.term_options());
+        assert_eq!(terminal.scroll_state().1, 16);
 
         // Grow back (tab reactivated) and keep scrolling: storage must regrow.
-        backend::apply_term_options(&mut term, initial.term_options());
-        parser.advance(&mut term, output.as_bytes());
-        assert_eq!(term.grid().history_size(), 256);
+        terminal.set_term_options(initial.term_options());
+        terminal.feed_output(output.as_bytes());
+        assert_eq!(terminal.scroll_state().1, 256);
     }
 
     #[test]
@@ -5718,25 +2835,23 @@ mod tests {
             scrollback_history: 8,
             ..TerminalRuntimeConfig::default()
         };
-        let mut term: Term<VoidListener> = Term::new(
-            backend::term_config(initial.term_options()),
-            &size,
-            VoidListener,
-        );
+        let terminal = Terminal::new_display(size, Some(&initial));
 
         let updated = TerminalRuntimeConfig {
             default_cursor_style: TerminalCursorStyle::Line,
             ..initial
         };
-        term.set_options(backend::term_config(updated.term_options()));
-        let mut parser: ansi::Processor = ansi::Processor::new();
+        terminal.set_term_options(updated.term_options());
         let output = (0..80)
             .map(|index| format!("line-{index}\r\n"))
             .collect::<String>();
-        parser.advance(&mut term, output.as_bytes());
+        terminal.feed_output(output.as_bytes());
 
-        assert_eq!(term.grid().history_size(), 8);
-        assert_eq!(term.cursor_style().shape, CursorShape::Beam);
+        assert_eq!(terminal.scroll_state().1, 8);
+        assert_eq!(
+            terminal.cursor_state().map(|cursor| cursor.style),
+            Some(TerminalCursorStyle::Line)
+        );
     }
 
     #[cfg(unix)]

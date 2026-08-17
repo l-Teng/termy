@@ -384,10 +384,10 @@ they have no parser/grid benchmark number.
 
 ## Allocation accounting
 
-Whole-process allocator requests are now measured by a separate, report-only
-pass after the timed comparison. The xtask benchmark example's
-`benchmark-allocations` feature installs a `System` wrapper only in the example
-binary and requires
+Whole-process allocator requests were measured by a separate, report-only pass
+after the historical timed comparison. The now-retired xtask benchmark
+example's `benchmark-allocations` feature installed a `System` wrapper only in
+the example binary and required
 `TMON_BENCH_ALLOCATIONS_ONLY=1`; a feature build refuses timed mode, while a
 normal build rejects allocation-only mode. The normal throughput executable
 therefore contains no allocator-counter overhead.

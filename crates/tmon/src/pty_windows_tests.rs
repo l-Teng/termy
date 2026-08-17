@@ -334,7 +334,7 @@ fn control_reports_failed_resize_to_waiting_caller() {
         "failure must be published before waking the resize caller"
     );
 
-    let (writer, _receiver) = WriterHandle::channel(control.clone());
+    let (writer, _receiver) = WriterHandle::channel(control);
     assert_eq!(
         writer
             .write(b"must-not-queue")

@@ -1,0 +1,542 @@
+{
+  "schema_version": "1.0",
+  "project_root": "/Users/lassevestergaard/Dev/termy",
+  "generated_at": "2026-08-15T22:04:34Z",
+  "scope": {
+    "source_extensions": [
+      ".cjs",
+      ".js",
+      ".jsx",
+      ".mjs",
+      ".py",
+      ".ts",
+      ".tsx"
+    ],
+    "excluded_directories": [
+      ".git",
+      ".hg",
+      ".mypy_cache",
+      ".next",
+      ".nuxt",
+      ".pytest_cache",
+      ".ruff_cache",
+      ".svelte-kit",
+      ".svn",
+      ".venv",
+      "__pycache__",
+      "build",
+      "coverage",
+      "dist",
+      "node_modules",
+      "out",
+      "outputs",
+      "target",
+      "vendor",
+      "venv"
+    ],
+    "source_files": 32,
+    "source_loc": 6174,
+    "source_bytes": 196148
+  },
+  "summary": {
+    "candidates": 24,
+    "proof_eligible": 3,
+    "potential_removable_loc": 3608,
+    "potential_removable_bytes": 113188,
+    "by_category": {
+      "orphan-file": 14,
+      "unused-dependency": 1,
+      "unused-export": 9,
+      "duplicate-file": 0,
+      "commented-code": 0
+    }
+  },
+  "candidates": [
+    {
+      "category": "orphan-file",
+      "subject": ".remember/tmp/last-ndc.ts",
+      "path": ".remember/tmp/last-ndc.ts",
+      "confidence": "high",
+      "initial_status": "REVIEW",
+      "risk": "low",
+      "proof_eligible": true,
+      "loc": 1,
+      "bytes": 11,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability."
+      ],
+      "id": "CRT-001"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "crates/plugin_runtime/src/host.ts",
+      "path": "crates/plugin_runtime/src/host.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 661,
+      "bytes": 20066,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: host."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-002"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "crates/plugin_runtime/src/termy.d.ts",
+      "path": "crates/plugin_runtime/src/termy.d.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 340,
+      "bytes": 8952,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: crates/plugin_runtime/src/termy.d, crates/plugin_runtime/src/termy.d.ts, termy.d, termy.d.ts."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-003"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "crates/plugin_runtime/src/worker.ts",
+      "path": "crates/plugin_runtime/src/worker.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 1631,
+      "bytes": 56175,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: worker."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-004"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "skills/build-termy-plugins/assets/command-plugin/plugin.ts",
+      "path": "skills/build-termy-plugins/assets/command-plugin/plugin.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 56,
+      "bytes": 1497,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: plugin, plugin.ts."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-005"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "skills/build-termy-plugins/assets/native-ui-plugin/plugin.tsx",
+      "path": "skills/build-termy-plugins/assets/native-ui-plugin/plugin.tsx",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 161,
+      "bytes": 5035,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: plugin, plugin.tsx."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-006"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "website/source.config.ts",
+      "path": "website/source.config.ts",
+      "confidence": "high",
+      "initial_status": "REVIEW",
+      "risk": "low",
+      "proof_eligible": true,
+      "loc": 22,
+      "bytes": 422,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability."
+      ],
+      "id": "CRT-007"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "website/src/components/markdown.tsx",
+      "path": "website/src/components/markdown.tsx",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 167,
+      "bytes": 5096,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: markdown."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-008"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "website/src/components/marketing-page-shell.tsx",
+      "path": "website/src/components/marketing-page-shell.tsx",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 165,
+      "bytes": 5313,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: marketing-page-shell."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-009"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "website/src/components/mdx.tsx",
+      "path": "website/src/components/mdx.tsx",
+      "confidence": "high",
+      "initial_status": "REVIEW",
+      "risk": "low",
+      "proof_eligible": true,
+      "loc": 15,
+      "bytes": 386,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability."
+      ],
+      "id": "CRT-010"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "website/src/components/not-found.tsx",
+      "path": "website/src/components/not-found.tsx",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 11,
+      "bytes": 304,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: not-found."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-011"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "website/src/lib/github-release.ts",
+      "path": "website/src/lib/github-release.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 289,
+      "bytes": 7818,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: github-release."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-012"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "website/src/lib/layout.shared.tsx",
+      "path": "website/src/lib/layout.shared.tsx",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 50,
+      "bytes": 1145,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: layout.shared."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-013"
+    },
+    {
+      "category": "orphan-file",
+      "subject": "website/src/lib/sponsors.ts",
+      "path": "website/src/lib/sponsors.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 36,
+      "bytes": 848,
+      "evidence": [
+        "No resolved static inbound import was found.",
+        "The file is not a detected package or conventional entry point.",
+        "Repository text contains possible string/name references: sponsors."
+      ],
+      "caveats": [
+        "Dynamic loading, reflection, external consumers, or incomplete framework detection can hide reachability.",
+        "Possible string reachability prevents high-confidence deletion."
+      ],
+      "id": "CRT-014"
+    },
+    {
+      "category": "unused-export",
+      "subject": "marketingPanelClass from website/src/components/marketing-page-shell.tsx",
+      "path": "website/src/components/marketing-page-shell.tsx",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 0,
+      "bytes": 0,
+      "evidence": [
+        "No reference to the exported symbol was found outside its defining file."
+      ],
+      "caveats": [
+        "Public APIs, re-export patterns, generated declarations, templates, or external consumers may use it."
+      ],
+      "line": 164,
+      "id": "CRT-015"
+    },
+    {
+      "category": "unused-export",
+      "subject": "GitHubReleaseYearGroup from website/src/lib/github-release.ts",
+      "path": "website/src/lib/github-release.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 0,
+      "bytes": 0,
+      "evidence": [
+        "No reference to the exported symbol was found outside its defining file."
+      ],
+      "caveats": [
+        "Public APIs, re-export patterns, generated declarations, templates, or external consumers may use it."
+      ],
+      "line": 208,
+      "id": "CRT-016"
+    },
+    {
+      "category": "unused-export",
+      "subject": "appName from website/src/lib/shared.ts",
+      "path": "website/src/lib/shared.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 0,
+      "bytes": 0,
+      "evidence": [
+        "No reference to the exported symbol was found outside its defining file."
+      ],
+      "caveats": [
+        "Public APIs, re-export patterns, generated declarations, templates, or external consumers may use it."
+      ],
+      "line": 1,
+      "id": "CRT-017"
+    },
+    {
+      "category": "unused-export",
+      "subject": "Sponsor from website/src/lib/sponsors.ts",
+      "path": "website/src/lib/sponsors.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 0,
+      "bytes": 0,
+      "evidence": [
+        "No reference to the exported symbol was found outside its defining file."
+      ],
+      "caveats": [
+        "Public APIs, re-export patterns, generated declarations, templates, or external consumers may use it."
+      ],
+      "line": 4,
+      "id": "CRT-018"
+    },
+    {
+      "category": "unused-export",
+      "subject": "FileRouteTypes from website/src/routeTree.gen.ts",
+      "path": "website/src/routeTree.gen.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 0,
+      "bytes": 0,
+      "evidence": [
+        "No reference to the exported symbol was found outside its defining file."
+      ],
+      "caveats": [
+        "Public APIs, re-export patterns, generated declarations, templates, or external consumers may use it."
+      ],
+      "line": 102,
+      "id": "CRT-019"
+    },
+    {
+      "category": "unused-export",
+      "subject": "FileRoutesByFullPath from website/src/routeTree.gen.ts",
+      "path": "website/src/routeTree.gen.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 0,
+      "bytes": 0,
+      "evidence": [
+        "No reference to the exported symbol was found outside its defining file."
+      ],
+      "caveats": [
+        "Public APIs, re-export patterns, generated declarations, templates, or external consumers may use it."
+      ],
+      "line": 68,
+      "id": "CRT-020"
+    },
+    {
+      "category": "unused-export",
+      "subject": "FileRoutesById from website/src/routeTree.gen.ts",
+      "path": "website/src/routeTree.gen.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 0,
+      "bytes": 0,
+      "evidence": [
+        "No reference to the exported symbol was found outside its defining file."
+      ],
+      "caveats": [
+        "Public APIs, re-export patterns, generated declarations, templates, or external consumers may use it."
+      ],
+      "line": 90,
+      "id": "CRT-021"
+    },
+    {
+      "category": "unused-export",
+      "subject": "FileRoutesByTo from website/src/routeTree.gen.ts",
+      "path": "website/src/routeTree.gen.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 0,
+      "bytes": 0,
+      "evidence": [
+        "No reference to the exported symbol was found outside its defining file."
+      ],
+      "caveats": [
+        "Public APIs, re-export patterns, generated declarations, templates, or external consumers may use it."
+      ],
+      "line": 79,
+      "id": "CRT-022"
+    },
+    {
+      "category": "unused-export",
+      "subject": "RootRouteChildren from website/src/routeTree.gen.ts",
+      "path": "website/src/routeTree.gen.ts",
+      "confidence": "medium",
+      "initial_status": "REVIEW",
+      "risk": "medium",
+      "proof_eligible": false,
+      "loc": 0,
+      "bytes": 0,
+      "evidence": [
+        "No reference to the exported symbol was found outside its defining file."
+      ],
+      "caveats": [
+        "Public APIs, re-export patterns, generated declarations, templates, or external consumers may use it."
+      ],
+      "line": 138,
+      "id": "CRT-023"
+    },
+    {
+      "category": "unused-dependency",
+      "subject": "p256 and rand_core direct dependencies from termy",
+      "path": "crates/desktop_app/Cargo.toml",
+      "confidence": "high",
+      "initial_status": "REVIEW",
+      "risk": "low",
+      "proof_eligible": false,
+      "loc": 3,
+      "bytes": 120,
+      "evidence": [
+        "cargo-machete independently reports both direct dependencies unused by the termy crate.",
+        "Repository-wide source search finds no p256, rand_core, OsRng, RngCore, signing-key, or verifying-key use in crates/desktop_app.",
+        "Git history shows both dependencies entered with the former embedded-browser surface, which was removed by fbe5f62c."
+      ],
+      "caveats": [
+        "The workspace-level rand_core dependency must remain because termy_plugin_runtime uses it.",
+        "Cargo.lock changes and compilation must be proven in a disposable copy before applying the manifest cleanup."
+      ],
+      "id": "CRT-024"
+    }
+  ],
+  "limitations": [
+    "Static analysis cannot prove absence of dynamic, reflective, operational, platform-specific, or external use.",
+    "JavaScript/TypeScript and Python import resolution is intentionally conservative and does not implement every alias or framework convention.",
+    "Unused dependencies and exports are leads only until project-native tooling and focused proof support removal.",
+    "No project code, package command, or dependency was executed by this scanner."
+  ]
+}

@@ -1,0 +1,124 @@
+{
+  "decisions": [
+    {
+      "candidate_id": "CRT-001",
+      "status": "KEEP",
+      "reason": ".remember is untracked local tool state, not repository source; cleanup must not delete user tool data."
+    },
+    {
+      "candidate_id": "CRT-002",
+      "status": "KEEP",
+      "reason": "Embedded at compile time by include_str!(\"host.ts\") in crates/plugin_runtime/src/lib.rs."
+    },
+    {
+      "candidate_id": "CRT-003",
+      "status": "KEEP",
+      "reason": "Embedded at compile time by include_str!(\"termy.d.ts\") in crates/plugin_runtime/src/lib.rs."
+    },
+    {
+      "candidate_id": "CRT-004",
+      "status": "KEEP",
+      "reason": "Embedded at compile time by include_str!(\"worker.ts\") in crates/plugin_runtime/src/lib.rs."
+    },
+    {
+      "candidate_id": "CRT-005",
+      "status": "KEEP",
+      "reason": "Official command-plugin template referenced by skills/build-termy-plugins/SKILL.md and its examples reference."
+    },
+    {
+      "candidate_id": "CRT-006",
+      "status": "KEEP",
+      "reason": "Official native-UI plugin template referenced by skills/build-termy-plugins/SKILL.md and its examples reference."
+    },
+    {
+      "candidate_id": "CRT-007",
+      "status": "KEEP",
+      "reason": "Fumadocs convention entrypoint consumed by postinstall, typecheck, and build tooling."
+    },
+    {
+      "candidate_id": "CRT-008",
+      "status": "KEEP",
+      "reason": "Imported by website/src/routes/releases/$slug.tsx."
+    },
+    {
+      "candidate_id": "CRT-009",
+      "status": "KEEP",
+      "reason": "Imported by the home, download, and release route modules."
+    },
+    {
+      "candidate_id": "CRT-010",
+      "status": "KEEP",
+      "reason": "Imported by website/src/routes/docs/$.tsx and participates in MDX typing."
+    },
+    {
+      "candidate_id": "CRT-011",
+      "status": "KEEP",
+      "reason": "Imported by website/src/router.tsx as the default not-found component."
+    },
+    {
+      "candidate_id": "CRT-012",
+      "status": "KEEP",
+      "reason": "Imported by download and release route modules."
+    },
+    {
+      "candidate_id": "CRT-013",
+      "status": "KEEP",
+      "reason": "Imported by docs routing and the not-found component."
+    },
+    {
+      "candidate_id": "CRT-014",
+      "status": "KEEP",
+      "reason": "The sponsors value is imported by website/src/routes/index.tsx."
+    },
+    {
+      "candidate_id": "CRT-015",
+      "status": "REVIEW",
+      "reason": "marketingPanelClass has no repository consumer and is a credible dead constant, pending website proof."
+    },
+    {
+      "candidate_id": "CRT-016",
+      "status": "REVIEW",
+      "reason": "GitHubReleaseYearGroup is used only inside its file; removing export narrows the module surface but needs typecheck proof."
+    },
+    {
+      "candidate_id": "CRT-017",
+      "status": "REVIEW",
+      "reason": "appName has no repository consumer and is a credible dead constant, pending website proof."
+    },
+    {
+      "candidate_id": "CRT-018",
+      "status": "REVIEW",
+      "reason": "Sponsor is used only inside its file; removing export narrows the module surface but needs typecheck proof."
+    },
+    {
+      "candidate_id": "CRT-019",
+      "status": "KEEP",
+      "reason": "Generated TanStack Router declaration; repository instructions prohibit hand-editing routeTree.gen.ts."
+    },
+    {
+      "candidate_id": "CRT-020",
+      "status": "KEEP",
+      "reason": "Generated TanStack Router declaration; repository instructions prohibit hand-editing routeTree.gen.ts."
+    },
+    {
+      "candidate_id": "CRT-021",
+      "status": "KEEP",
+      "reason": "Generated TanStack Router declaration; repository instructions prohibit hand-editing routeTree.gen.ts."
+    },
+    {
+      "candidate_id": "CRT-022",
+      "status": "KEEP",
+      "reason": "Generated TanStack Router declaration; repository instructions prohibit hand-editing routeTree.gen.ts."
+    },
+    {
+      "candidate_id": "CRT-023",
+      "status": "KEEP",
+      "reason": "Generated TanStack Router declaration; repository instructions prohibit hand-editing routeTree.gen.ts."
+    },
+    {
+      "candidate_id": "CRT-024",
+      "status": "REVIEW",
+      "reason": "Static evidence and disposable-copy proof agree: the exact manifest and lockfile cleanup passed desktop check, 805 tests, formatting, boundaries, and cargo-machete."
+    }
+  ]
+}

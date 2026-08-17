@@ -63,7 +63,7 @@
           '';
 
           meta = {
-            description = "A fast, minimal terminal emulator built with GPUI and alacritty_terminal";
+            description = "A fast, minimal terminal emulator built with GPUI and Tmon";
             homepage = "https://github.com/termy-org/termy";
             license = pkgs.lib.licenses.mit;
             mainProgram = "termy";

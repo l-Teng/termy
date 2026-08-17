@@ -4469,7 +4469,7 @@ impl TerminalView {
         if should_redraw {
             self.debug_overlay_stats.record_terminal_redraw();
 
-            // Detect content-driven display_offset changes: Alacritty auto-increments the
+            // Detect content-driven display_offset changes: the engine increments the
             // offset to keep the viewport stable when new lines arrive while the user is
             // scrolled into history. The background PTY thread already updated the offset
             // before we got here, so we compare against content_scroll_baseline (a value

@@ -1,4 +1,3 @@
-mod backend;
 mod cell_metrics;
 mod config;
 mod frame;
@@ -12,7 +11,6 @@ mod osc_intercept;
 mod path_env;
 mod protocol;
 mod render_metrics;
-mod resize_anchor;
 mod runtime;
 mod search;
 mod shell_integration;

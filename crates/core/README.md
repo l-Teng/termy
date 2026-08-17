@@ -12,18 +12,12 @@ Use this crate when behavior should be available to FFI, WASM, JS, or non-GPUI h
 
 ```sh
 cargo test -p termy_core
-TERMY_CORE_TEST_BACKEND=alacritty cargo test -p termy_core
-TERMY_CORE_TEST_BACKEND=tmon cargo test -p termy_core
+cargo clippy -p termy_core --all-targets -- -D warnings
 ```
 
-Display-only and native terminals use Tmon by default. During the rollout, an
-exact `TERMY_FORCE_ALACRITTY_ENGINE=1` selects the retained fallback for both;
-other values do not. Native construction also falls back when Tmon is
-unavailable or reports a backend-initialization failure, but it returns launch
-and configuration errors without retrying. The two explicit commands force the
-semantic suite through one private backend at a time. `TERMY_CORE_TEST_BACKEND`
-is test-only plumbing, not a supported embedder or desktop configuration
-surface.
+Display-only and native terminals use Tmon exclusively. Native construction
+returns launch, configuration, PTY, and backend-initialization failures without
+silently retrying through another engine.
 
 ## Forbidden Dependencies
 
@@ -40,11 +34,10 @@ underline variants and colors, live palette revisions, ordered viewport scroll
 damage, or generation-checked range reads should use `Terminal::render_read`,
 `Terminal::take_render_damage_snapshot`, and the `visit_*` methods instead.
 
-The terminal engine is deliberately private. During the Tmon migration the
-facade can dispatch to either retained Alacritty state or Tmon without exposing
-either engine's types. `termy_core` 0.2 removed
+The terminal engine is deliberately private. The facade owns Tmon without
+exposing its internal grid or parser types. `termy_core` 0.2 removed
 `Terminal::with_term`, `TerminalOptions::term_config`, and the exported raw
-Alacritty conversion helpers. Embedders should use core-owned types such as
+engine conversion helpers. Embedders should use core-owned types such as
 `TerminalColor`, `TerminalRenderCell`, and `TerminalQueryColors`, plus the
 neutral `Terminal` methods, rather than depending on an engine grid or parser.
 
@@ -72,7 +65,7 @@ primitives with the harness every embedder ends up writing anyway:
 - **Font + cell metrics** — `measure_cell` backed by fontdb / ttf-parser for embedder layout.
 - **Render metrics** — span timings (grid paint, text shaping, cache hit/miss) for performance debugging.
 - **Launch resolution** — working directory normalization, fallbacks, locale, and PATH setup.
-- **PTY plumbing** — `rustix-openpty` on Unix, shell discovery via `winreg` on Windows.
+- **PTY plumbing** — Tmon's direct Unix PTY and Windows ConPTY implementations, plus shell discovery.
 - **Portable surface** — no GPUI dependency. The same crate powers the desktop app, `termy_ffi` (C ABI), WASM hosts, JS bindings, and headless tests. Wrap the engine once, host many times.
 
 In short: the VT engine is an implementation detail; libtermy is the portable

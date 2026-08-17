@@ -223,12 +223,13 @@ impl Grid {
             cols,
         });
         let blank = self.pen().blank();
-        if self
-            .active()
-            .cells
-            .iter()
-            .flatten()
-            .any(Cell::has_hyperlink)
+        if !self.hyperlinks.is_empty()
+            && self
+                .active()
+                .cells
+                .iter()
+                .flatten()
+                .any(Cell::has_hyperlink)
         {
             self.note_hyperlink_root_removed();
         }
@@ -241,12 +242,13 @@ impl Grid {
     }
 
     pub(crate) fn alignment_test(&mut self) {
-        if self
-            .active()
-            .cells
-            .iter()
-            .flatten()
-            .any(Cell::has_hyperlink)
+        if !self.hyperlinks.is_empty()
+            && self
+                .active()
+                .cells
+                .iter()
+                .flatten()
+                .any(Cell::has_hyperlink)
         {
             self.note_hyperlink_root_removed();
         }
@@ -310,11 +312,12 @@ impl Grid {
             let scroll_bottom = self.primary.scroll_bottom;
             let cols = self.primary.cols;
             let rows = self.primary.rows;
-            let removes_hyperlink_root = self.alternate.as_ref().is_some_and(|alternate| {
-                (alternate.pen.hyperlink_id.is_some()
-                    && alternate.pen.hyperlink_id != pen.hyperlink_id)
-                    || alternate.cells.iter().flatten().any(Cell::has_hyperlink)
-            });
+            let removes_hyperlink_root = !self.hyperlinks.is_empty()
+                && self.alternate.as_ref().is_some_and(|alternate| {
+                    (alternate.pen.hyperlink_id.is_some()
+                        && alternate.pen.hyperlink_id != pen.hyperlink_id)
+                        || alternate.cells.iter().flatten().any(Cell::has_hyperlink)
+                });
             if removes_hyperlink_root {
                 self.note_hyperlink_root_removed();
             }
@@ -569,6 +572,9 @@ impl Grid {
     }
 
     pub(super) fn has_hyperlink_roots(&self) -> bool {
+        if self.hyperlinks.is_empty() {
+            return false;
+        }
         let screen_has_root = |screen: &Screen| {
             screen.pen.hyperlink_id.is_some()
                 || screen.saved_pen.hyperlink_id.is_some()
@@ -783,6 +789,35 @@ mod hyperlink_root_tests {
     use super::*;
 
     #[test]
+    fn no_link_hot_paths_preserve_hyperlink_state() {
+        let mut grid = Grid::new(4, 2, 2, CursorStyle::Block);
+        let root_generation = grid.hyperlink_root_generation;
+
+        assert_eq!(grid.put_ascii_run(b"ab"), 2);
+        grid.insert_blank_chars(1);
+        grid.delete_chars(1);
+        grid.set_cursor_position(1, 0);
+        assert!(grid.put_default_text_lines(b"a\r\nb\r\n").0 > 0);
+        while grid.pop_history_front().is_some() {}
+
+        grid.alignment_test();
+        grid.column_mode_reset();
+        grid.scroll_up(1);
+        grid.scroll_down(1);
+        grid.erase_display(2, false);
+
+        grid.set_cursor_position(1, 0);
+        grid.set_alternate_screen(true, false);
+        assert!(grid.put_default_text_lines(b"c\r\nd\r\n").0 > 0);
+        grid.set_alternate_screen(false, false);
+        grid.set_alternate_screen(true, false);
+
+        assert!(grid.hyperlinks.is_empty());
+        assert!(!grid.has_hyperlink_roots());
+        assert_eq!(grid.hyperlink_root_generation, root_generation);
+    }
+
+    #[test]
     fn saved_pen_replacement_invalidates_failed_prune_state() {
         let mut grid = Grid::new(2, 1, 0, CursorStyle::Block);
         grid.set_hyperlink(None, Some("https://example.com/saved"));
@@ -797,6 +832,56 @@ mod hyperlink_root_tests {
         let before_restore = grid.hyperlink_root_generation;
         grid.restore_cursor();
         assert!(grid.hyperlink_root_generation > before_restore);
+    }
+
+    #[test]
+    fn scalar_root_replacement_invalidates_prune_recovery() {
+        let mut grid = Grid::new(2, 1, 0, CursorStyle::Block);
+        grid.set_hyperlink(None, Some("https://example.com/scalar"));
+        grid.put_char('x');
+        grid.set_hyperlink(None, None);
+        grid.set_cursor_position(0, 0);
+        assert!(grid.has_hyperlink_roots());
+
+        let before = grid.hyperlink_root_generation;
+        grid.put_char('y');
+
+        assert!(grid.hyperlink_root_generation > before);
+        assert!(!grid.has_hyperlink_roots());
+    }
+
+    #[test]
+    fn history_eviction_invalidates_prune_recovery() {
+        let mut grid = Grid::new(2, 2, 1, CursorStyle::Block);
+        grid.set_hyperlink(None, Some("https://example.com/history"));
+        grid.put_char('x');
+        grid.set_hyperlink(None, None);
+        grid.set_cursor_position(1, 0);
+        grid.line_feed();
+        assert!(grid.has_hyperlink_roots());
+
+        let before = grid.hyperlink_root_generation;
+        grid.line_feed();
+
+        assert!(grid.hyperlink_root_generation > before);
+        assert!(!grid.has_hyperlink_roots());
+    }
+
+    #[test]
+    fn alternate_ascii_bulk_root_removal_invalidates_prune_recovery() {
+        let mut grid = Grid::new(4, 2, 0, CursorStyle::Block);
+        grid.set_alternate_screen(true, false);
+        grid.set_hyperlink(None, Some("https://example.com/alternate-fast"));
+        grid.put_char('x');
+        grid.set_hyperlink(None, None);
+        grid.set_cursor_position(1, 0);
+        assert!(grid.has_hyperlink_roots());
+
+        let before = grid.hyperlink_root_generation;
+        assert!(grid.put_default_text_lines(b"a\r\nb\r\n").0 > 0);
+
+        assert!(grid.hyperlink_root_generation > before);
+        assert!(!grid.has_hyperlink_roots());
     }
 
     #[test]
@@ -827,9 +912,11 @@ mod hyperlink_root_tests {
         erase.set_hyperlink(None, Some("https://blank"));
         erase.put_char(' ');
         erase.set_hyperlink(None, None);
+        assert!(erase.has_hyperlink_roots());
         let before_erase = erase.hyperlink_root_generation;
         erase.erase_display(2, false);
         assert!(erase.hyperlink_root_generation > before_erase);
+        assert!(!erase.has_hyperlink_roots());
 
         let mut fast = Grid::new(4, 2, 0, CursorStyle::Block);
         fast.set_hyperlink(None, Some("https://fast"));

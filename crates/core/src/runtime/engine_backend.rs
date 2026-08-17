@@ -1,132 +1,4 @@
 use super::*;
-use anyhow::Context as _;
-
-const TEST_BACKEND_ENV: &str = "TERMY_CORE_TEST_BACKEND";
-const FORCE_ALACRITTY_ENV: &str = "TERMY_FORCE_ALACRITTY_ENGINE";
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum BackendChoice {
-    #[default]
-    Alacritty,
-    Tmon,
-}
-
-impl BackendChoice {
-    fn from_test_value(value: Option<&std::ffi::OsStr>) -> Option<Self> {
-        match value.and_then(std::ffi::OsStr::to_str) {
-            Some("alacritty") => Some(Self::Alacritty),
-            Some("tmon") => Some(Self::Tmon),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NativeBackendRequest {
-    TestOverride(BackendChoice),
-    ForcedAlacritty,
-    PreferTmon,
-}
-
-impl NativeBackendRequest {
-    fn current() -> Self {
-        Self::from_values(
-            env::var_os(TEST_BACKEND_ENV).as_deref(),
-            env::var_os(FORCE_ALACRITTY_ENV).as_deref(),
-        )
-    }
-
-    fn from_values(
-        test_value: Option<&std::ffi::OsStr>,
-        force_alacritty_value: Option<&std::ffi::OsStr>,
-    ) -> Self {
-        if let Some(choice) = BackendChoice::from_test_value(test_value) {
-            return Self::TestOverride(choice);
-        }
-        if force_alacritty_value == Some(std::ffi::OsStr::new("1")) {
-            Self::ForcedAlacritty
-        } else {
-            Self::PreferTmon
-        }
-    }
-}
-
-fn tmon_failure_is_fallback_eligible(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<tmon::Error>()
-        .is_some_and(tmon::Error::is_backend_initialization_failure)
-}
-
-fn select_native_backend<T>(
-    request: NativeBackendRequest,
-    tmon_available: bool,
-    mut start_alacritty: impl FnMut() -> anyhow::Result<T>,
-    mut start_tmon: impl FnMut() -> anyhow::Result<T>,
-    tmon_failure_is_eligible: impl Fn(&anyhow::Error) -> bool,
-) -> anyhow::Result<(T, TerminalEngineSelectionReason, Option<String>)> {
-    match request {
-        NativeBackendRequest::TestOverride(BackendChoice::Alacritty) => Ok((
-            start_alacritty()?,
-            TerminalEngineSelectionReason::TestOverride,
-            None,
-        )),
-        NativeBackendRequest::TestOverride(BackendChoice::Tmon) => Ok((
-            start_tmon()?,
-            TerminalEngineSelectionReason::TestOverride,
-            None,
-        )),
-        NativeBackendRequest::ForcedAlacritty => Ok((
-            start_alacritty()?,
-            TerminalEngineSelectionReason::ForcedAlacritty,
-            None,
-        )),
-        NativeBackendRequest::PreferTmon if !tmon_available => Ok((
-            start_alacritty()?,
-            TerminalEngineSelectionReason::TmonUnavailable,
-            Some("native Tmon PTY support is unavailable on this host".to_string()),
-        )),
-        NativeBackendRequest::PreferTmon => match start_tmon() {
-            Ok(backend) => Ok((backend, TerminalEngineSelectionReason::TmonDefault, None)),
-            Err(error) if tmon_failure_is_eligible(&error) => {
-                let detail = error.to_string();
-                let backend = start_alacritty().with_context(|| {
-                    format!(
-                        "Tmon backend initialization failed ({detail}); Alacritty fallback also failed"
-                    )
-                })?;
-                Ok((
-                    backend,
-                    TerminalEngineSelectionReason::TmonInitializationFailure,
-                    Some(detail),
-                ))
-            }
-            Err(error) => Err(error),
-        },
-    }
-}
-
-fn select_display_backend<T>(
-    request: NativeBackendRequest,
-    mut start_alacritty: impl FnMut() -> T,
-    mut start_tmon: impl FnMut() -> T,
-) -> (T, TerminalEngineSelectionReason) {
-    match request {
-        NativeBackendRequest::TestOverride(BackendChoice::Alacritty) => (
-            start_alacritty(),
-            TerminalEngineSelectionReason::TestOverride,
-        ),
-        NativeBackendRequest::TestOverride(BackendChoice::Tmon) => {
-            (start_tmon(), TerminalEngineSelectionReason::TestOverride)
-        }
-        NativeBackendRequest::ForcedAlacritty => (
-            start_alacritty(),
-            TerminalEngineSelectionReason::ForcedAlacritty,
-        ),
-        NativeBackendRequest::PreferTmon => {
-            (start_tmon(), TerminalEngineSelectionReason::DisplayDefault)
-        }
-    }
-}
 
 pub(super) struct BackendSelection {
     pub(super) backend: Backend,
@@ -134,62 +6,29 @@ pub(super) struct BackendSelection {
 }
 
 impl BackendSelection {
-    fn new(
-        backend: Backend,
-        selection_reason: TerminalEngineSelectionReason,
-        fallback_detail: Option<String>,
-    ) -> Self {
-        let diagnostics = TerminalEngineDiagnostics {
-            engine: backend.engine_label(),
-            selection_reason,
-            fallback_detail,
-        };
+    fn new(backend: Backend, selection_reason: TerminalEngineSelectionReason) -> Self {
         Self {
             backend,
-            diagnostics,
+            diagnostics: TerminalEngineDiagnostics {
+                engine: "tmon",
+                selection_reason,
+                fallback_detail: None,
+            },
         }
     }
 
     fn log_native(&self) {
-        let diagnostics = &self.diagnostics;
-        match diagnostics.selection_reason {
-            TerminalEngineSelectionReason::TmonUnavailable
-            | TerminalEngineSelectionReason::TmonInitializationFailure => log::warn!(
-                "terminal engine selected: {} ({}){}",
-                diagnostics.engine,
-                diagnostics.selection_reason,
-                diagnostics
-                    .fallback_detail
-                    .as_deref()
-                    .map_or_else(String::new, |detail| format!("; {detail}"))
-            ),
-            TerminalEngineSelectionReason::TestOverride => log::debug!(
-                "terminal engine selected: {} ({})",
-                diagnostics.engine,
-                diagnostics.selection_reason
-            ),
-            _ => log::info!(
-                "terminal engine selected: {} ({})",
-                diagnostics.engine,
-                diagnostics.selection_reason
-            ),
-        }
+        log::info!(
+            "terminal engine selected: {} ({})",
+            self.diagnostics.engine,
+            self.diagnostics.selection_reason
+        );
     }
 }
 
-pub(super) enum Backend {
-    Alacritty(Box<super::alacritty_backend::AlacrittyBackend>),
-    Tmon(Box<super::tmon_backend::TmonBackend>),
-}
+pub(super) struct Backend(Box<super::tmon_backend::TmonBackend>);
 
 impl Backend {
-    pub(super) fn engine_label(&self) -> &'static str {
-        match self {
-            Self::Alacritty(_) => "alacritty",
-            Self::Tmon(_) => "tmon",
-        }
-    }
-
     pub(super) fn select_native(
         size: TerminalSize,
         configured_working_dir: Option<&str>,
@@ -241,39 +80,18 @@ impl Backend {
         runtime_config: Option<&TerminalRuntimeConfig>,
         launch: Option<&TerminalLaunch>,
     ) -> anyhow::Result<BackendSelection> {
-        let start_alacritty = || {
-            super::alacritty_backend::AlacrittyBackend::new_with_launch_and_wakeup_notifier(
-                size,
-                configured_working_dir,
-                wakeup_notifier.clone(),
-                tab_title_shell_integration,
-                runtime_config,
-                launch,
-            )
-            .map(Box::new)
-            .map(Self::Alacritty)
-        };
-        let start_tmon = || {
-            super::tmon_backend::TmonBackend::new_with_launch_and_wakeup_notifier(
-                size,
-                configured_working_dir,
-                wakeup_notifier.clone(),
-                tab_title_shell_integration,
-                runtime_config,
-                launch,
-            )
-            .map(Box::new)
-            .map(Self::Tmon)
-        };
-
-        let (backend, reason, detail) = select_native_backend(
-            NativeBackendRequest::current(),
-            tmon::native_pty_available(),
-            start_alacritty,
-            start_tmon,
-            tmon_failure_is_fallback_eligible,
+        let backend = super::tmon_backend::TmonBackend::new_with_launch_and_wakeup_notifier(
+            size,
+            configured_working_dir,
+            wakeup_notifier,
+            tab_title_shell_integration,
+            runtime_config,
+            launch,
         )?;
-        let selection = BackendSelection::new(backend, reason, detail);
+        let selection = BackendSelection::new(
+            Self(Box::new(backend)),
+            TerminalEngineSelectionReason::TmonDefault,
+        );
         selection.log_native();
         Ok(selection)
     }
@@ -290,63 +108,28 @@ impl Backend {
         runtime_config: Option<&TerminalRuntimeConfig>,
         wakeup_notifier: Option<TerminalWakeupNotifier>,
     ) -> BackendSelection {
-        let (backend, reason) = select_display_backend(
-            NativeBackendRequest::current(),
-            || {
-                Self::Alacritty(Box::new(
-                    super::alacritty_backend::AlacrittyBackend::new_display_with_wakeup_notifier(
-                        size,
-                        runtime_config,
-                        wakeup_notifier.clone(),
-                    ),
-                ))
-            },
-            || {
-                Self::Tmon(Box::new(
-                    super::tmon_backend::TmonBackend::new_display_with_wakeup_notifier(
-                        size,
-                        runtime_config,
-                        wakeup_notifier.clone(),
-                    ),
-                ))
-            },
-        );
-        BackendSelection::new(backend, reason, None)
-    }
-
-    #[cfg(test)]
-    pub(super) fn new_alacritty_display_for_test(
-        size: TerminalSize,
-        runtime_config: Option<&TerminalRuntimeConfig>,
-    ) -> BackendSelection {
         BackendSelection::new(
-            Self::Alacritty(Box::new(
-                super::alacritty_backend::AlacrittyBackend::new_display(size, runtime_config),
+            Self(Box::new(
+                super::tmon_backend::TmonBackend::new_display_with_wakeup_notifier(
+                    size,
+                    runtime_config,
+                    wakeup_notifier,
+                ),
             )),
-            TerminalEngineSelectionReason::TestOverride,
-            None,
+            TerminalEngineSelectionReason::DisplayDefault,
         )
     }
 
     pub(super) fn feed_output(&self, bytes: &[u8]) {
-        match self {
-            Self::Alacritty(backend) => backend.feed_output(bytes),
-            Self::Tmon(backend) => backend.feed_output(bytes),
-        }
+        self.0.feed_output(bytes);
     }
 
     pub(super) fn child_pid(&self) -> Option<u32> {
-        match self {
-            Self::Alacritty(backend) => backend.child_pid(),
-            Self::Tmon(backend) => backend.child_pid(),
-        }
+        self.0.child_pid()
     }
 
     pub(super) fn set_wakeup_enabled(&self, enabled: bool) {
-        match self {
-            Self::Alacritty(backend) => backend.set_wakeup_enabled(enabled),
-            Self::Tmon(backend) => backend.set_wakeup_enabled(enabled),
-        }
+        self.0.set_wakeup_enabled(enabled);
     }
 
     pub(super) fn write(&self, input: &[u8]) {
@@ -356,10 +139,7 @@ impl Backend {
     }
 
     pub(super) fn try_write(&self, input: &[u8]) -> io::Result<()> {
-        match self {
-            Self::Alacritty(backend) => backend.try_write(input),
-            Self::Tmon(backend) => backend.try_write(input),
-        }
+        self.0.try_write(input)
     }
 
     pub(super) fn write_owned(&self, input: Vec<u8>) {
@@ -369,17 +149,11 @@ impl Backend {
     }
 
     pub(super) fn try_write_owned(&self, input: Vec<u8>) -> io::Result<()> {
-        match self {
-            Self::Alacritty(backend) => backend.try_write_owned(input),
-            Self::Tmon(backend) => backend.try_write_owned(input),
-        }
+        self.0.try_write_owned(input)
     }
 
     pub(super) fn hydrate_output(&self, bytes: &[u8]) {
-        match self {
-            Self::Alacritty(backend) => backend.hydrate_output(bytes),
-            Self::Tmon(backend) => backend.hydrate_output(bytes),
-        }
+        self.0.hydrate_output(bytes);
     }
 
     pub(super) fn write_str(&self, input: &str) {
@@ -389,10 +163,7 @@ impl Backend {
     }
 
     pub(super) fn try_write_str(&self, input: &str) -> io::Result<()> {
-        match self {
-            Self::Alacritty(backend) => backend.try_write_str(input),
-            Self::Tmon(backend) => backend.try_write_str(input),
-        }
+        self.0.try_write_str(input)
     }
 
     pub(super) fn resize(&mut self, new_size: TerminalSize) {
@@ -402,10 +173,7 @@ impl Backend {
     }
 
     pub(super) fn try_resize(&mut self, new_size: TerminalSize) -> io::Result<()> {
-        match self {
-            Self::Alacritty(backend) => backend.try_resize(new_size),
-            Self::Tmon(backend) => backend.try_resize(new_size),
-        }
+        self.0.try_resize(new_size)
     }
 
     pub(super) fn nudge_resize(&self) {
@@ -415,100 +183,61 @@ impl Backend {
     }
 
     pub(super) fn try_nudge_resize(&self) -> io::Result<()> {
-        match self {
-            Self::Alacritty(backend) => backend.try_nudge_resize(),
-            Self::Tmon(backend) => backend.try_nudge_resize(),
-        }
+        self.0.try_nudge_resize()
     }
 
     pub(super) fn size(&self) -> TerminalSize {
-        match self {
-            Self::Alacritty(backend) => backend.size(),
-            Self::Tmon(backend) => backend.size(),
-        }
+        self.0.size()
     }
 
     pub(super) fn kitty_graphics_placements(&self) -> Vec<KittyGraphicsRenderPlacement> {
-        match self {
-            Self::Alacritty(backend) => backend.kitty_graphics_placements(),
-            Self::Tmon(backend) => backend.kitty_graphics_placements(),
-        }
+        self.0.kitty_graphics_placements()
     }
 
     pub(super) fn kitty_graphics_revision(&self) -> u64 {
-        match self {
-            Self::Alacritty(backend) => backend.kitty_graphics_revision(),
-            Self::Tmon(backend) => backend.kitty_graphics_revision(),
-        }
+        self.0.kitty_graphics_revision()
     }
 
     pub(super) fn kitty_graphics_snapshot(&self) -> (u64, Vec<KittyGraphicsRenderPlacement>) {
-        match self {
-            Self::Alacritty(backend) => backend.kitty_graphics_snapshot(),
-            Self::Tmon(backend) => backend.kitty_graphics_snapshot(),
-        }
+        self.0.kitty_graphics_snapshot()
     }
 
     pub(super) fn drain_events(
         &self,
         host: &mut impl TerminalReplyHost,
     ) -> (Vec<TerminalEvent>, bool) {
-        match self {
-            Self::Alacritty(backend) => backend.drain_events(host),
-            Self::Tmon(backend) => backend.drain_events(host),
-        }
+        self.0.drain_events(host)
     }
 
     pub(super) fn set_query_colors(&mut self, query_colors: TerminalQueryColors) {
-        match self {
-            Self::Alacritty(backend) => backend.set_query_colors(query_colors),
-            Self::Tmon(backend) => backend.set_query_colors(query_colors),
-        }
+        self.0.set_query_colors(query_colors);
     }
 
     pub(super) fn palette(&self) -> crate::TerminalPalette {
-        match self {
-            Self::Alacritty(backend) => backend.palette(),
-            Self::Tmon(backend) => backend.palette(),
-        }
+        self.0.palette()
     }
 
     pub(super) fn snapshot(&self) -> TermyFrame {
-        match self {
-            Self::Alacritty(backend) => backend.snapshot(),
-            Self::Tmon(backend) => backend.snapshot(),
-        }
+        self.0.snapshot()
     }
 
     pub(super) fn frame_update(&self, force_full: bool) -> TermyFrameUpdate {
-        match self {
-            Self::Alacritty(backend) => backend.frame_update(force_full),
-            Self::Tmon(backend) => backend.frame_update(force_full),
-        }
+        self.0.frame_update(force_full)
     }
 
     pub(super) fn take_render_damage_snapshot(&self) -> TerminalRenderDamageSnapshot {
-        match self {
-            Self::Alacritty(backend) => backend.take_render_damage_snapshot(),
-            Self::Tmon(backend) => backend.take_render_damage_snapshot(),
-        }
+        self.0.take_render_damage_snapshot()
     }
 
     pub(super) fn render_read(&self, force_full: bool) -> TerminalRenderRead {
-        match self {
-            Self::Alacritty(backend) => backend.render_read(force_full),
-            Self::Tmon(backend) => backend.render_read(force_full),
-        }
+        self.0.render_read(force_full)
     }
 
     pub(super) fn visit_viewport_cells(
         &self,
         visitor: impl FnMut(usize, i32, usize, &crate::TerminalRenderCell),
     ) -> TerminalViewportMetadata {
-        match self {
-            Self::Alacritty(backend) => backend.visit_viewport_cells(visitor),
-            Self::Tmon(backend) => backend.visit_viewport_cells(visitor),
-        }
+        self.0.visit_viewport_cells(visitor)
     }
 
     pub(super) fn visit_viewport_ranges_at_generation(
@@ -517,21 +246,12 @@ impl Backend {
         spans: &[TerminalDirtySpan],
         visitor: impl FnMut(usize, usize, i32, usize, &crate::TerminalRenderCell),
     ) -> bool {
-        match self {
-            Self::Alacritty(backend) => {
-                backend.visit_viewport_ranges_at_generation(generation, spans, visitor)
-            }
-            Self::Tmon(backend) => {
-                backend.visit_viewport_ranges_at_generation(generation, spans, visitor)
-            }
-        }
+        self.0
+            .visit_viewport_ranges_at_generation(generation, spans, visitor)
     }
 
     pub(super) fn line_bounds(&self) -> (i32, i32) {
-        match self {
-            Self::Alacritty(backend) => backend.line_bounds(),
-            Self::Tmon(backend) => backend.line_bounds(),
-        }
+        self.0.line_bounds()
     }
 
     pub(super) fn visit_line_cells(
@@ -540,21 +260,12 @@ impl Backend {
         requested_last: i32,
         visitor: impl FnMut((i32, i32, usize), i32, usize, &crate::TerminalRenderCell),
     ) -> (i32, i32, usize) {
-        match self {
-            Self::Alacritty(backend) => {
-                backend.visit_line_cells(requested_first, requested_last, visitor)
-            }
-            Self::Tmon(backend) => {
-                backend.visit_line_cells(requested_first, requested_last, visitor)
-            }
-        }
+        self.0
+            .visit_line_cells(requested_first, requested_last, visitor)
     }
 
     pub(super) fn search(&self, query: &str) -> Vec<TermySearchMatch> {
-        match self {
-            Self::Alacritty(backend) => backend.search(query),
-            Self::Tmon(backend) => backend.search(query),
-        }
+        self.0.search(query)
     }
 
     pub(super) fn search_with_options(
@@ -562,17 +273,11 @@ impl Backend {
         query: &str,
         options: TermySearchOptions,
     ) -> Vec<TermySearchMatch> {
-        match self {
-            Self::Alacritty(backend) => backend.search_with_options(query, options),
-            Self::Tmon(backend) => backend.search_with_options(query, options),
-        }
+        self.0.search_with_options(query, options)
     }
 
     pub(super) fn search_shared(&self, query: &str) -> Vec<TermySharedSearchMatch> {
-        match self {
-            Self::Alacritty(backend) => backend.search_shared(query),
-            Self::Tmon(backend) => backend.search_shared(query),
-        }
+        self.0.search_shared(query)
     }
 
     pub(super) fn search_shared_with_options(
@@ -580,10 +285,7 @@ impl Backend {
         query: &str,
         options: TermySearchOptions,
     ) -> Vec<TermySharedSearchMatch> {
-        match self {
-            Self::Alacritty(backend) => backend.search_shared_with_options(query, options),
-            Self::Tmon(backend) => backend.search_shared_with_options(query, options),
-        }
+        self.0.search_shared_with_options(query, options)
     }
 
     pub(super) fn hyperlink_at(
@@ -591,10 +293,7 @@ impl Backend {
         row: usize,
         col: usize,
     ) -> Option<crate::links::DetectedLink> {
-        match self {
-            Self::Alacritty(backend) => backend.hyperlink_at(row, col),
-            Self::Tmon(backend) => backend.hyperlink_at(row, col),
-        }
+        self.0.hyperlink_at(row, col)
     }
 
     pub(super) fn link_at(
@@ -602,132 +301,63 @@ impl Backend {
         row: usize,
         col: usize,
     ) -> Option<crate::links::DetectedViewportLink> {
-        match self {
-            Self::Alacritty(backend) => backend.link_at(row, col),
-            Self::Tmon(backend) => backend.link_at(row, col),
-        }
+        self.0.link_at(row, col)
     }
 
     pub(super) fn take_damage_snapshot(&self) -> TerminalDamageSnapshot {
-        match self {
-            Self::Alacritty(backend) => backend.take_damage_snapshot(),
-            Self::Tmon(backend) => backend.take_damage_snapshot(),
-        }
+        self.0.take_damage_snapshot()
     }
 
     pub(super) fn scroll_display(&self, delta_lines: i32) -> bool {
-        match self {
-            Self::Alacritty(backend) => backend.scroll_display(delta_lines),
-            Self::Tmon(backend) => backend.scroll_display(delta_lines),
-        }
+        self.0.scroll_display(delta_lines)
     }
 
     pub(super) fn scroll_to_bottom(&self) -> bool {
-        match self {
-            Self::Alacritty(backend) => backend.scroll_to_bottom(),
-            Self::Tmon(backend) => backend.scroll_to_bottom(),
-        }
+        self.0.scroll_to_bottom()
     }
 
     pub(super) fn clear_scrollback(&self) -> bool {
-        match self {
-            Self::Alacritty(backend) => backend.clear_scrollback(),
-            Self::Tmon(backend) => backend.clear_scrollback(),
-        }
+        self.0.clear_scrollback()
     }
 
     pub(super) fn scroll_state(&self) -> (usize, usize) {
-        match self {
-            Self::Alacritty(backend) => backend.scroll_state(),
-            Self::Tmon(backend) => backend.scroll_state(),
-        }
+        self.0.scroll_state()
     }
 
     pub(super) fn cursor_state(&self) -> Option<TerminalCursorState> {
-        match self {
-            Self::Alacritty(backend) => backend.cursor_state(),
-            Self::Tmon(backend) => backend.cursor_state(),
-        }
+        self.0.cursor_state()
     }
 
     pub(super) fn cursor_position(&self) -> (usize, usize) {
-        match self {
-            Self::Alacritty(backend) => backend.cursor_position(),
-            Self::Tmon(backend) => backend.cursor_position(),
-        }
+        self.0.cursor_position()
     }
 
     pub(super) fn has_pending_events(&self) -> bool {
-        match self {
-            Self::Alacritty(backend) => backend.has_pending_events(),
-            Self::Tmon(backend) => backend.has_pending_events(),
-        }
+        self.0.has_pending_events()
     }
 
     pub(super) fn set_term_options(&self, options: TerminalOptions) {
-        match self {
-            Self::Alacritty(backend) => backend.set_term_options(options),
-            Self::Tmon(backend) => backend.set_term_options(options),
-        }
+        self.0.set_term_options(options);
     }
 
     pub(super) fn set_scrollback_history(&self, scrollback_history: usize) {
-        match self {
-            Self::Alacritty(backend) => backend.set_scrollback_history(scrollback_history),
-            Self::Tmon(backend) => backend.set_scrollback_history(scrollback_history),
-        }
+        self.0.set_scrollback_history(scrollback_history);
     }
 
     pub(super) fn bracketed_paste_mode(&self) -> bool {
-        match self {
-            Self::Alacritty(backend) => backend.bracketed_paste_mode(),
-            Self::Tmon(backend) => backend.bracketed_paste_mode(),
-        }
+        self.0.bracketed_paste_mode()
     }
 
     pub(super) fn mouse_mode(&self) -> TerminalMouseMode {
-        match self {
-            Self::Alacritty(backend) => backend.mouse_mode(),
-            Self::Tmon(backend) => backend.mouse_mode(),
-        }
+        self.0.mouse_mode()
     }
 
     pub(super) fn keyboard_mode(&self) -> TerminalKeyboardMode {
-        match self {
-            Self::Alacritty(backend) => backend.keyboard_mode(),
-            Self::Tmon(backend) => backend.keyboard_mode(),
-        }
+        self.0.keyboard_mode()
     }
 
     pub(super) fn alternate_screen_mode(&self) -> bool {
-        match self {
-            Self::Alacritty(backend) => backend.alternate_screen_mode(),
-            Self::Tmon(backend) => backend.alternate_screen_mode(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn send_wakeup_for_test(&self) {
-        match self {
-            Self::Alacritty(backend) => backend.send_wakeup_for_test(),
-            Self::Tmon(_) => panic!("Alacritty wakeup test used a Tmon backend"),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn try_recv_event_for_test(&self) -> Option<RuntimeEvent> {
-        match self {
-            Self::Alacritty(backend) => backend.try_recv_event_for_test(),
-            Self::Tmon(_) => panic!("Alacritty wakeup test used a Tmon backend"),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn event_queue_is_empty_for_test(&self) -> bool {
-        match self {
-            Self::Alacritty(backend) => backend.event_queue_is_empty_for_test(),
-            Self::Tmon(_) => panic!("Alacritty wakeup test used a Tmon backend"),
-        }
+        self.0.alternate_screen_mode()
     }
 }
 
@@ -735,156 +365,6 @@ impl Backend {
 mod tests {
     use super::*;
 
-    const ALACRITTY_DISCONNECT_CHILD: &str = "TERMY_CORE_ALACRITTY_DISCONNECT_CHILD";
-    const ALACRITTY_DISCONNECT_TEST: &str =
-        "runtime::engine_backend::tests::forced_alacritty_reports_disconnected_pty_operations";
-
-    #[test]
-    fn backend_selector_only_accepts_exact_private_values() {
-        assert_eq!(BackendChoice::from_test_value(None), None);
-        assert_eq!(
-            BackendChoice::from_test_value(Some(std::ffi::OsStr::new("alacritty"))),
-            Some(BackendChoice::Alacritty)
-        );
-        assert_eq!(
-            BackendChoice::from_test_value(Some(std::ffi::OsStr::new("tmon"))),
-            Some(BackendChoice::Tmon)
-        );
-        assert_eq!(
-            BackendChoice::from_test_value(Some(std::ffi::OsStr::new("1"))),
-            None
-        );
-        assert_eq!(
-            BackendChoice::from_test_value(Some(std::ffi::OsStr::new("TMON"))),
-            None
-        );
-    }
-
-    #[test]
-    fn native_selector_defaults_to_tmon_and_requires_exact_force_value() {
-        assert_eq!(
-            NativeBackendRequest::from_values(None, None),
-            NativeBackendRequest::PreferTmon
-        );
-        for value in [
-            Some(std::ffi::OsStr::new("0")),
-            Some(std::ffi::OsStr::new("true")),
-        ] {
-            assert_eq!(
-                NativeBackendRequest::from_values(None, value),
-                NativeBackendRequest::PreferTmon
-            );
-        }
-        assert_eq!(
-            NativeBackendRequest::from_values(None, Some(std::ffi::OsStr::new("1"))),
-            NativeBackendRequest::ForcedAlacritty
-        );
-    }
-
-    #[test]
-    fn private_test_override_precedes_emergency_force_value() {
-        assert_eq!(
-            NativeBackendRequest::from_values(
-                Some(std::ffi::OsStr::new("tmon")),
-                Some(std::ffi::OsStr::new("1")),
-            ),
-            NativeBackendRequest::TestOverride(BackendChoice::Tmon)
-        );
-        assert_eq!(
-            NativeBackendRequest::from_values(Some(std::ffi::OsStr::new("alacritty")), None,),
-            NativeBackendRequest::TestOverride(BackendChoice::Alacritty)
-        );
-    }
-
-    #[test]
-    fn display_selector_honors_exact_force_and_private_override_precedence() {
-        let (backend, reason) = select_display_backend(
-            NativeBackendRequest::from_values(None, Some(std::ffi::OsStr::new("1"))),
-            || "alacritty",
-            || "tmon",
-        );
-        assert_eq!(backend, "alacritty");
-        assert_eq!(reason, TerminalEngineSelectionReason::ForcedAlacritty);
-
-        let (backend, reason) = select_display_backend(
-            NativeBackendRequest::from_values(
-                Some(std::ffi::OsStr::new("tmon")),
-                Some(std::ffi::OsStr::new("1")),
-            ),
-            || "alacritty",
-            || "tmon",
-        );
-        assert_eq!(backend, "tmon");
-        assert_eq!(reason, TerminalEngineSelectionReason::TestOverride);
-    }
-
-    #[test]
-    fn eligible_tmon_initialization_failure_uses_alacritty_with_reason() {
-        let alacritty_starts = std::cell::Cell::new(0);
-        let (backend, reason, detail) = select_native_backend(
-            NativeBackendRequest::PreferTmon,
-            true,
-            || {
-                alacritty_starts.set(alacritty_starts.get() + 1);
-                Ok("alacritty")
-            },
-            || Err(anyhow::anyhow!("injected Tmon initialization failure")),
-            |_| true,
-        )
-        .expect("eligible initialization failure should fall back");
-
-        assert_eq!(backend, "alacritty");
-        assert_eq!(
-            reason,
-            TerminalEngineSelectionReason::TmonInitializationFailure
-        );
-        assert_eq!(
-            detail.as_deref(),
-            Some("injected Tmon initialization failure")
-        );
-        assert_eq!(alacritty_starts.get(), 1);
-    }
-
-    #[test]
-    fn ineligible_tmon_failure_returns_without_starting_alacritty() {
-        let alacritty_starts = std::cell::Cell::new(0);
-        let error = select_native_backend(
-            NativeBackendRequest::PreferTmon,
-            true,
-            || {
-                alacritty_starts.set(alacritty_starts.get() + 1);
-                Ok("alacritty")
-            },
-            || Err(anyhow::anyhow!("invalid launch")),
-            |_| false,
-        )
-        .expect_err("invalid launch must stay visible");
-
-        assert_eq!(error.to_string(), "invalid launch");
-        assert_eq!(alacritty_starts.get(), 0);
-    }
-
-    #[test]
-    fn unavailable_tmon_uses_structured_fallback_without_starting_tmon() {
-        let tmon_starts = std::cell::Cell::new(0);
-        let (backend, reason, detail) = select_native_backend(
-            NativeBackendRequest::PreferTmon,
-            false,
-            || Ok("alacritty"),
-            || {
-                tmon_starts.set(tmon_starts.get() + 1);
-                Ok("tmon")
-            },
-            |_| true,
-        )
-        .expect("unavailable Tmon should use the retained backend");
-
-        assert_eq!(backend, "alacritty");
-        assert_eq!(reason, TerminalEngineSelectionReason::TmonUnavailable);
-        assert!(detail.is_some());
-        assert_eq!(tmon_starts.get(), 0);
-    }
-
     #[cfg(any(
         target_os = "linux",
         target_os = "android",
@@ -892,103 +372,7 @@ mod tests {
         target_os = "windows"
     ))]
     #[test]
-    fn forced_alacritty_reports_disconnected_pty_operations() {
-        if env::var_os(ALACRITTY_DISCONNECT_CHILD).is_none() {
-            let output = std::process::Command::new(
-                env::current_exe().expect("current core test executable"),
-            )
-            .arg("--exact")
-            .arg(ALACRITTY_DISCONNECT_TEST)
-            .arg("--nocapture")
-            .env_remove(TEST_BACKEND_ENV)
-            .env(FORCE_ALACRITTY_ENV, "1")
-            .env(ALACRITTY_DISCONNECT_CHILD, "1")
-            .output()
-            .expect("forced-Alacritty disconnect helper should start");
-            assert!(
-                output.status.success(),
-                "forced-Alacritty disconnect helper failed\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-            return;
-        }
-
-        let original_size = TerminalSize::default();
-        let mut terminal = Terminal::new(original_size, None, None, None, None, Some("exit"))
-            .expect("forced Alacritty terminal should start");
-        assert_eq!(terminal.engine_label(), "alacritty");
-        assert_eq!(
-            terminal.engine_diagnostics().selection_reason,
-            TerminalEngineSelectionReason::ForcedAlacritty
-        );
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let disconnected = loop {
-            match terminal.try_write(b"disconnect probe") {
-                Ok(()) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Ok(()) => panic!("Alacritty PTY event loop did not disconnect in time"),
-                Err(error) => break error,
-            }
-        };
-        assert_eq!(disconnected.kind(), ErrorKind::BrokenPipe);
-        terminal
-            .try_write(&[])
-            .expect("empty borrowed writes remain no-ops after disconnect");
-        terminal
-            .try_write_owned(Vec::new())
-            .expect("empty owned writes remain no-ops after disconnect");
-        assert_eq!(
-            terminal
-                .try_write_owned(b"owned probe".to_vec())
-                .expect_err("owned writes after PTY exit must fail")
-                .kind(),
-            ErrorKind::BrokenPipe
-        );
-        assert_eq!(
-            terminal
-                .try_write_str("string probe")
-                .expect_err("string writes after PTY exit must fail")
-                .kind(),
-            ErrorKind::BrokenPipe
-        );
-        assert_eq!(
-            terminal
-                .try_nudge_resize()
-                .expect_err("resize nudges after PTY exit must fail")
-                .kind(),
-            ErrorKind::BrokenPipe
-        );
-
-        let next_size = TerminalSize {
-            cols: original_size.cols + 1,
-            ..original_size
-        };
-        assert_eq!(
-            terminal
-                .try_resize(next_size)
-                .expect_err("resizes after PTY exit must fail")
-                .kind(),
-            ErrorKind::BrokenPipe
-        );
-        assert_eq!(terminal.size(), original_size);
-        let frame = terminal.snapshot();
-        assert_eq!(
-            (frame.cols, frame.rows),
-            (original_size.cols, original_size.rows)
-        );
-    }
-
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "windows"
-    ))]
-    #[test]
-    fn native_terminal_reports_the_actual_selected_engine_and_reason() {
+    fn native_terminal_reports_tmon_as_the_only_engine() {
         let terminal = Terminal::new(
             TerminalSize::default(),
             None,
@@ -998,49 +382,16 @@ mod tests {
             Some("exit"),
         )
         .expect("native diagnostic probe should start");
-        let diagnostics = terminal.engine_diagnostics();
-        let test_override =
-            BackendChoice::from_test_value(env::var_os(TEST_BACKEND_ENV).as_deref());
 
-        match test_override {
-            Some(BackendChoice::Alacritty) => {
-                assert_eq!(diagnostics.engine, "alacritty");
-                assert_eq!(
-                    diagnostics.selection_reason,
-                    TerminalEngineSelectionReason::TestOverride
-                );
+        assert_eq!(terminal.engine_label(), "tmon");
+        assert_eq!(
+            terminal.engine_diagnostics(),
+            &TerminalEngineDiagnostics {
+                engine: "tmon",
+                selection_reason: TerminalEngineSelectionReason::TmonDefault,
+                fallback_detail: None,
             }
-            Some(BackendChoice::Tmon) => {
-                assert_eq!(diagnostics.engine, "tmon");
-                assert_eq!(
-                    diagnostics.selection_reason,
-                    TerminalEngineSelectionReason::TestOverride
-                );
-            }
-            None if env::var_os(FORCE_ALACRITTY_ENV).as_deref()
-                == Some(std::ffi::OsStr::new("1")) =>
-            {
-                assert_eq!(diagnostics.engine, "alacritty");
-                assert_eq!(
-                    diagnostics.selection_reason,
-                    TerminalEngineSelectionReason::ForcedAlacritty
-                );
-            }
-            None if tmon::native_pty_available() => {
-                assert_eq!(diagnostics.engine, "tmon");
-                assert_eq!(
-                    diagnostics.selection_reason,
-                    TerminalEngineSelectionReason::TmonDefault
-                );
-            }
-            None => {
-                assert_eq!(diagnostics.engine, "alacritty");
-                assert_eq!(
-                    diagnostics.selection_reason,
-                    TerminalEngineSelectionReason::TmonUnavailable
-                );
-            }
-        }
+        );
     }
 
     #[cfg(any(
@@ -1050,12 +401,12 @@ mod tests {
         target_os = "windows"
     ))]
     #[test]
-    fn invalid_tmon_launch_is_not_eligible_for_alacritty_fallback() {
+    fn invalid_tmon_launch_is_returned_without_fallback() {
         let missing_program = std::env::temp_dir()
             .join(format!("missing-termy-program-{}", std::process::id()))
             .to_string_lossy()
             .into_owned();
-        let error = super::super::tmon_backend::TmonBackend::new_with_launch_and_wakeup_notifier(
+        let error = Backend::new_with_launch_and_wakeup_notifier(
             TerminalSize::default(),
             None,
             None,
@@ -1070,6 +421,5 @@ mod tests {
         .expect("a missing program should fail before a terminal starts");
 
         assert!(error.downcast_ref::<tmon::Error>().is_some());
-        assert!(!tmon_failure_is_fallback_eligible(&error));
     }
 }

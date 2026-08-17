@@ -7834,7 +7834,6 @@ dependencies = [
 name = "termy_core"
 version = "0.2.0"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "base64",
  "compact_str",
@@ -7844,8 +7843,6 @@ dependencies = [
  "fontdb",
  "log",
  "png 0.18.0",
- "polling",
- "rustix-openpty",
  "tempfile",
  "termy_config_core",
  "termy_search",
@@ -10265,7 +10262,6 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "roxmltree",
  "serde",

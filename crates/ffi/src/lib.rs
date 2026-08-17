@@ -3483,9 +3483,8 @@ pub unsafe extern "C" fn termy_query_color_default_foreground(
 mod tests {
     use super::*;
 
-    const ALACRITTY_DISCONNECT_CHILD: &str = "TERMY_FFI_ALACRITTY_DISCONNECT_CHILD";
-    const ALACRITTY_DISCONNECT_TEST: &str =
-        "tests::forced_alacritty_maps_disconnected_pty_operations";
+    const TMON_DISCONNECT_CHILD: &str = "TERMY_FFI_TMON_DISCONNECT_CHILD";
+    const TMON_DISCONNECT_TEST: &str = "tests::tmon_maps_disconnected_pty_operations";
 
     #[test]
     fn default_size_is_nonzero() {
@@ -4198,22 +4197,20 @@ mod tests {
         target_os = "windows"
     ))]
     #[test]
-    fn forced_alacritty_maps_disconnected_pty_operations() {
-        if std::env::var_os(ALACRITTY_DISCONNECT_CHILD).is_none() {
+    fn tmon_maps_disconnected_pty_operations() {
+        if std::env::var_os(TMON_DISCONNECT_CHILD).is_none() {
             let output = std::process::Command::new(
                 std::env::current_exe().expect("current FFI test executable"),
             )
             .arg("--exact")
-            .arg(ALACRITTY_DISCONNECT_TEST)
+            .arg(TMON_DISCONNECT_TEST)
             .arg("--nocapture")
-            .env_remove("TERMY_CORE_TEST_BACKEND")
-            .env("TERMY_FORCE_ALACRITTY_ENGINE", "1")
-            .env(ALACRITTY_DISCONNECT_CHILD, "1")
+            .env(TMON_DISCONNECT_CHILD, "1")
             .output()
-            .expect("forced-Alacritty FFI disconnect helper should start");
+            .expect("Tmon FFI disconnect helper should start");
             assert!(
                 output.status.success(),
-                "forced-Alacritty FFI disconnect helper failed\nstdout:\n{}\nstderr:\n{}",
+                "Tmon FFI disconnect helper failed\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             );
@@ -4233,10 +4230,10 @@ mod tests {
             TermyFfiStatus::Ok
         );
         let diagnostics = unsafe { (*terminal).terminal.engine_diagnostics() };
-        assert_eq!(diagnostics.engine, "alacritty");
+        assert_eq!(diagnostics.engine, "tmon");
         assert_eq!(
             diagnostics.selection_reason,
-            termy_core::TerminalEngineSelectionReason::ForcedAlacritty
+            termy_core::TerminalEngineSelectionReason::TmonDefault
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -4246,7 +4243,7 @@ mod tests {
                 TermyFfiStatus::Ok if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                TermyFfiStatus::Ok => panic!("Alacritty PTY event loop did not disconnect in time"),
+                TermyFfiStatus::Ok => panic!("Tmon PTY worker did not disconnect in time"),
                 TermyFfiStatus::WriteFailed => break,
                 status => panic!("unexpected terminal write status: {status:?}"),
             }
