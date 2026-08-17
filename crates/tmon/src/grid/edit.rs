@@ -1,40 +1,6 @@
 use super::view::*;
 use super::*;
 
-// Real grapheme clusters are tiny, but leave generous headroom for unusual
-// scripts while preventing one cell from retaining an unbounded mark stream.
-pub(super) const MAX_COMBINING_BYTES_PER_CELL: usize = 4 * 1024;
-
-impl CombiningText {
-    fn push(&mut self, character: char) -> bool {
-        let mut encoded = [0; 4];
-        let encoded = character.encode_utf8(&mut encoded).as_bytes();
-        if self.as_str().len().saturating_add(encoded.len()) > MAX_COMBINING_BYTES_PER_CELL {
-            return false;
-        }
-        match self {
-            Self::Inline { bytes, len } => {
-                let current_len = usize::from(*len);
-                if current_len + encoded.len() <= INLINE_COMBINING_BYTES {
-                    bytes[current_len..current_len + encoded.len()].copy_from_slice(encoded);
-                    *len = (current_len + encoded.len()) as u8;
-                    return true;
-                }
-
-                let mut combined = String::with_capacity(current_len + encoded.len());
-                combined.push_str(
-                    std::str::from_utf8(&bytes[..current_len])
-                        .expect("inline combining text is encoded from valid characters"),
-                );
-                combined.push(character);
-                *self = Self::Heap(combined);
-            }
-            Self::Heap(text) => text.push(character),
-        }
-        true
-    }
-}
-
 impl Grid {
     pub(crate) fn new(
         cols: u16,
@@ -77,13 +43,6 @@ impl Grid {
             palette: Palette::default(),
             hyperlinks: HashMap::new(),
             hyperlink_identities: HashMap::new(),
-            retained_hyperlink_bytes: 0,
-            failed_hyperlink_prune_generations: None,
-            hyperlink_root_generation: 0,
-            hyperlink_root_retry_available: false,
-            hyperlink_prune_backoff: 1,
-            #[cfg(test)]
-            hyperlink_prune_count: 0,
             next_hyperlink_id: 1,
             next_hyperlink_prune_len: HYPERLINK_PRUNE_MIN_LEN,
             extras: HashMap::new(),
@@ -357,16 +316,6 @@ impl Grid {
         );
 
         let pen = self.pen();
-        let removes_hyperlink_root = !self.hyperlinks.is_empty()
-            && self.active().row(row)[col..col + run_len]
-                .iter()
-                .any(|cell| {
-                    self.cell_hyperlink_id(cell)
-                        .is_some_and(|id| Some(id) != pen.hyperlink_id)
-                });
-        if removes_hyperlink_root {
-            self.note_hyperlink_root_removed();
-        }
         for (cell, byte) in self.active_mut().row_mut_through(row, col + run_len)
             [col..col + run_len]
             .iter_mut()
@@ -494,9 +443,8 @@ impl Grid {
                 .get_mut(&metadata_id)
                 .expect("pooled cell metadata always resolves");
             debug_assert_eq!(extra.hyperlink_id, hyperlink_id);
-            if extra.combining.push(character) {
-                self.damage.mark(row, col, col);
-            }
+            extra.combining.push(character);
+            self.damage.mark(row, col, col);
             return;
         }
 
@@ -519,8 +467,8 @@ impl Grid {
             } else {
                 CombiningText::from_char(character)
             };
-            if cell.has_combining() && !combining.push(character) {
-                return;
+            if cell.has_combining() {
+                combining.push(character);
             }
             self.insert_extra(CellExtra {
                 combining,
@@ -613,13 +561,6 @@ impl Grid {
 
     pub(super) fn write_cell_at(&mut self, row: usize, col: usize, cell: Cell) {
         let old = self.active().row(row)[col];
-        if !self.hyperlinks.is_empty() {
-            let old_hyperlink = self.cell_hyperlink_id(&old);
-            let new_hyperlink = self.cell_hyperlink_id(&cell);
-            if old_hyperlink.is_some() && old_hyperlink != new_hyperlink {
-                self.note_hyperlink_root_removed();
-            }
-        }
         let old_width = character_width(old.character);
         let overwrites_wide = old.wide_spacer() || old_width > 1;
         if overwrites_wide && col <= 1 {
@@ -781,20 +722,10 @@ impl Grid {
     }
 
     pub(crate) fn save_cursor(&mut self) {
-        let previous = self.active().saved_pen.hyperlink_id;
-        let next = self.pen().hyperlink_id;
-        if previous.is_some() && previous != next {
-            self.note_hyperlink_root_removed();
-        }
         self.active_mut().save_cursor();
     }
 
     pub(crate) fn restore_cursor(&mut self) {
-        let previous = self.pen().hyperlink_id;
-        let next = self.active().saved_pen.hyperlink_id;
-        if previous.is_some() && previous != next {
-            self.note_hyperlink_root_removed();
-        }
         self.active_mut().restore_cursor();
     }
 
@@ -880,16 +811,6 @@ impl Grid {
                 });
                 let blank = self.pen().blank();
                 if self.alternate_active {
-                    if !self.hyperlinks.is_empty()
-                        && self
-                            .active()
-                            .cells
-                            .iter()
-                            .flatten()
-                            .any(Cell::has_hyperlink)
-                    {
-                        self.note_hyperlink_root_removed();
-                    }
                     self.active_mut().fill(blank);
                 } else {
                     self.resize_anchor_suppressed_after_clear = true;
@@ -907,14 +828,6 @@ impl Grid {
                         self.shift_rows_up(0, rows - 1, positions, true);
                     }
                     let reset_rows = rows.saturating_sub(positions);
-                    if !self.hyperlinks.is_empty()
-                        && self.primary.cells[..reset_rows]
-                            .iter()
-                            .flatten()
-                            .any(Cell::has_hyperlink)
-                    {
-                        self.note_hyperlink_root_removed();
-                    }
                     for target in 0..reset_rows {
                         self.primary.cells[target].fill(blank);
                         self.primary.row_extents[target] =
@@ -983,13 +896,6 @@ impl Grid {
         } else {
             right
         };
-        let removes_hyperlink_root = !self.hyperlinks.is_empty()
-            && self.active().row(row)[left..=fill_right]
-                .iter()
-                .any(|cell| cell.has_hyperlink() && (!selective || !cell.protected()));
-        if removes_hyperlink_root {
-            self.note_hyperlink_root_removed();
-        }
         {
             let screen = self.active_mut();
             let row_cells = &mut screen.cells[row];
@@ -1039,13 +945,6 @@ impl Grid {
             return;
         }
         let blank = self.pen().blank();
-        if !self.hyperlinks.is_empty()
-            && self.active().row(row)[cols - count..]
-                .iter()
-                .any(Cell::has_hyperlink)
-        {
-            self.note_hyperlink_root_removed();
-        }
         let row_cells = self.active_mut().row_mut(row);
         row_cells.copy_within(col..cols - count, col + count);
         row_cells[col..col + count].fill(blank);
@@ -1064,13 +963,6 @@ impl Grid {
         let end = col.saturating_add(count).min(cols - 1);
         let num_cells = cols - end;
         let blank = self.pen().blank();
-        if !self.hyperlinks.is_empty()
-            && self.active().row(row)[col..=end]
-                .iter()
-                .any(Cell::has_hyperlink)
-        {
-            self.note_hyperlink_root_removed();
-        }
         let row_cells = self.active_mut().row_mut(row);
         for offset in 0..num_cells {
             row_cells.swap(col + offset, end + offset);
@@ -1135,15 +1027,6 @@ impl Grid {
         let alternate = self.alternate_active;
         let history_before = self.history.len();
         let blank = self.pen().blank();
-        if !self.hyperlinks.is_empty()
-            && (!record_history || self.history_limit == 0)
-            && self.active().cells[top..top + count]
-                .iter()
-                .flatten()
-                .any(Cell::has_hyperlink)
-        {
-            self.note_hyperlink_root_removed();
-        }
         {
             let screen = self.active_mut();
             screen.cells[top..=bottom].rotate_left(count);
@@ -1199,14 +1082,6 @@ impl Grid {
         let alternate = self.alternate_active;
         let history_size = self.history.len();
         let blank = self.pen().blank();
-        if !self.hyperlinks.is_empty()
-            && self.active().cells[bottom + 1 - count..=bottom]
-                .iter()
-                .flatten()
-                .any(Cell::has_hyperlink)
-        {
-            self.note_hyperlink_root_removed();
-        }
         {
             let screen = self.active_mut();
             screen.cells[top..=bottom].rotate_right(count);
@@ -1272,9 +1147,6 @@ impl Grid {
 
     pub(super) fn pop_history_front(&mut self) -> Option<HistoryRow> {
         let row = self.history.pop_front()?;
-        if !self.hyperlinks.is_empty() && row.iter().any(|cell| cell.has_hyperlink()) {
-            self.note_hyperlink_root_removed();
-        }
         self.remove_history_row_extras(&row);
         Some(row)
     }

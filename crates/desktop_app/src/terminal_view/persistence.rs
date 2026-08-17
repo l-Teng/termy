@@ -225,10 +225,7 @@ impl TerminalView {
                     text.reserve(range.columns);
                 }
                 let character = cell.character();
-                if cell.is_trailing_wide_spacer() {
-                    return;
-                }
-                if character == '\0' || character.is_control() {
+                if character == '\0' || cell.is_trailing_wide_spacer() || character.is_control() {
                     text.push(' ');
                 } else {
                     text.push(character);
@@ -267,10 +264,7 @@ impl TerminalView {
             }
 
             let character = cell.character();
-            if cell.is_trailing_wide_spacer() {
-                return;
-            }
-            if character == '\0' || character.is_control() {
+            if character == '\0' || cell.is_trailing_wide_spacer() || character.is_control() {
                 joined.push(' ');
             } else {
                 joined.push(character);
@@ -1352,27 +1346,6 @@ mod tests {
     use super::{PersistedNativeLayoutNode, Terminal, TerminalSize, TerminalView};
     use crate::terminal_view::PaneResizeAxis;
     use crate::workspace_store::{StoredPane, StoredTab, StoredWorkspace};
-
-    #[test]
-    fn persisted_text_round_trips_through_tmon() {
-        let size = TerminalSize {
-            cols: 32,
-            rows: 2,
-            ..TerminalSize::default()
-        };
-        let writer = Terminal::new_test_display(size);
-        writer.hydrate_output("persisted-界-state".as_bytes());
-        let text = TerminalView::extract_persisted_buffer_line(&writer, 0)
-            .expect("writer line should exist");
-
-        let reader = Terminal::new_test_display(size);
-        reader.hydrate_output(text.as_bytes());
-
-        assert_eq!(
-            TerminalView::extract_persisted_buffer_line(&reader, 0).as_deref(),
-            Some("persisted-界-state")
-        );
-    }
 
     #[test]
     fn persisted_core_buffer_preserves_combining_characters_in_history() {

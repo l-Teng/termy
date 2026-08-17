@@ -80,44 +80,71 @@ impl TerminalRenderDamageSnapshot {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct TerminalCellRef<'a>(&'a termy_core::TerminalRenderCell);
+pub(super) enum TerminalCellRef<'a> {
+    Tmux(&'a alacritty_terminal::term::cell::Cell),
+    Native(&'a termy_core::TerminalRenderCell),
+}
 
-impl<'a> From<&'a termy_core::TerminalRenderCell> for TerminalCellRef<'a> {
-    fn from(cell: &'a termy_core::TerminalRenderCell) -> Self {
-        Self(cell)
+impl<'a> From<&'a alacritty_terminal::term::cell::Cell> for TerminalCellRef<'a> {
+    fn from(cell: &'a alacritty_terminal::term::cell::Cell) -> Self {
+        Self::Tmux(cell)
     }
 }
 
-impl<'a> TerminalCellRef<'a> {
-    pub(super) fn as_core(self) -> &'a termy_core::TerminalRenderCell {
-        self.0
+impl<'a> From<&'a termy_core::TerminalRenderCell> for TerminalCellRef<'a> {
+    fn from(cell: &'a termy_core::TerminalRenderCell) -> Self {
+        Self::Native(cell)
     }
+}
 
+impl TerminalCellRef<'_> {
     pub(super) fn character(self) -> char {
-        self.0.text.chars().next().unwrap_or('\0')
+        match self {
+            Self::Tmux(cell) => cell.c,
+            Self::Native(cell) => cell.text.chars().next().unwrap_or('\0'),
+        }
     }
 
     pub(super) fn is_wide_spacer(self) -> bool {
-        self.0.wide_character_spacer || self.0.leading_wide_character_spacer
+        match self {
+            Self::Tmux(cell) => cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+            Self::Native(cell) => cell.wide_character_spacer || cell.leading_wide_character_spacer,
+        }
     }
 
     pub(super) fn is_trailing_wide_spacer(self) -> bool {
-        self.0.wide_character_spacer
+        match self {
+            Self::Tmux(cell) => cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+            Self::Native(cell) => cell.wide_character_spacer,
+        }
     }
 
     pub(super) fn is_hidden(self) -> bool {
-        self.0.hidden
+        match self {
+            Self::Tmux(cell) => cell.flags.contains(Flags::HIDDEN),
+            Self::Native(cell) => cell.hidden,
+        }
     }
 
     pub(super) fn combining(self) -> Option<SharedString> {
-        cell_text_suffix(self.0)
-            .map(str::to_owned)
-            .map(SharedString::from)
+        match self {
+            Self::Tmux(_) => None,
+            Self::Native(cell) => cell_text_suffix(cell)
+                .map(str::to_owned)
+                .map(SharedString::from),
+        }
     }
 
     pub(super) fn append_combining_to(self, text: &mut String) {
-        if let Some(suffix) = cell_text_suffix(self.0) {
-            text.push_str(suffix);
+        match self {
+            Self::Tmux(_) => {}
+            Self::Native(cell) => {
+                if let Some(suffix) = cell_text_suffix(cell) {
+                    text.push_str(suffix);
+                }
+            }
         }
     }
 }
@@ -133,31 +160,8 @@ pub(super) fn terminal_engine_label(terminal: Option<&Terminal>) -> &'static str
         Some(Terminal::Native(terminal)) => terminal
             .lock()
             .map_or("unknown", |terminal| terminal.engine_label()),
-        Some(Terminal::Tmux(terminal)) => terminal.engine_label(),
+        Some(Terminal::Tmux(_)) => "alacritty",
         None => "-",
-    }
-}
-
-pub(super) fn terminal_engine_selection_label(terminal: Option<&Terminal>) -> String {
-    match terminal {
-        Some(Terminal::Native(terminal)) => terminal.lock().map_or_else(
-            |_| "unknown".to_string(),
-            |terminal| {
-                let diagnostics = terminal.engine_diagnostics();
-                diagnostics.fallback_detail.as_deref().map_or_else(
-                    || diagnostics.selection_reason.to_string(),
-                    |detail| format!("{}: {detail}", diagnostics.selection_reason),
-                )
-            },
-        ),
-        Some(Terminal::Tmux(terminal)) => {
-            let diagnostics = terminal.engine_diagnostics();
-            diagnostics.fallback_detail.as_deref().map_or_else(
-                || diagnostics.selection_reason.to_string(),
-                |detail| format!("{}: {detail}", diagnostics.selection_reason),
-            )
-        }
-        None => "-".to_string(),
     }
 }
 
@@ -222,7 +226,7 @@ mod tests {
 
         let mut observed = false;
         terminal.visit_viewport_cells(|_, _, _, cell| {
-            let cell = TerminalCellRef::from(cell);
+            let cell = TerminalCellRef::Native(cell);
             if cell.character() == 'e' {
                 observed = true;
                 assert_eq!(

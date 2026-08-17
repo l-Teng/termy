@@ -2621,10 +2621,10 @@ pub unsafe extern "C" fn termy_terminal_write(
         }
 
         let bytes = unsafe { slice::from_raw_parts(bytes_ptr, bytes_len) };
-        match unsafe { (*terminal).terminal.try_write(bytes) } {
-            Ok(()) => TermyFfiStatus::Ok,
-            Err(_) => TermyFfiStatus::WriteFailed,
+        unsafe {
+            (*terminal).terminal.write(bytes);
         }
+        TermyFfiStatus::Ok
     })
 }
 
@@ -2792,15 +2792,12 @@ pub unsafe extern "C" fn termy_terminal_resize(
         unsafe {
             let terminal = &mut (*terminal).terminal;
             let next_size = size.into();
-            let result = if terminal.size() == next_size {
+            if terminal.size() == next_size {
                 // Preserve the legacy C/Swift contract: embedders may resend
                 // the current dimensions solely to deliver SIGWINCH to a TUI.
-                terminal.try_nudge_resize()
+                terminal.nudge_resize();
             } else {
-                terminal.try_resize(next_size)
-            };
-            if result.is_err() {
-                return TermyFfiStatus::WriteFailed;
+                terminal.resize(next_size);
             }
         }
         TermyFfiStatus::Ok
@@ -3482,9 +3479,6 @@ pub unsafe extern "C" fn termy_query_color_default_foreground(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const TMON_DISCONNECT_CHILD: &str = "TERMY_FFI_TMON_DISCONNECT_CHILD";
-    const TMON_DISCONNECT_TEST: &str = "tests::tmon_maps_disconnected_pty_operations";
 
     #[test]
     fn default_size_is_nonzero() {
@@ -4187,89 +4181,6 @@ mod tests {
             TermyFfiStatus::Ok
         );
         waiter.join().expect("wakeup thread joins cleanly");
-        assert_eq!(unsafe { termy_terminal_free(terminal) }, TermyFfiStatus::Ok);
-    }
-
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "windows"
-    ))]
-    #[test]
-    fn tmon_maps_disconnected_pty_operations() {
-        if std::env::var_os(TMON_DISCONNECT_CHILD).is_none() {
-            let output = std::process::Command::new(
-                std::env::current_exe().expect("current FFI test executable"),
-            )
-            .arg("--exact")
-            .arg(TMON_DISCONNECT_TEST)
-            .arg("--nocapture")
-            .env(TMON_DISCONNECT_CHILD, "1")
-            .output()
-            .expect("Tmon FFI disconnect helper should start");
-            assert!(
-                output.status.success(),
-                "Tmon FFI disconnect helper failed\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-            return;
-        }
-
-        let size = TermyFfiSize {
-            cols: 24,
-            rows: 6,
-            cell_width: 9.0,
-            cell_height: 18.0,
-        };
-        let command = b"exit";
-        let mut terminal = ptr::null_mut();
-        assert_eq!(
-            unsafe { termy_terminal_new(size, command.as_ptr(), command.len(), &mut terminal) },
-            TermyFfiStatus::Ok
-        );
-        let diagnostics = unsafe { (*terminal).terminal.engine_diagnostics() };
-        assert_eq!(diagnostics.engine, "tmon");
-        assert_eq!(
-            diagnostics.selection_reason,
-            termy_core::TerminalEngineSelectionReason::TmonDefault
-        );
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let input = b"disconnect probe";
-        loop {
-            match unsafe { termy_terminal_write(terminal, input.as_ptr(), input.len()) } {
-                TermyFfiStatus::Ok if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                TermyFfiStatus::Ok => panic!("Tmon PTY worker did not disconnect in time"),
-                TermyFfiStatus::WriteFailed => break,
-                status => panic!("unexpected terminal write status: {status:?}"),
-            }
-        }
-
-        assert_eq!(
-            unsafe { termy_terminal_resize(terminal, size) },
-            TermyFfiStatus::WriteFailed,
-            "same-size resize must surface a failed nudge"
-        );
-        let next_size = TermyFfiSize {
-            cols: size.cols + 1,
-            ..size
-        };
-        assert_eq!(
-            unsafe { termy_terminal_resize(terminal, next_size) },
-            TermyFfiStatus::WriteFailed
-        );
-
-        let mut frame = TermyFfiFrame::default();
-        assert_eq!(
-            unsafe { termy_terminal_snapshot(terminal, &mut frame) },
-            TermyFfiStatus::Ok
-        );
-        assert_eq!((frame.cols, frame.rows), (size.cols, size.rows));
-        assert_eq!(unsafe { termy_frame_free(&mut frame) }, TermyFfiStatus::Ok);
         assert_eq!(unsafe { termy_terminal_free(terminal) }, TermyFfiStatus::Ok);
     }
 

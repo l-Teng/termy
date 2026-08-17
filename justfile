@@ -7,14 +7,38 @@ set shell := ["bash", "-cu"]
 run:
     cargo run -p termy --release
 
-# Compare Tmon with isolated Alacritty and pinned libghostty-vt competitors.
+# Compare the terminal engines, enforce Tmon's snapshot baseline, and write a text report.
+benchmark-tmon:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    report="${TMON_BENCH_OUTPUT:-tmon-alacritty-benchmark.txt}"
+    {
+      rustc --version
+      echo
+      TERMY_CORE_TEST_BACKEND=alacritty cargo run --locked --quiet -p xtask --release --example engine_compare
+    } 2>&1 | tee "$report"
+    gate_status=0
+    set +e
+    {
+      echo
+      cargo run --locked --quiet --release --manifest-path tools/tmon-revision-gate/Cargo.toml
+    } 2>&1 | tee -a "$report"
+    gate_status=$?
+    set -e
+    {
+      echo
+      TERMY_CORE_TEST_BACKEND=alacritty TMON_BENCH_ALLOCATIONS_ONLY=1 cargo run --locked --quiet -p xtask --release --example engine_compare --features benchmark-allocations
+    } 2>&1 | tee -a "$report"
+    exit "$gate_status"
+
+# Compare Tmon and a pinned local libghostty-vt build for memory and feed throughput.
 benchmark-tmon-ghostty-memory:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$PWD"
     ghostty_dir="$(cd "${GHOSTTY_DIR:?set GHOSTTY_DIR to a Ghostty source checkout}" && pwd)"
     prefix="${GHOSTTY_VT_PREFIX:-$root/target/ghostty-vt-benchmark}"
-    report="${TMON_GHOSTTY_MEMORY_OUTPUT:-terminal-engine-benchmark.txt}"
+    report="${TMON_GHOSTTY_MEMORY_OUTPUT:-tmon-ghostty-memory-benchmark.txt}"
     expected_ghostty_revision="9e30f70f23418fecbdca1088673000417527c4e4"
     ghostty_revision="$(git -C "$ghostty_dir" rev-parse HEAD)"
     if [[ "$ghostty_revision" != "$expected_ghostty_revision" ]]; then

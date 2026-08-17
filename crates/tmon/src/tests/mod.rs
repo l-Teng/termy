@@ -99,18 +99,3 @@ fn alacritty_query_replies(bytes: &[u8], size: Size) -> Vec<u8> {
 
 mod events_runtime;
 mod terminal;
-
-#[test]
-fn startup_error_classification_keeps_launch_failures_out_of_fallback() {
-    let launch = Error::launch(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
-        "invalid launch",
-    ));
-    let backend = Error::backend_initialization(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "missing backend",
-    ));
-
-    assert!(!launch.is_backend_initialization_failure());
-    assert!(backend.is_backend_initialization_failure());
-}

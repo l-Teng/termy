@@ -19,10 +19,7 @@ use std::{
 #[cfg(test)]
 use std::os::windows::ffi::OsStringExt;
 
-use crate::{
-    PtyStartError, Size,
-    pty_resize::{PendingResize, await_resize_completion},
-};
+use crate::Size;
 
 type Bool = i32;
 type Dword = u32;
@@ -300,7 +297,7 @@ enum ControlCommand {
 #[derive(Default)]
 struct ControlState {
     close_requested: AtomicBool,
-    pending_resize: Mutex<Option<PendingResize<Coord>>>,
+    pending_resize: Mutex<Option<Coord>>,
 }
 
 impl ControlState {
@@ -308,7 +305,7 @@ impl ControlState {
         self.close_requested.load(Ordering::Acquire)
     }
 
-    fn request_resize(&self, request: PendingResize<Coord>) -> bool {
+    fn request_resize(&self, size: Coord) -> bool {
         if self.is_closed() {
             return false;
         }
@@ -319,16 +316,11 @@ impl ControlState {
         if self.is_closed() {
             return false;
         }
-        if let Some(replaced) = pending.replace(request) {
-            replaced.complete(Err(io::Error::new(
-                ErrorKind::Interrupted,
-                "tmon ConPTY resize was superseded by a newer request",
-            )));
-        }
+        *pending = Some(size);
         true
     }
 
-    fn take_resize(&self) -> Option<PendingResize<Coord>> {
+    fn take_resize(&self) -> Option<Coord> {
         self.pending_resize
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -337,31 +329,16 @@ impl ControlState {
 
     fn request_close(&self) {
         self.close_requested.store(true, Ordering::Release);
-        if let Some(pending) = self
-            .pending_resize
+        self.pending_resize
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            pending.complete(Err(pty_closed_error()));
-        }
+            .take();
     }
 }
 
 impl ControlHandle {
-    #[cfg(test)]
     fn request_resize(&self, size: Coord) -> io::Result<()> {
-        self.queue_resize(PendingResize::detached(size))
-    }
-
-    fn resize_and_wait(&self, size: Coord) -> io::Result<()> {
-        let (request, completed) = PendingResize::waiting(size);
-        let publication = self.queue_resize(request);
-        await_resize_completion(publication, completed, pty_closed_error)
-    }
-
-    fn queue_resize(&self, request: PendingResize<Coord>) -> io::Result<()> {
-        if !self.state.request_resize(request) {
+        if !self.state.request_resize(size) {
             return Err(pty_closed_error());
         }
         match self.sender.try_send(ControlCommand::Wake) {
@@ -737,47 +714,33 @@ impl Pty {
         size: Size,
         mut on_output: impl FnMut(&[u8]) -> Vec<u8> + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
-    ) -> Result<Self, PtyStartError> {
+    ) -> io::Result<Self> {
         let api = conpty_api().ok_or_else(|| {
-            PtyStartError::backend_initialization(io::Error::new(
+            io::Error::new(
                 ErrorKind::Unsupported,
                 "Windows ConPTY exports are unavailable on this system",
-            ))
+            )
         })?;
-        let coord = Coord::try_from(size).map_err(PtyStartError::backend_initialization)?;
-        let working_directory = normalize_working_directory(config.working_directory.as_deref())
-            .map_err(PtyStartError::launch)?;
-        let lookup_directory = match working_directory.clone() {
-            Some(directory) => directory,
-            None => {
-                normalized_current_directory().map_err(PtyStartError::backend_initialization)?
-            }
-        };
-        let launch =
-            resolve_launch_command(&config, &lookup_directory).map_err(PtyStartError::launch)?;
-        let application = wide_nul(launch.application.as_os_str(), "terminal program")
-            .map_err(PtyStartError::launch)?;
+        let coord = Coord::try_from(size)?;
+        let working_directory = normalize_working_directory(config.working_directory.as_deref())?;
+        let lookup_directory = working_directory
+            .clone()
+            .map_or_else(normalized_current_directory, Ok)?;
+        let launch = resolve_launch_command(&config, &lookup_directory)?;
+        let application = wide_nul(launch.application.as_os_str(), "terminal program")?;
         let mut command_line = launch.command_line;
-        let mut environment = child_environment(&config.environment, working_directory.as_deref())
-            .map_err(PtyStartError::launch)?;
+        let mut environment = child_environment(&config.environment, working_directory.as_deref())?;
         let current_directory = working_directory
             .as_deref()
             .map(|path| wide_nul(path.as_os_str(), "working directory"))
-            .transpose()
-            .map_err(PtyStartError::launch)?;
+            .transpose()?;
 
-        let (pseudo_input, input_writer) =
-            create_pipe().map_err(PtyStartError::backend_initialization)?;
-        let (output_reader, pseudo_output) =
-            create_pipe().map_err(PtyStartError::backend_initialization)?;
-        let pseudo_console = PseudoConsole::create(api, coord, &pseudo_input, &pseudo_output)
-            .map_err(PtyStartError::backend_initialization)?;
+        let (pseudo_input, input_writer) = create_pipe()?;
+        let (output_reader, pseudo_output) = create_pipe()?;
+        let pseudo_console = PseudoConsole::create(api, coord, &pseudo_input, &pseudo_output)?;
 
-        let mut attributes =
-            AttributeList::new(1).map_err(PtyStartError::backend_initialization)?;
-        attributes
-            .set_pseudo_console(pseudo_console.raw())
-            .map_err(PtyStartError::backend_initialization)?;
+        let mut attributes = AttributeList::new(1)?;
+        attributes.set_pseudo_console(pseudo_console.raw())?;
         let mut startup = StartupInfoExW {
             startup_info: StartupInfoW::zeroed(),
             attribute_list: attributes.as_mut_ptr(),
@@ -820,14 +783,14 @@ impl Pty {
             drop(pseudo_input);
             drop(pseudo_output);
             drop(pseudo_console);
-            return Err(PtyStartError::launch(error));
+            return Err(error);
         }
 
         let Some(process) = OwnedHandle::new(process_info.process) else {
             close_raw_handle(process_info.thread);
-            return Err(PtyStartError::backend_initialization(io::Error::other(
+            return Err(io::Error::other(
                 "CreateProcessW returned an invalid process handle",
-            )));
+            ));
         };
         let process_thread = OwnedHandle::new(process_info.thread);
         drop(process_thread);
@@ -869,7 +832,7 @@ impl Pty {
             Err(error) => {
                 writer.close();
                 cleanup_unstarted_resources(&resources);
-                return Err(PtyStartError::backend_initialization(error));
+                return Err(error);
             }
         };
 
@@ -895,7 +858,7 @@ impl Pty {
                 writer.close();
                 cleanup_unstarted_resources(&resources);
                 let _ = reader_thread.join();
-                return Err(PtyStartError::backend_initialization(error));
+                return Err(error);
             }
         };
 
@@ -923,7 +886,7 @@ impl Pty {
             cleanup_unstarted_resources(&resources);
             let _ = writer_thread.join();
             let _ = reader_thread.join();
-            return Err(PtyStartError::backend_initialization(error));
+            return Err(error);
         }
 
         gate.release(StartState::Running);
@@ -952,7 +915,7 @@ impl Pty {
     }
 
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
-        self.writer.control.resize_and_wait(Coord::try_from(size)?)
+        self.writer.control.request_resize(Coord::try_from(size)?)
     }
 
     pub(crate) fn child_pid(&self) -> u32 {
@@ -1097,7 +1060,9 @@ fn run_control(
         if state.is_closed() {
             break;
         }
-        if service_control_resize(&state, |size| resources.pseudo_console().resize(size)).is_err() {
+        if let Some(size) = state.take_resize()
+            && resources.pseudo_console().resize(size).is_err()
+        {
             state.request_close();
             break;
         }
@@ -1119,27 +1084,6 @@ fn run_control(
     // dedicated reader keeps draining. Older Windows releases can block here
     // until all final pseudoconsole output has been consumed.
     resources.close_pseudo_console();
-}
-
-fn service_control_resize(
-    state: &ControlState,
-    mut resize: impl FnMut(Coord) -> io::Result<()>,
-) -> io::Result<()> {
-    let Some(pending) = state.take_resize() else {
-        return Ok(());
-    };
-    match resize(pending.size) {
-        Ok(()) => {
-            pending.complete(Ok(()));
-            Ok(())
-        }
-        Err(error) => {
-            let completion_error = io::Error::new(error.kind(), error.to_string());
-            state.request_close();
-            pending.complete(Err(completion_error));
-            Err(error)
-        }
-    }
 }
 
 fn read_handle(handle: &OwnedHandle, buffer: &mut [u8]) -> io::Result<usize> {

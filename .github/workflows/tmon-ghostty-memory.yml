@@ -1,18 +1,18 @@
-name: Tmon, Alacritty, and Ghostty Benchmark
+name: Tmon vs Ghostty Benchmark
 
 on:
   workflow_dispatch:
     inputs:
       samples:
-        description: "Fresh processes per engine/workload (6-60, multiple of 6)"
+        description: "Fresh processes per engine/workload (2-50)"
         required: false
-        default: "12"
+        default: "10"
       throughput_samples:
-        description: "Balanced feed-throughput samples (6-60, multiple of 6)"
+        description: "Balanced feed-throughput samples (4-24, even)"
         required: false
-        default: "12"
+        default: "8"
       throughput_mib:
-        description: "Minimum timed MiB per engine/sample (1-2048; calibration may choose more)"
+        description: "Timed MiB per engine/sample (1-512)"
         required: false
         default: "32"
 
@@ -26,9 +26,9 @@ jobs:
     timeout-minutes: 30
     env:
       GHOSTTY_REVISION: 9e30f70f23418fecbdca1088673000417527c4e4
-      REPORT_NAME: terminal-engine-benchmark.txt
-      TMON_GHOSTTY_MEMORY_SAMPLES: ${{ inputs.samples || '12' }}
-      TMON_GHOSTTY_THROUGHPUT_SAMPLES: ${{ inputs.throughput_samples || '12' }}
+      REPORT_NAME: tmon-ghostty-memory-benchmark.txt
+      TMON_GHOSTTY_MEMORY_SAMPLES: ${{ inputs.samples || '10' }}
+      TMON_GHOSTTY_THROUGHPUT_SAMPLES: ${{ inputs.throughput_samples || '8' }}
       TMON_GHOSTTY_THROUGHPUT_TARGET_MIB: ${{ inputs.throughput_mib || '32' }}
     steps:
       - name: Initialize report
@@ -104,12 +104,10 @@ jobs:
             rustc --version
             zig version
             echo
-            TERMINAL_ENGINE_BENCH_JSON="$RUNNER_TEMP/terminal-engine-memory.json" \
-              cargo run --locked --quiet --release \
+            cargo run --locked --quiet --release \
               --manifest-path tools/tmon-ghostty-memory/Cargo.toml
             echo
-            TERMINAL_ENGINE_BENCH_JSON="$RUNNER_TEMP/terminal-engine-throughput.json" \
-              cargo run --locked --quiet --release \
+            cargo run --locked --quiet --release \
               --manifest-path tools/tmon-ghostty-memory/Cargo.toml -- --throughput
           } 2>&1 | tee -a "$report"
 
@@ -154,7 +152,7 @@ jobs:
             echo "Benchmark report was not created." > "$report"
           fi
           {
-            echo '## Tmon vs Alacritty vs libghostty-vt memory and feed throughput'
+            echo '## Tmon vs libghostty-vt memory and feed throughput'
             echo '```text'
             cat "$report"
             echo '```'
@@ -164,10 +162,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: terminal-engine-benchmark-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/terminal-engine-benchmark.txt
-            ${{ runner.temp }}/terminal-engine-memory.json
-            ${{ runner.temp }}/terminal-engine-throughput.json
+          name: tmon-ghostty-memory-${{ github.sha }}
+          path: ${{ runner.temp }}/tmon-ghostty-memory-benchmark.txt
           if-no-files-found: error
           retention-days: 30

@@ -481,10 +481,11 @@ fn resolve_spawn_config(config: Config) -> Result<pty::SpawnConfig, Error> {
     let (program, args) = match config.launch {
         Some(Launch::Program { program, args }) => {
             if program.trim().is_empty() {
-                return Err(Error::launch(io::Error::new(
+                return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "terminal program cannot be empty",
-                )));
+                )
+                .into());
             }
             (program, args)
         }

@@ -318,11 +318,12 @@ and style resets, long combining text plus hyperlinks, edits, erasure, wide
 cell cleanup, reflow, scrollback, saved cursors, and alternate screens. The
 next Actions artifact is the first performance acceptance measurement for this
 layout; no speed claim is inferred from the unchanged static size.
-Termy's renderer-neutral core path now retains the five styles and explicit color.
+Termy's Tmon-only render path now retains the five styles and explicit color.
 Straight and curly styles use GPUI decorations; double, dotted, and dashed
 styles paint one bounded path per text batch. Style and color participate in
-batch/cache identity for both native and tmux cells. This painting work is
-likewise outside the saved parser/grid measurements.
+batch/cache identity, while the native Alacritty and tmux mapping deliberately
+keeps its prior straight-foreground behavior. This painting work is likewise
+outside the saved parser/grid measurements.
 
 Graphics decoding is now portable and dependency-free. A safe, std-only
 zlib/DEFLATE implementation validates PNG payloads and Kitty `o=z` data on every
@@ -354,9 +355,9 @@ every unrelated soft-deleted image.
 
 Native process handling also expanded outside the measured parser path. Tmon
 now provides both its Unix PTY and a dependency-free Windows ConPTY backend that
-loads the required entry points dynamically. At the time of this measurement,
-the desktop used an exact opt-in gate and otherwise retained its Alacritty
-default. Shell command lifecycle events
+loads the required entry points dynamically. The exact
+`TERMY_EXPERIMENTAL_TMON_ENGINE=1` gate selects it only when available; the
+Alacritty default and fallback remain unchanged. Shell command lifecycle events
 have priority in the bounded event queue, and Unix child exit now captures its
 readable output tail before a short bounded drain. Both PTY writers admit at
 most 8 MiB across 4,096 queued-or-active nonempty writes, reserve borrowed input
@@ -384,10 +385,10 @@ they have no parser/grid benchmark number.
 
 ## Allocation accounting
 
-Whole-process allocator requests were measured by a separate, report-only pass
-after the historical timed comparison. The now-retired xtask benchmark
-example's `benchmark-allocations` feature installed a `System` wrapper only in
-the example binary and required
+Whole-process allocator requests are now measured by a separate, report-only
+pass after the timed comparison. The xtask benchmark example's
+`benchmark-allocations` feature installs a `System` wrapper only in the example
+binary and requires
 `TMON_BENCH_ALLOCATIONS_ONLY=1`; a feature build refuses timed mode, while a
 normal build rejects allocation-only mode. The normal throughput executable
 therefore contains no allocator-counter overhead.

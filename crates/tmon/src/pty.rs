@@ -18,8 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::pty_resize::{PendingResize, await_resize_completion, writer_closed_error};
-use crate::{PtyStartError, Size};
+use crate::Size;
 
 const F_GETFL: c_int = 3;
 const F_SETFD: c_int = 2;
@@ -236,7 +235,7 @@ struct WriterControl {
     protocol_reply_bytes: AtomicUsize,
     protocol_reply_entries: AtomicUsize,
     protocol_reply_limits: WriterLimits,
-    pending_resize: Mutex<Option<PendingResize<WinSize>>>,
+    pending_resize: Mutex<Option<WinSize>>,
 }
 
 #[derive(Clone, Copy)]
@@ -391,19 +390,8 @@ impl WriterHandle {
         Ok(())
     }
 
-    #[cfg(test)]
     fn resize(&self, window_size: WinSize) -> io::Result<()> {
-        self.request_resize(PendingResize::detached(window_size))
-    }
-
-    fn resize_and_wait(&self, window_size: WinSize) -> io::Result<()> {
-        let (request, completed) = PendingResize::waiting(window_size);
-        let publication = self.request_resize(request);
-        await_resize_completion(publication, completed, writer_closed_error)
-    }
-
-    fn request_resize(&self, request: PendingResize<WinSize>) -> io::Result<()> {
-        if !self.control.request_resize(request) {
+        if !self.control.request_resize(window_size) {
             return Err(writer_closed_error());
         }
         self.wake()
@@ -434,7 +422,7 @@ impl WriterControl {
         self.close_requested.load(Ordering::Acquire)
     }
 
-    fn request_resize(&self, request: PendingResize<WinSize>) -> bool {
+    fn request_resize(&self, window_size: WinSize) -> bool {
         if self.is_closed() {
             return false;
         }
@@ -446,16 +434,11 @@ impl WriterControl {
         if self.is_closed() {
             return false;
         }
-        if let Some(replaced) = pending_resize.replace(request) {
-            replaced.complete(Err(io::Error::new(
-                ErrorKind::Interrupted,
-                "tmon PTY resize was superseded by a newer request",
-            )));
-        }
+        *pending_resize = Some(window_size);
         true
     }
 
-    fn take_resize(&self) -> Option<PendingResize<WinSize>> {
+    fn take_resize(&self) -> Option<WinSize> {
         self.pending_resize
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -466,14 +449,10 @@ impl WriterControl {
         self.close_requested.store(true, Ordering::Release);
         // Do not leave stale resize state behind after cancellation. The lock
         // is never held while the writer performs ioctl, write, or poll.
-        if let Some(pending) = self
-            .pending_resize
+        self.pending_resize
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            pending.complete(Err(writer_closed_error()));
-        }
+            .take();
     }
 
     fn reserve_write(
@@ -642,21 +621,23 @@ fn try_reserve_counter(counter: &AtomicUsize, amount: usize, limit: usize) -> bo
         .is_ok()
 }
 
+fn writer_closed_error() -> io::Error {
+    io::Error::new(ErrorKind::BrokenPipe, "tmon PTY is closed")
+}
+
 impl Pty {
     pub(crate) fn spawn(
         config: SpawnConfig,
         size: Size,
         mut on_output: impl FnMut(&[u8]) -> Vec<u8> + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
-    ) -> Result<Self, PtyStartError> {
-        let program_path = resolve_program(&config).map_err(PtyStartError::launch)?;
-        let program = c_string_os(program_path.as_os_str(), "terminal program")
-            .map_err(PtyStartError::launch)?;
+    ) -> io::Result<Self> {
+        let program_path = resolve_program(&config)?;
+        let program = c_string_os(program_path.as_os_str(), "terminal program")?;
         let mut arguments = Vec::with_capacity(config.args.len() + 1);
-        arguments
-            .push(c_string(&config.program, "terminal program").map_err(PtyStartError::launch)?);
+        arguments.push(c_string(&config.program, "terminal program")?);
         for argument in &config.args {
-            arguments.push(c_string(argument, "terminal argument").map_err(PtyStartError::launch)?);
+            arguments.push(c_string(argument, "terminal argument")?);
         }
         let mut argv = arguments
             .iter()
@@ -668,25 +649,20 @@ impl Pty {
             .working_directory
             .as_ref()
             .map(|path| c_string_os(path.as_os_str(), "working directory"))
-            .transpose()
-            .map_err(PtyStartError::launch)?;
+            .transpose()?;
         let environment =
-            child_environment(&config.environment, config.working_directory.as_deref())
-                .map_err(PtyStartError::launch)?;
+            child_environment(&config.environment, config.working_directory.as_deref())?;
         let mut environment_pointers = environment
             .iter()
             .map(|entry| entry.as_ptr())
             .collect::<Vec<_>>();
         environment_pointers.push(ptr::null());
 
-        let (mut child_status_reader, child_status_writer) =
-            UnixStream::pair().map_err(PtyStartError::backend_initialization)?;
+        let (mut child_status_reader, child_status_writer) = UnixStream::pair()?;
         // A successful exec closes the child endpoint and reports EOF to the
         // parent. Failures write a small stage + errno record before _exit.
         if unsafe { fcntl(child_status_writer.as_raw_fd(), F_SETFD, FD_CLOEXEC) } < 0 {
-            return Err(PtyStartError::backend_initialization(
-                io::Error::last_os_error(),
-            ));
+            return Err(io::Error::last_os_error());
         }
 
         let mut master = -1;
@@ -695,9 +671,7 @@ impl Pty {
         // fork. The child only invokes libc functions before replacing its image.
         let pid = unsafe { forkpty(&mut master, ptr::null_mut(), ptr::null(), &window_size) };
         if pid < 0 {
-            return Err(PtyStartError::backend_initialization(
-                io::Error::last_os_error(),
-            ));
+            return Err(io::Error::last_os_error());
         }
 
         if pid == 0 {
@@ -742,12 +716,12 @@ impl Pty {
             Ok(Some(failure)) => {
                 drop(master_file);
                 wait_for_child(pid);
-                return Err(PtyStartError::launch(failure.into_io_error()));
+                return Err(failure.into_io_error());
             }
             Err(error) => {
                 drop(master_file);
                 terminate_and_reap(pid);
-                return Err(PtyStartError::backend_initialization(error));
+                return Err(error);
             }
         }
         drop(child_status_reader);
@@ -756,19 +730,19 @@ impl Pty {
             let error = io::Error::last_os_error();
             drop(master_file);
             terminate_and_reap(pid);
-            return Err(PtyStartError::backend_initialization(error));
+            return Err(error);
         }
         if let Err(error) = set_nonblocking(&master_file) {
             drop(master_file);
             terminate_and_reap(pid);
-            return Err(PtyStartError::backend_initialization(error));
+            return Err(error);
         }
         let mut reader = match master_file.try_clone() {
             Ok(reader) => reader,
             Err(error) => {
                 drop(master_file);
                 terminate_and_reap(pid);
-                return Err(PtyStartError::backend_initialization(error));
+                return Err(error);
             }
         };
         let (writer, writer_rx) = WriterHandle::channel();
@@ -787,7 +761,7 @@ impl Pty {
         if let Err(error) = writer_thread {
             drop(reader);
             terminate_and_reap(pid);
-            return Err(PtyStartError::backend_initialization(error));
+            return Err(error);
         }
 
         let (mut shutdown_reader, mut shutdown_writer) = match UnixStream::pair() {
@@ -795,7 +769,7 @@ impl Pty {
             Err(error) => {
                 writer.close();
                 terminate_and_reap(pid);
-                return Err(PtyStartError::backend_initialization(error));
+                return Err(error);
             }
         };
         let reader_writer = writer.clone();
@@ -882,7 +856,7 @@ impl Pty {
         if let Err(error) = reader_thread {
             writer.close();
             terminate_and_reap(pid);
-            return Err(PtyStartError::backend_initialization(error));
+            return Err(error);
         }
 
         let watcher_alive = alive.clone();
@@ -896,7 +870,7 @@ impl Pty {
         if let Err(error) = watcher_thread {
             writer.close();
             terminate_and_reap(pid);
-            return Err(PtyStartError::backend_initialization(error));
+            return Err(error);
         }
 
         Ok(Self {
@@ -928,7 +902,7 @@ impl Pty {
     }
 
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
-        self.writer.resize_and_wait(WinSize::from(size))
+        self.writer.resize(WinSize::from(size))
     }
 
     pub(crate) fn child_pid(&self) -> u32 {
@@ -1083,17 +1057,8 @@ fn service_writer_control<W>(
     if control.is_closed() {
         return Ok(false);
     }
-    if let Some(pending) = pending_resize {
-        let result = resize(writer, pending.size);
-        match result {
-            Ok(()) => pending.complete(Ok(())),
-            Err(error) => {
-                let completion_error = io::Error::new(error.kind(), error.to_string());
-                control.request_close();
-                pending.complete(Err(completion_error));
-                return Err(error);
-            }
-        }
+    if let Some(window_size) = pending_resize {
+        resize(writer, window_size)?;
     }
     Ok(!control.is_closed())
 }

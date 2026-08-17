@@ -1,3 +1,4 @@
+mod backend;
 mod cell_metrics;
 mod config;
 mod frame;
@@ -11,6 +12,7 @@ mod osc_intercept;
 mod path_env;
 mod protocol;
 mod render_metrics;
+mod resize_anchor;
 mod runtime;
 mod search;
 mod shell_integration;
@@ -59,10 +61,9 @@ pub use render_metrics::{
 pub use runtime::{
     KittyGraphicsCursorTracker, KittyGraphicsTextEffects, MAX_TERMINAL_SCROLLBACK_HISTORY,
     ResolvedTerminalLaunch, TabTitleShellIntegration, Terminal, TerminalCursorState,
-    TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEngineDiagnostics,
-    TerminalEngineSelectionReason, TerminalEvent, TerminalLaunch, TerminalOptions,
-    TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell, WorkingDirFallback,
-    normalize_working_directory_candidate, resolve_launch_working_directory,
+    TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent, TerminalLaunch,
+    TerminalOptions, TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier, WindowsShell,
+    WorkingDirFallback, normalize_working_directory_candidate, resolve_launch_working_directory,
     resolve_terminal_launch, resolve_working_directory_path, terminal_environment_overrides,
 };
 pub use search::{

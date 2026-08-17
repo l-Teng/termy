@@ -11,6 +11,5 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
-alacritty_terminal = "0.26"
-termy_terminal_test_support = { path = "../terminal_test_support" }
+alacritty_terminal = { workspace = true }
 unicode-width = { workspace = true }

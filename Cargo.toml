@@ -14,7 +14,6 @@ members = [
   "crates/release_core",
   "crates/search",
   "crates/ssh_core",
-  "crates/terminal_test_support",
   "crates/terminal_ui",
   "crates/theme_core",
   "crates/themes",
@@ -26,6 +25,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+alacritty_terminal = "0.26"
 anyhow = "1.0"
 dirs = "6.0"
 flume = "0.11"
@@ -34,6 +34,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c8656ac9
 keyring = "4.1.1"
 log = "0.4"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+polling = "3.11"
 rand_core = { version = "0.6", features = ["getrandom"] }
 semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }

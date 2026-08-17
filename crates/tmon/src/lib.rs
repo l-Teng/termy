@@ -1,9 +1,9 @@
-//! Termy's small renderer-neutral terminal engine.
+//! A small experimental terminal engine for Termy.
 //!
 //! Tmon deliberately uses only the Rust standard library. It owns its VT parser,
-//! bounded grid/scrollback, damage tracking, and native PTY lifecycle. It is
-//! Termy's sole native and display terminal engine; core keeps its implementation
-//! behind the public renderer-neutral facade.
+//! bounded grid/scrollback, damage tracking, and native PTY lifecycle. The
+//! desktop app keeps it behind `TERMY_EXPERIMENTAL_TMON_ENGINE=1`; the regular
+//! native and tmux engines do not depend on this runtime path.
 
 mod graphics;
 mod grid;
@@ -14,14 +14,6 @@ mod pty;
 #[cfg(target_os = "windows")]
 #[path = "pty_windows.rs"]
 mod pty;
-mod pty_api;
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "macos",
-    target_os = "windows"
-))]
-mod pty_resize;
 mod terminal_read;
 mod unicode_width;
 
@@ -129,7 +121,7 @@ pub struct TerminalStateSnapshot {
 ///
 /// Native PTYs are available on Linux, Android, and macOS. Windows support
 /// is detected at runtime so loading Termy on a pre-ConPTY Windows build does
-/// not attempt to call unavailable ConPTY entry points.
+/// not make the regular Alacritty engine unavailable.
 pub fn native_pty_available() -> bool {
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     {
@@ -296,30 +288,9 @@ impl WakeupNotifier {
 #[derive(Debug)]
 pub struct Error {
     inner: io::Error,
-    backend_initialization_failure: bool,
 }
 
 impl Error {
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "windows"
-    ))]
-    fn launch(inner: io::Error) -> Self {
-        Self {
-            inner,
-            backend_initialization_failure: false,
-        }
-    }
-
-    fn backend_initialization(inner: io::Error) -> Self {
-        Self {
-            inner,
-            backend_initialization_failure: true,
-        }
-    }
-
     #[cfg(not(any(
         target_os = "linux",
         target_os = "android",
@@ -327,16 +298,9 @@ impl Error {
         target_os = "windows"
     )))]
     fn unsupported(message: &'static str) -> Self {
-        Self::backend_initialization(io::Error::new(io::ErrorKind::Unsupported, message))
-    }
-
-    /// Whether this failure happened while establishing the native PTY backend.
-    ///
-    /// Launch and configuration failures intentionally return `false` so hosts
-    /// do not hide invalid programs, arguments, environments, or working
-    /// directories by retrying a different terminal engine.
-    pub fn is_backend_initialization_failure(&self) -> bool {
-        self.backend_initialization_failure
+        Self {
+            inner: io::Error::new(io::ErrorKind::Unsupported, message),
+        }
     }
 }
 
@@ -352,72 +316,9 @@ impl std::error::Error for Error {
     }
 }
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "macos",
-    target_os = "windows"
-))]
-#[derive(Debug)]
-pub(crate) struct PtyStartError {
-    inner: io::Error,
-    backend_initialization_failure: bool,
-}
-
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "macos",
-    target_os = "windows"
-))]
-impl PtyStartError {
-    pub(crate) fn launch(inner: io::Error) -> Self {
-        Self {
-            inner,
-            backend_initialization_failure: false,
-        }
-    }
-
-    pub(crate) fn backend_initialization(inner: io::Error) -> Self {
-        Self {
-            inner,
-            backend_initialization_failure: true,
-        }
-    }
-
-    #[cfg(all(
-        test,
-        any(target_os = "linux", target_os = "android", target_os = "macos")
-    ))]
-    pub(crate) fn kind(&self) -> io::ErrorKind {
-        self.inner.kind()
-    }
-}
-
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "macos",
-    target_os = "windows"
-))]
-impl fmt::Display for PtyStartError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.inner.fmt(formatter)
-    }
-}
-
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "macos",
-    target_os = "windows"
-))]
-impl From<PtyStartError> for Error {
-    fn from(error: PtyStartError) -> Self {
-        Self {
-            inner: error.inner,
-            backend_initialization_failure: error.backend_initialization_failure,
-        }
+impl From<io::Error> for Error {
+    fn from(inner: io::Error) -> Self {
+        Self { inner }
     }
 }
 
@@ -747,8 +648,7 @@ impl Terminal {
                 target.pending.drain(..).collect::<Vec<_>>()
             };
             if !pending.is_empty() {
-                pty.write_protocol_reply_owned(pending)
-                    .map_err(Error::backend_initialization)?;
+                pty.write_protocol_reply_owned(pending)?;
             }
             (Some(pty), protocol_reply_sink)
         };
@@ -875,6 +775,39 @@ impl Terminal {
         }
     }
 
+    pub fn write(&self, input: &[u8]) {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        ))]
+        if let Some(pty) = &self.pty {
+            let _ = pty.write(input);
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        )))]
+        let _ = input;
+    }
+
+    pub fn write_owned(&self, input: Vec<u8>) {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        ))]
+        if let Some(pty) = &self.pty {
+            let _ = pty.write_owned(input);
+            return;
+        }
+        let _ = input;
+    }
+
     /// Send a terminal-protocol response to the child PTY.
     ///
     /// Live terminals use the bounded priority reply lane so required responses
@@ -974,6 +907,56 @@ impl Terminal {
         }
         let has_more = !queue.is_empty();
         (events, has_more)
+    }
+
+    pub fn resize(&self, size: Size) {
+        let size = size.clamped();
+        {
+            let mut engine = self
+                .engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if size == engine.size {
+                return;
+            }
+            let Engine {
+                parser,
+                grid,
+                size: engine_size,
+                render_generation,
+            } = &mut *engine;
+            let graphics_can_change = parser.has_graphics_placements();
+            grid.resize(size.cols, size.rows);
+            *engine_size = size;
+            parser.set_size(size);
+            grid.set_cell_metrics(size.cell_width, size.cell_height);
+            let graphics_changed = parser.sync_grid_effects(grid);
+            if graphics_can_change && !graphics_changed {
+                parser.bump_graphics_revision();
+            }
+            *render_generation = render_generation.wrapping_add(1);
+        }
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        ))]
+        if let Some(pty) = &self.pty {
+            let _ = pty.resize(size);
+        }
+    }
+
+    pub fn nudge_resize(&self) {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        ))]
+        if let Some(pty) = &self.pty {
+            let _ = pty.resize(self.size());
+        }
     }
 
     pub fn size(&self) -> Size {

@@ -65,6 +65,30 @@ impl CombiningText {
         }
     }
 
+    fn push(&mut self, character: char) {
+        let mut encoded = [0; 4];
+        let encoded = character.encode_utf8(&mut encoded).as_bytes();
+        match self {
+            Self::Inline { bytes, len } => {
+                let current_len = usize::from(*len);
+                if current_len + encoded.len() <= INLINE_COMBINING_BYTES {
+                    bytes[current_len..current_len + encoded.len()].copy_from_slice(encoded);
+                    *len = (current_len + encoded.len()) as u8;
+                    return;
+                }
+
+                let mut combined = String::with_capacity(current_len + encoded.len());
+                combined.push_str(
+                    std::str::from_utf8(&bytes[..current_len])
+                        .expect("inline combining text is encoded from valid characters"),
+                );
+                combined.push(character);
+                *self = Self::Heap(combined);
+            }
+            Self::Heap(text) => text.push(character),
+        }
+    }
+
     fn as_str(&self) -> &str {
         match self {
             Self::Inline { bytes, len } => std::str::from_utf8(&bytes[..usize::from(*len)])
@@ -1240,7 +1264,6 @@ struct Damage {
     full: bool,
     rows: Vec<Option<(usize, usize)>>,
     scrolls: Vec<ScrollDamage>,
-    mutation_generation: u64,
 }
 
 impl Damage {
@@ -1249,16 +1272,11 @@ impl Damage {
             full: true,
             rows: vec![None; rows],
             scrolls: Vec::with_capacity(8),
-            mutation_generation: 0,
         }
     }
 
     fn mark(&mut self, row: usize, left: usize, right: usize) {
-        if row >= self.rows.len() || left > right {
-            return;
-        }
-        self.note_mutation();
-        if self.full {
+        if self.full || row >= self.rows.len() || left > right {
             return;
         }
         let slot = &mut self.rows[row];
@@ -1268,19 +1286,10 @@ impl Damage {
     }
 
     fn mark_full(&mut self) {
-        self.note_mutation();
         if !self.full {
             self.scrolls.clear();
         }
         self.full = true;
-    }
-
-    fn note_mutation(&mut self) {
-        self.mutation_generation = self.mutation_generation.wrapping_add(1);
-    }
-
-    fn mutation_generation(&self) -> u64 {
-        self.mutation_generation
     }
 
     fn resize(&mut self, rows: usize) {
@@ -1304,16 +1313,15 @@ impl Damage {
         cols: usize,
         direction: ScrollDirection,
     ) {
+        if self.full {
+            return;
+        }
         let Some(height) = bottom.checked_sub(top).and_then(|span| span.checked_add(1)) else {
             self.mark_full();
             return;
         };
         let count = count.min(height);
         if count == 0 {
-            return;
-        }
-        self.note_mutation();
-        if self.full {
             return;
         }
         if bottom >= self.rows.len() || cols == 0 {
@@ -1462,13 +1470,6 @@ pub(crate) struct Grid {
     palette: Palette,
     hyperlinks: HashMap<u32, HyperlinkEntry>,
     hyperlink_identities: HashMap<u64, u32>,
-    retained_hyperlink_bytes: usize,
-    failed_hyperlink_prune_generations: Option<(u64, u64)>,
-    hyperlink_root_generation: u64,
-    hyperlink_root_retry_available: bool,
-    hyperlink_prune_backoff: u64,
-    #[cfg(test)]
-    hyperlink_prune_count: usize,
     next_hyperlink_id: u32,
     next_hyperlink_prune_len: usize,
     extras: HashMap<NonZeroU32, CellExtra>,

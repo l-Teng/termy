@@ -1,208 +1,296 @@
-use std::sync::{Mutex, MutexGuard};
-
+use alacritty_terminal::{
+    event::VoidListener,
+    grid::{Dimensions, Scroll},
+    sync::FairMutex,
+    term::{Term, TermMode},
+    vte::ansi,
+};
+use std::sync::Arc;
 use termy_core::{
-    DetectedLink, DetectedViewportLink, KittyGraphicsRenderPlacement, Terminal as CoreTerminal,
-    TerminalCursorState, TerminalDirtySpan, TerminalEngineDiagnostics, TerminalEvent,
-    TerminalKeyboardMode, TerminalMouseMode, TerminalOptions, TerminalPalette, TerminalQueryColors,
-    TerminalRenderCell, TerminalRenderDamageSnapshot, TerminalRenderRead, TerminalReplyHost,
-    TerminalRuntimeConfig, TerminalSize, TerminalViewportMetadata, TerminalWakeupNotifier,
+    KittyGraphicsInterceptor, KittyGraphicsItem, KittyGraphicsRenderPlacement, KittyGraphicsScreen,
+    KittyGraphicsState,
 };
 
+use termy_core::{
+    DetectedLink, DetectedViewportLink, KittyGraphicsCursorTracker, TerminalCursorState,
+    TerminalDamageSnapshot, TerminalKeyboardMode, TerminalMouseMode, TerminalOptions, TerminalSize,
+};
+
+use crate::alacritty_bridge;
+
+struct PaneTerminalInner {
+    term: Arc<FairMutex<Term<VoidListener>>>,
+    size: TerminalSize,
+}
+
 /// In-memory terminal emulator for a tmux pane.
-///
-/// Tmux owns the process, title, and input transport. This type owns only the
-/// display-side terminal state used to hydrate captures and apply live output.
 pub struct PaneTerminal {
-    terminal: Mutex<CoreTerminal>,
+    inner: FairMutex<PaneTerminalInner>,
+    parser: FairMutex<ansi::Processor>,
+    kitty_graphics_interceptor: FairMutex<KittyGraphicsInterceptor>,
+    kitty_graphics_cursor_tracker: FairMutex<KittyGraphicsCursorTracker>,
+    kitty_graphics: FairMutex<KittyGraphicsState>,
 }
 
 impl PaneTerminal {
-    fn runtime_config(options: TerminalOptions) -> TerminalRuntimeConfig {
-        TerminalRuntimeConfig {
-            scrollback_history: options.scrollback_history,
-            default_cursor_style: options.default_cursor_style,
-            ..TerminalRuntimeConfig::default()
+    fn normalized_size(size: TerminalSize) -> TerminalSize {
+        TerminalSize {
+            cols: size.cols.max(1),
+            rows: size.rows.max(1),
+            cell_width: size.cell_width,
+            cell_height: size.cell_height,
         }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, CoreTerminal> {
-        self.terminal
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn new(size: TerminalSize, options: TerminalOptions) -> Self {
-        Self::new_with_wakeup_notifier(size, options, None)
-    }
+        let size = Self::normalized_size(size);
+        let config = alacritty_bridge::term_config(options);
 
-    pub fn new_with_wakeup_notifier(
-        size: TerminalSize,
-        options: TerminalOptions,
-        wakeup_notifier: Option<TerminalWakeupNotifier>,
-    ) -> Self {
-        let runtime_config = Self::runtime_config(options);
+        let term = Arc::new(FairMutex::new(Term::new(config, &size, VoidListener)));
         Self {
-            terminal: Mutex::new(CoreTerminal::new_display_with_wakeup_notifier(
-                size,
-                Some(&runtime_config),
-                wakeup_notifier,
-            )),
+            inner: FairMutex::new(PaneTerminalInner { term, size }),
+            parser: FairMutex::new(ansi::Processor::new()),
+            kitty_graphics_interceptor: FairMutex::new(KittyGraphicsInterceptor::default()),
+            kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
+            kitty_graphics: FairMutex::new(KittyGraphicsState::default()),
         }
     }
 
-    /// Apply live tmux control-mode output. Synchronized-update fragments stay
-    /// staged until their commit sequence or watchdog produces a wakeup.
-    pub fn feed_output(&self, bytes: &[u8]) {
-        self.lock().feed_output(bytes);
+    fn cloned_term_arc(&self) -> Arc<FairMutex<Term<VoidListener>>> {
+        let inner = self.inner.lock();
+        inner.term.clone()
     }
 
-    /// Replay a bounded `capture-pane` snapshot without carrying an incomplete
-    /// escape or UTF-8 sequence into the subsequent live stream.
-    pub fn hydrate_output(&self, bytes: &[u8]) {
-        self.lock().hydrate_output(bytes);
+    pub fn feed_output(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+
+        let mut interceptor = self.kitty_graphics_interceptor.lock();
+        let mut cursor_tracker = self.kitty_graphics_cursor_tracker.lock();
+        let mut parser = self.parser.lock();
+        let term = self.cloned_term_arc();
+        let mut term = term.lock();
+        for item in interceptor.process(bytes) {
+            match item {
+                KittyGraphicsItem::Text(text) => {
+                    let mut graphics = self.kitty_graphics.lock();
+                    let track_scrolls = graphics.has_placements();
+                    alacritty_bridge::advance_graphics_text(
+                        &mut cursor_tracker,
+                        &mut parser,
+                        &mut term,
+                        &text,
+                        track_scrolls,
+                        &mut graphics,
+                    );
+                }
+                KittyGraphicsItem::Command(command) => {
+                    let cursor = term.grid().cursor.point;
+                    let full_screen_scroll_region =
+                        cursor_tracker.region_covers_full_screen(term.grid().screen_lines());
+                    let screen = KittyGraphicsScreen::from_alternate_screen(
+                        term.mode().contains(TermMode::ALT_SCREEN),
+                    );
+                    let result = self.kitty_graphics.lock().apply_on_screen(
+                        command,
+                        cursor.column.0,
+                        cursor.line.0.max(0) as usize,
+                        term.grid().history_size(),
+                        self.size(),
+                        screen,
+                    );
+                    if result.cursor_advance_screen == Some(screen)
+                        && let Some((cols, rows)) = result.cursor_advance
+                    {
+                        let untracked_scroll = alacritty_bridge::advance_graphics_cursor(
+                            &mut term,
+                            cols,
+                            rows,
+                            full_screen_scroll_region,
+                        );
+                        if untracked_scroll > 0 {
+                            self.kitty_graphics
+                                .lock()
+                                .scroll_up_without_history_on_screen(untracked_scroll, screen);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn resize(&self, new_size: TerminalSize) {
-        self.lock().resize(new_size);
+        let new_size = Self::normalized_size(new_size);
+        let term = self.cloned_term_arc();
+        let mut term = term.lock();
+        let mut inner = self.inner.lock();
+        // Keep cached pane size and the backing terminal dimensions synchronized
+        // under the same critical section so concurrent readers never observe
+        // a partially-applied resize.
+        inner.size = new_size;
+        term.resize(new_size);
+        self.kitty_graphics_cursor_tracker
+            .lock()
+            .reset_scroll_region();
     }
 
     pub fn size(&self) -> TerminalSize {
-        self.lock().size()
+        self.inner.lock().size
     }
 
-    pub fn engine_label(&self) -> &'static str {
-        self.lock().engine_label()
+    pub fn with_term<R>(&self, f: impl FnOnce(&Term<VoidListener>) -> R) -> R {
+        let term = self.cloned_term_arc();
+        // Run callback outside the outer state lock so callbacks can safely call
+        // back into PaneTerminal APIs (for example size()) without lock inversion.
+        let term = term.lock();
+        f(&term)
     }
 
-    pub fn engine_diagnostics(&self) -> TerminalEngineDiagnostics {
-        self.lock().engine_diagnostics().clone()
-    }
-
-    /// Drain display events and protocol replies. Tmux remains authoritative
-    /// for pane lifecycle, titles, and process state; callers decide which
-    /// display events should trigger presentation work.
-    pub fn drain_events(&self, host: &mut impl TerminalReplyHost) -> (Vec<TerminalEvent>, bool) {
-        self.lock().drain_events(host)
-    }
-
-    pub fn set_query_colors(&self, query_colors: TerminalQueryColors) {
-        self.lock().set_query_colors(query_colors);
-    }
-
-    pub fn palette(&self) -> TerminalPalette {
-        self.lock().palette()
-    }
-
-    pub fn take_render_damage_snapshot(&self) -> TerminalRenderDamageSnapshot {
-        self.lock().take_render_damage_snapshot()
-    }
-
-    pub fn render_read(&self, force_full: bool) -> TerminalRenderRead {
-        self.lock().render_read(force_full)
-    }
-
-    /// Visit one coherent viewport snapshot. The callback must not call back
-    /// into this `PaneTerminal` while the visit is in progress.
-    pub fn visit_viewport_cells(
+    fn with_term_mut<R>(
         &self,
-        visitor: impl FnMut(usize, i32, usize, &TerminalRenderCell),
-    ) -> TerminalViewportMetadata {
-        self.lock().visit_viewport_cells(visitor)
-    }
-
-    /// Visit dirty ranges only when `generation` still names the current core
-    /// state. The callback must not call back into this terminal.
-    pub fn visit_viewport_ranges_at_generation(
-        &self,
-        generation: u64,
-        spans: &[TerminalDirtySpan],
-        visitor: impl FnMut(usize, usize, i32, usize, &TerminalRenderCell),
-    ) -> bool {
-        self.lock()
-            .visit_viewport_ranges_at_generation(generation, spans, visitor)
-    }
-
-    pub fn line_bounds(&self) -> (i32, i32) {
-        self.lock().line_bounds()
-    }
-
-    /// Visit an inclusive buffer-line range under one coherent core read.
-    /// The callback must not call back into this terminal.
-    pub fn visit_line_cells(
-        &self,
-        requested_first: i32,
-        requested_last: i32,
-        visitor: impl FnMut((i32, i32, usize), i32, usize, &TerminalRenderCell),
-    ) -> (i32, i32, usize) {
-        self.lock()
-            .visit_line_cells(requested_first, requested_last, visitor)
+        f: impl FnOnce(&mut Term<VoidListener>, &mut PaneTerminalInner) -> R,
+    ) -> R {
+        let term = self.cloned_term_arc();
+        let mut term = term.lock();
+        let mut inner = self.inner.lock();
+        let result = f(&mut term, &mut inner);
+        // Keep cached dimensions aligned with any in-place terminal mutation so
+        // PaneTerminalInner and Term cannot drift.
+        inner.size.cols = u16::try_from(term.grid().columns()).unwrap_or(u16::MAX);
+        inner.size.rows = u16::try_from(term.grid().screen_lines()).unwrap_or(u16::MAX);
+        result
     }
 
     pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<DetectedLink> {
-        self.lock().hyperlink_at(row, col)
+        let term = self.cloned_term_arc();
+        alacritty_bridge::hyperlink_at(&term.lock(), row, col)
     }
 
     pub fn link_at(&self, row: usize, col: usize) -> Option<DetectedViewportLink> {
-        self.lock().link_at(row, col)
+        let term = self.cloned_term_arc();
+        alacritty_bridge::link_at(&term.lock(), row, col)
+    }
+
+    pub fn take_damage_snapshot(&self) -> TerminalDamageSnapshot {
+        self.with_term_mut(|term, _inner| alacritty_bridge::take_damage_snapshot(term))
     }
 
     pub fn scroll_display(&self, delta_lines: i32) -> bool {
-        self.lock().scroll_display(delta_lines)
+        if delta_lines == 0 {
+            return false;
+        }
+
+        let term = self.cloned_term_arc();
+        let mut term = term.lock();
+        let old_offset = term.grid().display_offset();
+        term.scroll_display(Scroll::Delta(delta_lines));
+        term.grid().display_offset() != old_offset
     }
 
     pub fn scroll_to_bottom(&self) -> bool {
-        self.lock().scroll_to_bottom()
+        let term = self.cloned_term_arc();
+        let mut term = term.lock();
+        let old_offset = term.grid().display_offset();
+        if old_offset == 0 {
+            return false;
+        }
+        term.scroll_display(Scroll::Bottom);
+        true
     }
 
     pub fn scroll_state(&self) -> (usize, usize) {
-        self.lock().scroll_state()
+        let term = self.cloned_term_arc();
+        let term = term.lock();
+        let grid = term.grid();
+        (grid.display_offset(), grid.history_size())
     }
 
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
-        self.lock().cursor_state()
+        let term = self.cloned_term_arc();
+        let term = term.lock();
+        alacritty_bridge::cursor_state(&term)
     }
 
     /// Returns the cursor position regardless of visibility (for IME positioning).
     pub fn cursor_position(&self) -> (usize, usize) {
-        self.lock().cursor_position()
+        let term = self.cloned_term_arc();
+        let term = term.lock();
+        alacritty_bridge::cursor_position(&term)
     }
 
     pub fn set_term_options(&self, options: TerminalOptions) {
-        self.lock().set_term_options(options);
+        self.with_term_mut(|term, _inner| term.set_options(alacritty_bridge::term_config(options)));
     }
 
     pub fn bracketed_paste_mode(&self) -> bool {
-        self.lock().bracketed_paste_mode()
+        let term = self.cloned_term_arc();
+        term.lock().mode().contains(TermMode::BRACKETED_PASTE)
     }
 
     pub fn mouse_mode(&self) -> TerminalMouseMode {
-        self.lock().mouse_mode()
+        let term = self.cloned_term_arc();
+        let mode = *term.lock().mode();
+        alacritty_bridge::mouse_mode(mode)
     }
 
     pub fn keyboard_mode(&self) -> TerminalKeyboardMode {
-        self.lock().keyboard_mode()
+        let term = self.cloned_term_arc();
+        alacritty_bridge::keyboard_mode(*term.lock().mode())
     }
 
     pub fn alternate_screen_mode(&self) -> bool {
-        self.lock().alternate_screen_mode()
+        let term = self.cloned_term_arc();
+        term.lock().mode().contains(TermMode::ALT_SCREEN)
     }
 
     pub fn kitty_graphics_placements(&self) -> Vec<KittyGraphicsRenderPlacement> {
-        self.lock().kitty_graphics_placements()
+        let term = self.cloned_term_arc();
+        let term = term.lock();
+        let grid = term.grid();
+        let screen =
+            KittyGraphicsScreen::from_alternate_screen(term.mode().contains(TermMode::ALT_SCREEN));
+        self.kitty_graphics.lock().render_placements_on_screen(
+            grid.history_size(),
+            grid.display_offset(),
+            grid.screen_lines(),
+            grid.columns(),
+            screen,
+        )
+    }
+}
+
+impl Dimensions for PaneTerminal {
+    fn total_lines(&self) -> usize {
+        self.size().rows as usize
+    }
+
+    fn screen_lines(&self) -> usize {
+        self.size().rows as usize
+    }
+
+    fn columns(&self) -> usize {
+        self.size().cols as usize
+    }
+
+    fn last_column(&self) -> alacritty_terminal::index::Column {
+        alacritty_terminal::index::Column(self.size().cols.saturating_sub(1) as usize)
+    }
+
+    fn bottommost_line(&self) -> alacritty_terminal::index::Line {
+        alacritty_terminal::index::Line(i32::from(self.size().rows.saturating_sub(1)))
+    }
+
+    fn topmost_line(&self) -> alacritty_terminal::index::Line {
+        alacritty_terminal::index::Line(0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::PaneTerminal;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    use termy_core::{
-        TerminalDamageSnapshot, TerminalEvent, TerminalOptions, TerminalSize,
-        TerminalWakeupNotifier,
-    };
+    use alacritty_terminal::grid::Dimensions;
+    use termy_core::{TerminalOptions, TerminalSize};
 
     fn test_term_options(scrollback_history: usize) -> TerminalOptions {
         TerminalOptions {
@@ -213,22 +301,27 @@ mod tests {
 
     fn visible_viewport_text(terminal: &PaneTerminal) -> String {
         let size = terminal.size();
-        let cols = usize::from(size.cols);
-        let rows = usize::from(size.rows);
+        let cols = size.cols as usize;
+        let rows = size.rows as usize;
         let mut grid = vec![vec![' '; cols]; rows];
 
-        terminal.visit_viewport_cells(|display_offset, line, col, cell| {
-            let row = line + i32::try_from(display_offset).unwrap_or(i32::MAX);
-            if row < 0 {
-                return;
-            }
-            let row = row as usize;
-            if row >= rows || col >= cols || cell.wide_character_spacer || cell.hidden {
-                return;
-            }
-            let character = cell.text.chars().next().unwrap_or('\0');
-            if character != '\0' && !character.is_control() {
-                grid[row][col] = character;
+        terminal.with_term(|term| {
+            let content = term.renderable_content();
+            for cell in content.display_iter {
+                let row = cell.point.line.0 + content.display_offset as i32;
+                if row < 0 {
+                    continue;
+                }
+                let row = row as usize;
+                let col = cell.point.column.0;
+                if row >= rows || col >= cols {
+                    continue;
+                }
+
+                let c = cell.cell.c;
+                if c != '\0' && !c.is_control() {
+                    grid[row][col] = c;
+                }
             }
         });
 
@@ -239,10 +332,6 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    fn drain_events(terminal: &PaneTerminal) -> (Vec<TerminalEvent>, bool) {
-        terminal.drain_events(&mut |_| None)
     }
 
     #[test]
@@ -282,6 +371,8 @@ mod tests {
         );
         assert_eq!(terminal.size().cols, 1);
         assert_eq!(terminal.size().rows, 1);
+        assert_eq!(terminal.last_column().0, 0);
+        assert_eq!(terminal.bottommost_line().0, 0);
 
         terminal.resize(TerminalSize {
             cols: 0,
@@ -290,10 +381,12 @@ mod tests {
         });
         assert_eq!(terminal.size().cols, 1);
         assert_eq!(terminal.size().rows, 1);
+        assert_eq!(terminal.last_column().0, 0);
+        assert_eq!(terminal.bottommost_line().0, 0);
     }
 
     #[test]
-    fn resize_keeps_core_and_pane_dimensions_in_sync() {
+    fn with_term_mut_resyncs_cached_size_after_direct_term_resize() {
         let terminal = PaneTerminal::new(
             TerminalSize {
                 cols: 4,
@@ -303,121 +396,60 @@ mod tests {
             test_term_options(2000),
         );
 
-        terminal.resize(TerminalSize {
-            cols: 9,
-            rows: 7,
-            ..TerminalSize::default()
+        terminal.with_term_mut(|term, _inner| {
+            term.resize(TerminalSize {
+                cols: 9,
+                rows: 7,
+                ..TerminalSize::default()
+            });
         });
 
-        assert_eq!(terminal.size().cols, 9);
-        assert_eq!(terminal.size().rows, 7);
+        let size = terminal.size();
+        assert_eq!(size.cols, 9);
+        assert_eq!(size.rows, 7);
     }
 
     #[test]
-    fn capture_hydration_does_not_carry_truncated_escape_into_live_output() {
-        let terminal = PaneTerminal::new(TerminalSize::default(), test_term_options(2000));
-
-        terminal.hydrate_output(b"capture\r\n\x1b[31");
-        terminal.feed_output(b"LIVE");
-
-        let visible = visible_viewport_text(&terminal);
-        assert!(visible.contains("capture"));
-        assert!(visible.contains("LIVE"));
-    }
-
-    #[test]
-    fn capture_then_live_output_has_no_missing_or_duplicate_marker() {
-        let terminal = PaneTerminal::new(TerminalSize::default(), test_term_options(2000));
-
-        terminal.hydrate_output(b"CAPTURE\r\n");
-        terminal.feed_output(b"LIVE-MARKER");
-
-        let visible = visible_viewport_text(&terminal);
-        assert_eq!(visible.matches("CAPTURE").count(), 1);
-        assert_eq!(visible.matches("LIVE-MARKER").count(), 1);
-    }
-
-    #[test]
-    fn synchronized_output_wakes_only_after_commit() {
-        let wakeups = Arc::new(AtomicUsize::new(0));
-        let observed = wakeups.clone();
-        let terminal = PaneTerminal::new_with_wakeup_notifier(
-            TerminalSize::default(),
-            test_term_options(2000),
-            Some(TerminalWakeupNotifier::new(move || {
-                observed.fetch_add(1, Ordering::Relaxed);
-            })),
-        );
-
-        terminal.feed_output(b"\x1b[?2026hSTAGED");
-        let (events, has_more) = drain_events(&terminal);
-        assert!(!has_more);
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, TerminalEvent::Wakeup))
-        );
-        assert_eq!(wakeups.load(Ordering::Relaxed), 0);
-
-        terminal.feed_output(b"\x1b[?2026l");
-        let (events, has_more) = drain_events(&terminal);
-        assert!(!has_more);
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, TerminalEvent::Wakeup))
-        );
-        assert!(wakeups.load(Ordering::Relaxed) >= 1);
-        assert!(visible_viewport_text(&terminal).contains("STAGED"));
-    }
-
-    #[test]
-    fn generation_checked_damage_rejects_stale_partial_reads() {
+    fn mouse_mode_detects_click_and_sgr_flags_from_output_stream() {
         let terminal = PaneTerminal::new(
             TerminalSize {
-                cols: 12,
+                cols: 4,
                 rows: 3,
                 ..TerminalSize::default()
             },
             test_term_options(2000),
         );
-        let _ = terminal.take_render_damage_snapshot();
-        terminal.feed_output(b"damage");
-        let snapshot = terminal.take_render_damage_snapshot();
-        let TerminalDamageSnapshot::Partial(spans) = snapshot.damage else {
-            panic!("expected partial damage");
-        };
 
-        let mut visited = 0;
-        assert!(terminal.visit_viewport_ranges_at_generation(
-            snapshot.generation,
-            &spans,
-            |_, _, _, _, _| visited += 1,
-        ));
-        assert!(visited > 0);
-
-        terminal.feed_output(b" newer");
-        assert!(!terminal.visit_viewport_ranges_at_generation(
-            snapshot.generation,
-            &spans,
-            |_, _, _, _, _| {},
-        ));
+        terminal.feed_output(b"\x1b[?1000h\x1b[?1006h");
+        let mode = terminal.mouse_mode();
+        assert!(mode.enabled);
+        assert!(mode.report_click);
+        assert!(mode.sgr_encoding);
+        assert!(!mode.report_drag);
+        assert!(!mode.report_motion);
     }
 
     #[test]
-    fn mouse_mode_detects_click_drag_motion_and_sgr_flags() {
-        let terminal = PaneTerminal::new(TerminalSize::default(), test_term_options(2000));
-
-        terminal.feed_output(b"\x1b[?1000h\x1b[?1006h");
-        let click = terminal.mouse_mode();
-        assert!(click.enabled);
-        assert!(click.report_click);
-        assert!(click.sgr_encoding);
+    fn mouse_mode_detects_drag_and_motion_flags_from_output_stream() {
+        let terminal = PaneTerminal::new(
+            TerminalSize {
+                cols: 4,
+                rows: 3,
+                ..TerminalSize::default()
+            },
+            test_term_options(2000),
+        );
 
         terminal.feed_output(b"\x1b[?1002h");
-        assert!(terminal.mouse_mode().report_drag);
+        let drag_mode = terminal.mouse_mode();
+        assert!(drag_mode.enabled);
+        assert!(drag_mode.report_drag);
+        assert!(!drag_mode.report_motion);
+
         terminal.feed_output(b"\x1b[?1003h");
-        assert!(terminal.mouse_mode().report_motion);
+        let motion_mode = terminal.mouse_mode();
+        assert!(motion_mode.enabled);
+        assert!(motion_mode.report_motion);
     }
 
     #[test]

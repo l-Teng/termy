@@ -5,6 +5,13 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+use alacritty_terminal::{
+    event::EventListener,
+    grid::Dimensions,
+    index::{Column, Line},
+    term::{Term, cell::Flags},
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedLink {
     pub start_col: usize,
@@ -84,6 +91,278 @@ fn store_cached_file_url(token: &str, resolved: Option<String>) {
     if let Ok(mut cache) = file_url_cache().lock() {
         cache.insert(token.to_string(), resolved);
     }
+}
+
+/// The OSC 8 hyperlink under a viewport cell, if any.
+///
+/// Expands to the contiguous run of cells on that row carrying the same
+/// hyperlink (matched by OSC 8 id + uri), so hover underlines cover the whole
+/// link text even when it differs from the target URI. Takes priority over the
+/// heuristic [`find_link_in_line`] detection.
+pub(crate) fn hyperlink_at_viewport_cell<T: EventListener>(
+    term: &Term<T>,
+    row: usize,
+    col: usize,
+) -> Option<DetectedLink> {
+    let grid = term.grid();
+    let columns = grid.columns();
+    if row >= grid.screen_lines() || col >= columns {
+        return None;
+    }
+
+    // Viewport rows map directly into the live/history grid after subtracting
+    // display_offset. Index that one row instead of materializing hyperlink
+    // metadata for every visible cell on every mouse-hover lookup.
+    let line = Line(row as i32 - grid.display_offset() as i32);
+    let row_cells = &grid[line];
+    let target = row_cells[Column(col)].hyperlink()?;
+    let matches_target = |candidate_col: usize| {
+        row_cells[Column(candidate_col)]
+            .hyperlink()
+            .is_some_and(|other| other == target)
+    };
+
+    let mut start_col = col;
+    while start_col > 0 && matches_target(start_col - 1) {
+        start_col -= 1;
+    }
+    let mut end_col = col;
+    while end_col + 1 < columns && matches_target(end_col + 1) {
+        end_col += 1;
+    }
+
+    Some(DetectedLink {
+        start_col,
+        end_col,
+        target: target.uri().to_string(),
+    })
+}
+
+/// The link under a viewport cell, including links spanning soft-wrapped rows.
+///
+/// OSC 8 metadata takes priority over heuristic URL detection. The returned
+/// range is clipped to the visible viewport while the target is built from the
+/// complete logical link, including portions currently in scrollback.
+pub(crate) fn link_at_viewport_cell<T: EventListener>(
+    term: &Term<T>,
+    row: usize,
+    col: usize,
+) -> Option<DetectedViewportLink> {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let screen_lines = grid.screen_lines();
+    if row >= screen_lines || col >= columns || columns == 0 {
+        return None;
+    }
+
+    let display_offset = i32::try_from(grid.display_offset()).ok()?;
+    let hovered = GridPosition {
+        line: i32::try_from(row).ok()?.saturating_sub(display_offset),
+        col,
+    };
+    let bounds = grid_line_bounds(grid)?;
+
+    if let Some(target) = grid[Line(hovered.line)][Column(hovered.col)].hyperlink() {
+        let target_uri = target.uri().to_string();
+        let mut start = hovered;
+        while let Some(previous) = previous_wrapped_position(grid, start, bounds, columns) {
+            if grid[Line(previous.line)][Column(previous.col)]
+                .hyperlink()
+                .is_some_and(|candidate| candidate == target)
+            {
+                start = previous;
+            } else {
+                break;
+            }
+        }
+
+        let mut end = hovered;
+        while let Some(next) = next_wrapped_position(grid, end, bounds, columns) {
+            if grid[Line(next.line)][Column(next.col)]
+                .hyperlink()
+                .is_some_and(|candidate| candidate == target)
+            {
+                end = next;
+            } else {
+                break;
+            }
+        }
+
+        return viewport_link_from_grid_range(
+            start,
+            end,
+            target_uri,
+            display_offset,
+            screen_lines,
+            columns,
+        );
+    }
+
+    let hovered_char = grid_cell_char(grid, hovered);
+    if hovered_char.is_whitespace() {
+        return None;
+    }
+
+    let mut positions_before = Vec::new();
+    let mut cursor = hovered;
+    while let Some(previous) = previous_wrapped_position(grid, cursor, bounds, columns) {
+        let candidate = grid_cell_char(grid, previous);
+        if candidate.is_whitespace() {
+            break;
+        }
+        positions_before.push((previous, candidate));
+        cursor = previous;
+    }
+    positions_before.reverse();
+
+    let mut positions = Vec::with_capacity(positions_before.len().saturating_add(16));
+    positions.extend(positions_before);
+    let hovered_index = positions.len();
+    positions.push((hovered, hovered_char));
+
+    cursor = hovered;
+    while let Some(next) = next_wrapped_position(grid, cursor, bounds, columns) {
+        let candidate = grid_cell_char(grid, next);
+        if candidate.is_whitespace() {
+            break;
+        }
+        positions.push((next, candidate));
+        cursor = next;
+    }
+
+    let token: Vec<char> = positions.iter().map(|(_, character)| *character).collect();
+    let detected = find_link_in_line(&token, hovered_index)?;
+    let start = positions.get(detected.start_col)?.0;
+    let end = positions.get(detected.end_col)?.0;
+    viewport_link_from_grid_range(
+        start,
+        end,
+        detected.target,
+        display_offset,
+        screen_lines,
+        columns,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct GridPosition {
+    line: i32,
+    col: usize,
+}
+
+fn grid_line_bounds(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+) -> Option<(i32, i32)> {
+    let screen_lines = i32::try_from(grid.screen_lines()).ok()?;
+    let total_lines = i32::try_from(grid.total_lines()).ok()?;
+    if screen_lines <= 0 || total_lines <= 0 {
+        return None;
+    }
+    Some((-(total_lines - screen_lines), screen_lines - 1))
+}
+
+fn previous_wrapped_position(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    position: GridPosition,
+    (min_line, _): (i32, i32),
+    columns: usize,
+) -> Option<GridPosition> {
+    if position.col > 0 {
+        return Some(GridPosition {
+            line: position.line,
+            col: position.col - 1,
+        });
+    }
+    let previous_line = position.line.checked_sub(1)?;
+    if previous_line < min_line {
+        return None;
+    }
+    let previous_col = columns.checked_sub(1)?;
+    grid[Line(previous_line)][Column(previous_col)]
+        .flags
+        .contains(Flags::WRAPLINE)
+        .then_some(GridPosition {
+            line: previous_line,
+            col: previous_col,
+        })
+}
+
+fn next_wrapped_position(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    position: GridPosition,
+    (_, max_line): (i32, i32),
+    columns: usize,
+) -> Option<GridPosition> {
+    if position.col + 1 < columns {
+        return Some(GridPosition {
+            line: position.line,
+            col: position.col + 1,
+        });
+    }
+    if position.line >= max_line
+        || !grid[Line(position.line)][Column(position.col)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    {
+        return None;
+    }
+    Some(GridPosition {
+        line: position.line + 1,
+        col: 0,
+    })
+}
+
+fn grid_cell_char(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    position: GridPosition,
+) -> char {
+    let cell = &grid[Line(position.line)][Column(position.col)];
+    if cell
+        .flags
+        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN)
+        || cell.c == '\0'
+        || cell.c.is_control()
+    {
+        ' '
+    } else {
+        cell.c
+    }
+}
+
+fn viewport_link_from_grid_range(
+    start: GridPosition,
+    end: GridPosition,
+    target: String,
+    display_offset: i32,
+    screen_lines: usize,
+    columns: usize,
+) -> Option<DetectedViewportLink> {
+    let viewport_min_line = -display_offset;
+    let viewport_max_line = i32::try_from(screen_lines)
+        .ok()?
+        .checked_sub(1)?
+        .saturating_sub(display_offset);
+    let visible_start_line = start.line.max(viewport_min_line);
+    let visible_end_line = end.line.min(viewport_max_line);
+    if visible_start_line > visible_end_line {
+        return None;
+    }
+
+    Some(DetectedViewportLink {
+        start_row: usize::try_from(visible_start_line.saturating_add(display_offset)).ok()?,
+        start_col: if start.line < visible_start_line {
+            0
+        } else {
+            start.col
+        },
+        end_row: usize::try_from(visible_end_line.saturating_add(display_offset)).ok()?,
+        end_col: if end.line > visible_end_line {
+            columns.saturating_sub(1)
+        } else {
+            end.col
+        },
+        target,
+    })
 }
 
 pub fn find_link_in_line(line: &[char], col: usize) -> Option<DetectedLink> {
@@ -457,21 +736,29 @@ fn has_path_like_structure(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileUrlLruCache, classify_link_token};
-    use crate::{Terminal, TerminalSize};
+    use super::{
+        FileUrlLruCache, classify_link_token, hyperlink_at_viewport_cell, link_at_viewport_cell,
+    };
+    use crate::runtime::TerminalSize;
+    use alacritty_terminal::{
+        event::VoidListener,
+        term::{Config as TermConfig, Term},
+        vte::ansi,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn term_with_input(cols: u16, rows: u16, input: &[u8]) -> Terminal {
+    fn term_with_input(cols: u16, rows: u16, input: &[u8]) -> Term<VoidListener> {
         let size = TerminalSize {
             cols,
             rows,
             cell_width: 9.0,
             cell_height: 18.0,
         };
-        let term = Terminal::new_display(size, None);
-        term.feed_output(input);
+        let mut term = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, input);
         term
     }
 
@@ -484,8 +771,7 @@ mod tests {
         );
 
         for col in 0..4 {
-            let link = term
-                .hyperlink_at(0, col)
+            let link = hyperlink_at_viewport_cell(&term, 0, col)
                 .expect("hyperlinked cell should report the OSC 8 target");
             assert_eq!(link.start_col, 0);
             assert_eq!(link.end_col, 3);
@@ -501,9 +787,9 @@ mod tests {
             b"\x1b]8;;https://example.com\x1b\\docs\x1b]8;;\x1b\\ after",
         );
 
-        assert_eq!(term.hyperlink_at(0, 4), None);
-        assert_eq!(term.hyperlink_at(0, 6), None);
-        assert_eq!(term.hyperlink_at(1, 0), None);
+        assert_eq!(hyperlink_at_viewport_cell(&term, 0, 4), None);
+        assert_eq!(hyperlink_at_viewport_cell(&term, 0, 6), None);
+        assert_eq!(hyperlink_at_viewport_cell(&term, 1, 0), None);
     }
 
     #[test]
@@ -514,11 +800,11 @@ mod tests {
             b"\x1b]8;;https://a.example\x1b\\aa\x1b]8;;https://b.example\x1b\\bb\x1b]8;;\x1b\\",
         );
 
-        let first = term.hyperlink_at(0, 1).expect("first link");
+        let first = hyperlink_at_viewport_cell(&term, 0, 1).expect("first link");
         assert_eq!((first.start_col, first.end_col), (0, 1));
         assert_eq!(first.target, "https://a.example");
 
-        let second = term.hyperlink_at(0, 2).expect("second link");
+        let second = hyperlink_at_viewport_cell(&term, 0, 2).expect("second link");
         assert_eq!((second.start_col, second.end_col), (2, 3));
         assert_eq!(second.target, "https://b.example");
     }
@@ -533,16 +819,16 @@ mod tests {
             b"\x1b]8;id=x;https://example.com\x1b\\ab\x1b]8;;\x1b\\-\x1b]8;id=x;https://example.com\x1b\\cd\x1b]8;;\x1b\\",
         );
 
-        let left = term.hyperlink_at(0, 0).expect("left run");
+        let left = hyperlink_at_viewport_cell(&term, 0, 0).expect("left run");
         assert_eq!((left.start_col, left.end_col), (0, 1));
-        let right = term.hyperlink_at(0, 3).expect("right run");
+        let right = hyperlink_at_viewport_cell(&term, 0, 3).expect("right run");
         assert_eq!((right.start_col, right.end_col), (3, 4));
     }
 
     #[test]
     fn plain_text_has_no_hyperlink() {
         let term = term_with_input(20, 2, b"https://example.com");
-        assert_eq!(term.hyperlink_at(0, 0), None);
+        assert_eq!(hyperlink_at_viewport_cell(&term, 0, 0), None);
     }
 
     #[test]
@@ -550,8 +836,7 @@ mod tests {
         let term = term_with_input(10, 4, b"go https://example.com/path");
 
         for (row, col) in [(0, 4), (1, 5), (2, 4)] {
-            let link = term
-                .link_at(row, col)
+            let link = link_at_viewport_cell(&term, row, col)
                 .expect("each wrapped URL segment should resolve");
             assert_eq!((link.start_row, link.start_col), (0, 3));
             assert_eq!((link.end_row, link.end_col), (2, 6));
@@ -563,9 +848,8 @@ mod tests {
     fn detected_url_does_not_cross_hard_line_break() {
         let term = term_with_input(20, 3, b"https://a.co\r\nsecond.example");
 
-        let second = term
-            .link_at(1, 3)
-            .expect("second line should be its own domain");
+        let second =
+            link_at_viewport_cell(&term, 1, 3).expect("second line should be its own domain");
         assert_eq!((second.start_row, second.start_col), (1, 0));
         assert_eq!((second.end_row, second.end_col), (1, 13));
         assert_eq!(second.target, "http://second.example");
@@ -579,8 +863,7 @@ mod tests {
             b"\x1b]8;;https://example.com\x1b\\read-more\x1b]8;;\x1b\\",
         );
 
-        let link = term
-            .link_at(1, 2)
+        let link = link_at_viewport_cell(&term, 1, 2)
             .expect("wrapped OSC 8 text should resolve as one link");
         assert_eq!((link.start_row, link.start_col), (0, 0));
         assert_eq!((link.end_row, link.end_col), (1, 3));

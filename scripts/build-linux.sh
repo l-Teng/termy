@@ -357,7 +357,7 @@ Section: x11
 Priority: optional
 Homepage: https://github.com/lassejlv/termy
 Description: Minimal GPUI-powered terminal
- Termy is a terminal emulator built with GPUI and Tmon.
+ Termy is a terminal emulator built with GPUI and alacritty_terminal.
 EOF
 
     log "Creating deb package"
@@ -402,7 +402,7 @@ URL: https://github.com/lassejlv/termy
 AutoReqProv: no
 
 %description
-Termy is a terminal emulator built with GPUI and Tmon.
+Termy is a terminal emulator built with GPUI and alacritty_terminal.
 
 %install
 cp -a "$RPM_ROOT/." "%{buildroot}/"

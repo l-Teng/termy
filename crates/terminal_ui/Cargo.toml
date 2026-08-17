@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+alacritty_terminal = { workspace = true }
 flume = { workspace = true }
 gpui = { workspace = true }
 termy_core = { path = "../core" }

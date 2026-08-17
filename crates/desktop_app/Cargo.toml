@@ -1,6 +1,6 @@
 [package]
 name = "termy"
-version = "0.3.0"
+version = "0.2.38"
 edition = "2024"
 
 [package.metadata.bundle]
@@ -16,6 +16,9 @@ workspace = true
 [dependencies]
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
+
+# Terminal emulation
+alacritty_terminal = { workspace = true }
 
 # Async/concurrency
 flume = { workspace = true }
@@ -77,4 +80,3 @@ winresource = "0.1"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
-termy_terminal_test_support = { path = "../terminal_test_support" }

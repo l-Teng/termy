@@ -9,7 +9,6 @@ import { nitro } from "nitro/vite";
 // targets (e.g. Vercel) override this via the NITRO_PRESET env var at build
 // time — see vercel.json.
 const preset = process.env.NITRO_PRESET ?? "bun";
-const isCloudflare = preset === "cloudflare_module";
 
 export default defineConfig({
   server: {
@@ -34,15 +33,6 @@ export default defineConfig({
     react(),
     nitro({
       preset,
-      ...(isCloudflare
-        ? {
-            compatibilityDate: "2026-08-17",
-            cloudflare: {
-              deployConfig: true,
-              nodeCompat: true,
-            },
-          }
-        : {}),
       traceDeps: ["tslib*"],
     }),
   ],

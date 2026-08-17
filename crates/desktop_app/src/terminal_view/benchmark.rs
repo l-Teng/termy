@@ -122,8 +122,6 @@ pub(super) struct BenchmarkSession {
     samples: Vec<BenchmarkSample>,
     frame_events: Vec<BenchmarkFrameEvent>,
     counters: BenchmarkCounters,
-    engine: Option<String>,
-    engine_selection: Option<String>,
     system: System,
     pid: Option<sysinfo::Pid>,
     finished: bool,
@@ -143,8 +141,6 @@ impl BenchmarkSession {
             samples: Vec::new(),
             frame_events: Vec::with_capacity(2048),
             counters: BenchmarkCounters::default(),
-            engine: None,
-            engine_selection: None,
             system: System::new(),
             pid: get_current_pid().ok(),
             finished: false,
@@ -187,11 +183,6 @@ impl BenchmarkSession {
 
     pub fn record_terminal_redraw(&mut self) {
         self.counters.terminal_redraws = self.counters.terminal_redraws.saturating_add(1);
-    }
-
-    pub fn record_engine_selection(&mut self, engine: &str, selection: &str) {
-        self.engine = Some(engine.to_string());
-        self.engine_selection = Some(selection.to_string());
     }
 
     pub fn sample_if_due(&mut self, now: Instant) {
@@ -386,8 +377,6 @@ impl BenchmarkSession {
         BenchmarkSummary {
             build_label: self.config.build_label.clone(),
             git_sha: self.config.git_sha.clone(),
-            engine: self.engine.clone(),
-            engine_selection: self.engine_selection.clone(),
             scenario: self.config.scenario.clone(),
             duration_ms: elapsed,
             sample_count: self.samples.len() as u64,
@@ -450,8 +439,6 @@ struct BenchmarkFrameEvent {
 pub(super) struct BenchmarkSummary {
     pub build_label: Option<String>,
     pub git_sha: Option<String>,
-    pub engine: Option<String>,
-    pub engine_selection: Option<String>,
     pub scenario: String,
     pub duration_ms: u64,
     pub sample_count: u64,

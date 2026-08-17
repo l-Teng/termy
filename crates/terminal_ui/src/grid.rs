@@ -62,7 +62,7 @@ pub enum TerminalGridPaintDamage {
     Full,
     Rows(Arc<[usize]>),
     /// Row damage with column bounds `(row, left_col_inclusive, right_col_inclusive)`.
-    /// Emitted when the terminal engine reports partial damage with column-level granularity.
+    /// Emitted when alacritty reports partial damage with column-level granularity.
     RowRanges(Arc<[(usize, usize, usize)]>),
 }
 

@@ -1,3 +1,4 @@
+mod alacritty_bridge;
 mod grid;
 mod keyboard;
 mod pane_terminal;

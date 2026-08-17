@@ -10,6 +10,7 @@ use crate::config::{
 use crate::keybindings;
 use crate::ui::scrollbar::{ScrollbarVisibilityController, ScrollbarVisibilityMode};
 use crate::ui::toast::ToastManager;
+use alacritty_terminal::{grid::Dimensions, term::cell::Flags};
 use flume::{Sender, bounded};
 use gpui::AppContext;
 use gpui::{
@@ -95,7 +96,7 @@ use appearance::{
 use backend::{
     ClipboardTextCache, GpuiClipboardReplyHost, NativeTerminalInstance, Terminal, TerminalCellRef,
     TerminalLineRange, TerminalRenderDamageSnapshot, TerminalViewportScroll,
-    TerminalViewportScrollDirection, terminal_engine_label, terminal_engine_selection_label,
+    TerminalViewportScrollDirection, terminal_engine_label,
 };
 use command_palette::{
     CommandPaletteMode, CommandPaletteState, PluginLifecycleState, TmuxSessionIntent,
@@ -468,21 +469,8 @@ enum PaneResizeResult {
 }
 
 impl Terminal {
-    #[cfg(test)]
     fn new_tmux(size: TerminalSize, options: TerminalOptions) -> Self {
         Self::Tmux(PaneTerminal::new(size, options))
-    }
-
-    fn new_tmux_with_wakeup_notifier(
-        size: TerminalSize,
-        options: TerminalOptions,
-        wakeup_notifier: TerminalWakeupNotifier,
-    ) -> Self {
-        Self::Tmux(PaneTerminal::new_with_wakeup_notifier(
-            size,
-            options,
-            Some(wakeup_notifier),
-        ))
     }
 
     #[cfg(test)]
@@ -554,7 +542,7 @@ impl Terminal {
 
     fn hydrate_output(&self, bytes: &[u8]) {
         match self {
-            Self::Tmux(terminal) => terminal.hydrate_output(bytes),
+            Self::Tmux(terminal) => terminal.feed_output(bytes),
             Self::Native(terminal) => {
                 if let Ok(terminal) = terminal.lock() {
                     terminal.hydrate_output(bytes);
@@ -599,7 +587,7 @@ impl Terminal {
     /// Drain pending events. Returns collected events and whether more remain.
     fn drain_events(&self, host: &mut impl TerminalReplyHost) -> (Vec<TerminalEvent>, bool) {
         match self {
-            Self::Tmux(terminal) => terminal.drain_events(host),
+            Self::Tmux(_) => (Vec::new(), false),
             Self::Native(terminal) => terminal
                 .lock()
                 .map(|terminal| terminal.drain_events(host))
@@ -713,14 +701,14 @@ impl Terminal {
                     terminal.set_query_colors(query_colors);
                 }
             }
-            Self::Tmux(terminal) => terminal.set_query_colors(query_colors),
+            Self::Tmux(_) => {}
         }
     }
 
     fn core_palette(&self) -> Option<TerminalPalette> {
         match self {
             Self::Native(terminal) => terminal.lock().ok().map(|terminal| terminal.palette()),
-            Self::Tmux(terminal) => Some(terminal.palette()),
+            Self::Tmux(_) => None,
         }
     }
 
@@ -762,10 +750,21 @@ impl Terminal {
         }
     }
 
+    #[cfg(test)]
+    fn with_tmux_grid<R>(
+        &self,
+        f: impl FnOnce(&alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>) -> R,
+    ) -> Option<R> {
+        match self {
+            Self::Tmux(terminal) => Some(terminal.with_term(|term| f(term.grid()))),
+            Self::Native(_) => None,
+        }
+    }
+
     fn take_render_damage_snapshot(&self) -> TerminalRenderDamageSnapshot {
         match self {
             Self::Tmux(terminal) => {
-                TerminalRenderDamageSnapshot::from_core(terminal.take_render_damage_snapshot())
+                TerminalRenderDamageSnapshot::from_damage(terminal.take_damage_snapshot())
             }
             Self::Native(terminal) => terminal.lock().map_or_else(
                 |_| TerminalRenderDamageSnapshot::from_damage(TerminalDamageSnapshot::Full),
@@ -817,18 +816,28 @@ impl Terminal {
         &self,
         mut visitor: impl FnMut(usize, i32, usize, TerminalCellRef<'_>),
     ) -> Option<usize> {
+        macro_rules! visit_term_cells {
+            ($term:expr) => {{
+                let content = $term.renderable_content();
+                let display_offset = content.display_offset;
+                for cell in content.display_iter {
+                    visitor(
+                        display_offset,
+                        cell.point.line.0,
+                        cell.point.column.0,
+                        TerminalCellRef::Tmux(cell.cell),
+                    );
+                }
+                display_offset
+            }};
+        }
+
         match self {
-            Self::Tmux(terminal) => Some(
-                terminal
-                    .visit_viewport_cells(|display_offset, line, col, cell| {
-                        visitor(display_offset, line, col, TerminalCellRef::from(cell));
-                    })
-                    .display_offset,
-            ),
+            Self::Tmux(terminal) => Some(terminal.with_term(|term| visit_term_cells!(term))),
             Self::Native(terminal) => terminal.lock().ok().map(|terminal| {
                 terminal
                     .visit_viewport_cells(|display_offset, line, col, cell| {
-                        visitor(display_offset, line, col, TerminalCellRef::from(cell));
+                        visitor(display_offset, line, col, TerminalCellRef::Native(cell));
                     })
                     .display_offset
             }),
@@ -840,21 +849,7 @@ impl Terminal {
         mut visitor: impl FnMut(usize, i32, usize, TerminalCellRef<'_>),
     ) -> Option<usize> {
         match self {
-            Self::Tmux(terminal) => {
-                let read = terminal.render_read(true);
-                let display_offset = read.metadata.display_offset;
-                let cols = usize::from(read.metadata.cols);
-                if cols == 0 {
-                    return Some(display_offset);
-                }
-                for (index, cell) in read.cells.iter().enumerate() {
-                    let row = index / cols;
-                    let col = index % cols;
-                    let line = row as i32 - display_offset as i32;
-                    visitor(display_offset, line, col, TerminalCellRef::from(cell));
-                }
-                Some(display_offset)
-            }
+            Self::Tmux(_) => self.for_each_renderable_cell(visitor),
             Self::Native(terminal) => {
                 let read = terminal.lock().ok()?.render_read(true);
                 let display_offset = read.metadata.display_offset;
@@ -866,7 +861,7 @@ impl Terminal {
                     let row = index / cols;
                     let col = index % cols;
                     let line = row as i32 - display_offset as i32;
-                    visitor(display_offset, line, col, TerminalCellRef::from(cell));
+                    visitor(display_offset, line, col, TerminalCellRef::Native(cell));
                 }
                 Some(display_offset)
             }
@@ -879,33 +874,65 @@ impl Terminal {
         generation: Option<u64>,
         mut visitor: impl FnMut(usize, usize, i32, usize, TerminalCellRef<'_>),
     ) -> bool {
-        let Some(generation) = generation else {
-            return false;
-        };
         match self {
-            Self::Native(terminal) => terminal.lock().is_ok_and(|terminal| {
-                terminal.visit_viewport_ranges_at_generation(
-                    generation,
-                    spans,
-                    |row, display_offset, line, col, cell| {
-                        visitor(row, display_offset, line, col, TerminalCellRef::from(cell));
-                    },
-                )
+            Self::Native(terminal) => {
+                let Some(generation) = generation else {
+                    return false;
+                };
+                terminal.lock().is_ok_and(|terminal| {
+                    terminal.visit_viewport_ranges_at_generation(
+                        generation,
+                        spans,
+                        |row, display_offset, line, col, cell| {
+                            visitor(
+                                row,
+                                display_offset,
+                                line,
+                                col,
+                                TerminalCellRef::Native(cell),
+                            );
+                        },
+                    )
+                })
+            }
+            Self::Tmux(terminal) => terminal.with_term(|term| {
+                let grid = term.grid();
+                let display_offset = grid.display_offset();
+                let screen_lines = grid.screen_lines();
+                let cols = grid.columns();
+                for span in spans {
+                    if span.row >= screen_lines || span.left_col >= cols {
+                        continue;
+                    }
+                    let line = span.row as i32 - display_offset as i32;
+                    let row = &grid[alacritty_terminal::index::Line(line)];
+                    let right = span.right_col.min(cols.saturating_sub(1));
+                    for col in span.left_col..=right {
+                        visitor(
+                            span.row,
+                            display_offset,
+                            line,
+                            col,
+                            TerminalCellRef::Tmux(&row[alacritty_terminal::index::Column(col)]),
+                        );
+                    }
+                }
+                true
             }),
-            Self::Tmux(terminal) => terminal.visit_viewport_ranges_at_generation(
-                generation,
-                spans,
-                |row, display_offset, line, col, cell| {
-                    visitor(row, display_offset, line, col, TerminalCellRef::from(cell));
-                },
-            ),
         }
     }
 
     fn line_bounds(&self) -> Option<(i32, i32)> {
         match self {
             Self::Native(terminal) => terminal.lock().ok().map(|terminal| terminal.line_bounds()),
-            Self::Tmux(terminal) => Some(terminal.line_bounds()),
+            Self::Tmux(terminal) => Some(terminal.with_term(|term| {
+                let grid = term.grid();
+                let history = grid.total_lines().saturating_sub(grid.screen_lines());
+                (
+                    -(history as i32),
+                    grid.screen_lines().saturating_sub(1) as i32,
+                )
+            })),
         }
     }
 
@@ -930,7 +957,7 @@ impl Terminal {
                             columns: range.2,
                         };
                         converted_range = Some(range);
-                        visitor(range, line, col, TerminalCellRef::from(cell));
+                        visitor(range, line, col, TerminalCellRef::Native(cell));
                     },
                 );
                 converted_range.unwrap_or(TerminalLineRange {
@@ -939,27 +966,35 @@ impl Terminal {
                     columns: range.2,
                 })
             }),
-            Self::Tmux(terminal) => {
-                let mut converted_range = None;
-                let range = terminal.visit_line_cells(
-                    requested_first,
-                    requested_last,
-                    |range, line, col, cell| {
-                        let range = TerminalLineRange {
-                            first_line: range.0,
-                            last_line: range.1,
-                            columns: range.2,
-                        };
-                        converted_range = Some(range);
-                        visitor(range, line, col, TerminalCellRef::from(cell));
-                    },
-                );
-                Some(converted_range.unwrap_or(TerminalLineRange {
-                    first_line: range.0,
-                    last_line: range.1,
-                    columns: range.2,
-                }))
-            }
+            Self::Tmux(terminal) => Some(terminal.with_term(|term| {
+                let grid = term.grid();
+                let history = grid.total_lines().saturating_sub(grid.screen_lines());
+                let range = TerminalLineRange {
+                    first_line: -(history as i32),
+                    last_line: grid.screen_lines().saturating_sub(1) as i32,
+                    columns: grid.columns(),
+                };
+                if requested_first <= requested_last {
+                    let first = requested_first.max(range.first_line);
+                    let last = requested_last.min(range.last_line);
+                    if first <= last {
+                        for line in first..=last {
+                            let row = &grid[alacritty_terminal::index::Line(line)];
+                            for col in 0..range.columns {
+                                visitor(
+                                    range,
+                                    line,
+                                    col,
+                                    TerminalCellRef::Tmux(
+                                        &row[alacritty_terminal::index::Column(col)],
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                range
+            })),
         }
     }
 }
@@ -3928,13 +3963,6 @@ impl TerminalView {
             }
         }
 
-        let benchmark_engine = terminal_engine_label(view.active_terminal());
-        let benchmark_engine_selection = terminal_engine_selection_label(view.active_terminal());
-        if let Some(benchmark_session) = view.benchmark_session.as_mut() {
-            benchmark_session
-                .record_engine_selection(benchmark_engine, &benchmark_engine_selection);
-        }
-
         if view.benchmark_session.is_some() {
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 loop {
@@ -4469,7 +4497,7 @@ impl TerminalView {
         if should_redraw {
             self.debug_overlay_stats.record_terminal_redraw();
 
-            // Detect content-driven display_offset changes: the engine increments the
+            // Detect content-driven display_offset changes: Alacritty auto-increments the
             // offset to keep the viewport stable when new lines arrive while the user is
             // scrolled into history. The background PTY thread already updated the offset
             // before we got here, so we compare against content_scroll_baseline (a value
@@ -4865,44 +4893,15 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     #[test]
-    fn engine_labels_use_core_diagnostics_for_native_and_tmux_displays() {
+    fn engine_label_uses_core_diagnostics_without_changing_tmux_label() {
         let size = TerminalSize::default();
         let options = TerminalOptions::default();
         let tmux = Terminal::new_tmux(size, options);
         let native = Terminal::new_test_display(size);
 
-        let Terminal::Tmux(tmux_display) = &tmux else {
-            panic!("expected tmux display terminal");
-        };
-        let Terminal::Native(native_display) = &native else {
-            panic!("expected native terminal");
-        };
-        let native_display = native_display.lock().expect("native display lock");
-        let native_label = native_display.engine_label();
-        let native_selection = native_display
-            .engine_diagnostics()
-            .selection_reason
-            .to_string();
-        drop(native_display);
-
-        assert_eq!(
-            terminal_engine_label(Some(&tmux)),
-            tmux_display.engine_label()
-        );
-        assert_eq!(terminal_engine_label(Some(&native)), native_label);
+        assert_eq!(terminal_engine_label(Some(&tmux)), "alacritty");
+        assert_eq!(terminal_engine_label(Some(&native)), "tmon");
         assert_eq!(terminal_engine_label(None), "-");
-        assert_eq!(
-            terminal_engine_selection_label(Some(&tmux)),
-            tmux_display
-                .engine_diagnostics()
-                .selection_reason
-                .to_string()
-        );
-        assert_eq!(
-            terminal_engine_selection_label(Some(&native)),
-            native_selection
-        );
-        assert_eq!(terminal_engine_selection_label(None), "-");
     }
 
     #[test]

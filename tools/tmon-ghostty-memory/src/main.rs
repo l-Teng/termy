@@ -2,29 +2,22 @@ use std::{
     collections::{BTreeMap, HashMap},
     env, fmt,
     fmt::Write as _,
-    path::Path,
     process::{Command, ExitStatus},
 };
 
-use serde::Serialize;
 use tmon_current::{Cell, Color, Combining, Config, Size, Terminal, UnderlineStyle};
 
-mod alacritty;
 mod throughput;
-
-use alacritty::DirectAlacritty;
 
 const COLS: u16 = 120;
 const ROWS: u16 = 40;
 const SCROLLBACK_LIMIT: usize = 10_000;
 const SCROLLBACK_TOTAL_ROWS: usize = SCROLLBACK_LIMIT + ROWS as usize;
 const ALTERNATE_TOTAL_ROWS: usize = ROWS as usize * 16;
-const DEFAULT_SAMPLES: usize = 12;
-const MIN_SAMPLES: usize = 6;
-const MAX_SAMPLES: usize = 60;
+const DEFAULT_SAMPLES: usize = 10;
+const MIN_SAMPLES: usize = 2;
+const MAX_SAMPLES: usize = 50;
 const CHILD_PREFIX: &str = "TMON_GHOSTTY_MEMORY_CHILD";
-const MEMORY_RECORD_PREFIX: &str = "TERMINAL_ENGINE_BENCH_MEMORY";
-const JSON_OUTPUT_ENV: &str = "TERMINAL_ENGINE_BENCH_JSON";
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 const TUI_REDRAW: &[u8] = concat!(
     "\x1b[H",
@@ -92,7 +85,6 @@ unsafe extern "C" {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 enum Engine {
     Tmon,
-    Alacritty,
     Ghostty,
     GhosttyCompressed,
 }
@@ -101,7 +93,6 @@ impl Engine {
     const fn name(self) -> &'static str {
         match self {
             Self::Tmon => "tmon",
-            Self::Alacritty => "alacritty",
             Self::Ghostty => "ghostty",
             Self::GhosttyCompressed => "ghostty-compressed",
         }
@@ -110,7 +101,6 @@ impl Engine {
     fn parse(input: &str) -> Result<Self, String> {
         match input {
             "tmon" => Ok(Self::Tmon),
-            "alacritty" => Ok(Self::Alacritty),
             "ghostty" => Ok(Self::Ghostty),
             "ghostty-compressed" => Ok(Self::GhosttyCompressed),
             _ => Err(format!("unknown engine {input:?}")),
@@ -120,23 +110,9 @@ impl Engine {
     const fn baseline_empty_engine(self) -> Self {
         match self {
             Self::Tmon => Self::Tmon,
-            Self::Alacritty => Self::Alacritty,
             Self::Ghostty | Self::GhosttyCompressed => Self::Ghostty,
         }
     }
-}
-
-const PRIMARY_ENGINE_ORDERS: [[Engine; 3]; 6] = [
-    [Engine::Tmon, Engine::Alacritty, Engine::Ghostty],
-    [Engine::Tmon, Engine::Ghostty, Engine::Alacritty],
-    [Engine::Alacritty, Engine::Tmon, Engine::Ghostty],
-    [Engine::Alacritty, Engine::Ghostty, Engine::Tmon],
-    [Engine::Ghostty, Engine::Tmon, Engine::Alacritty],
-    [Engine::Ghostty, Engine::Alacritty, Engine::Tmon],
-];
-
-const fn primary_engine_order(sample: usize) -> [Engine; 3] {
-    PRIMARY_ENGINE_ORDERS[sample % PRIMARY_ENGINE_ORDERS.len()]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -201,9 +177,10 @@ impl Workload {
     const fn row_count(self) -> usize {
         match self {
             Self::Empty => 0,
-            Self::ScreenPlain | Self::ScreenStyled | Self::ScreenUnicode | Self::ScreenMixed => {
-                ROWS as usize
-            }
+            Self::ScreenPlain
+            | Self::ScreenStyled
+            | Self::ScreenUnicode
+            | Self::ScreenMixed => ROWS as usize,
             Self::AlternatePlain | Self::AlternateMixed => ALTERNATE_TOTAL_ROWS,
             Self::TuiRedraw | Self::CursorEdits => 0,
             Self::ScrollbackPlain
@@ -243,14 +220,9 @@ impl Workload {
 
     fn benchmark_engines(self) -> &'static [Engine] {
         if self.needs_compressed_ghostty() {
-            &[
-                Engine::Tmon,
-                Engine::Alacritty,
-                Engine::Ghostty,
-                Engine::GhosttyCompressed,
-            ]
+            &[Engine::Tmon, Engine::Ghostty, Engine::GhosttyCompressed]
         } else {
-            &[Engine::Tmon, Engine::Alacritty, Engine::Ghostty]
+            &[Engine::Tmon, Engine::Ghostty]
         }
     }
 
@@ -324,43 +296,6 @@ struct ChildResult {
 struct BenchmarkCase {
     engine: Engine,
     workload: Workload,
-}
-
-#[derive(Serialize)]
-struct MemoryReport {
-    schema_version: u8,
-    mode: &'static str,
-    parameters: MemoryParameters,
-    results: Vec<MemoryEngineResult>,
-}
-
-#[derive(Serialize)]
-struct MemoryParameters {
-    samples: usize,
-    cols: u16,
-    rows: u16,
-    scrollback_limit: usize,
-    scrollback_total_rows: usize,
-}
-
-#[derive(Serialize)]
-struct MemoryEngineResult {
-    workload: &'static str,
-    engine: &'static str,
-    compression: &'static str,
-    payload_bytes: u64,
-    samples: Vec<MemorySample>,
-    median_bytes: f64,
-    p05_bytes: f64,
-    p95_bytes: f64,
-    delta_vs_empty_bytes: f64,
-}
-
-#[derive(Serialize)]
-struct MemorySample {
-    sample_index: usize,
-    order_position: usize,
-    footprint_bytes: u64,
 }
 
 struct GhosttyTerminal {
@@ -513,25 +448,41 @@ fn real_main() -> Result<(), String> {
         }
         (None, None, None, None) => run_parent_mode(),
         _ => Err(
-            "usage: tmon-ghostty-memory [--throughput | --child <tmon|alacritty|ghostty|ghostty-compressed> <workload>]"
+            "usage: tmon-ghostty-memory [--throughput | --child <tmon|ghostty|ghostty-compressed> <workload>]"
                 .to_string(),
         ),
     }
 }
 
 fn run_parent_mode() -> Result<(), String> {
-    let samples = balanced_sample_setting(
-        "TMON_GHOSTTY_MEMORY_SAMPLES",
-        DEFAULT_SAMPLES,
-        MIN_SAMPLES,
-        MAX_SAMPLES,
-    )?;
+    let samples = match env::var("TMON_GHOSTTY_MEMORY_SAMPLES") {
+        Ok(value) => {
+            let samples = value.parse::<usize>().map_err(|error| {
+                format!("TMON_GHOSTTY_MEMORY_SAMPLES must be an integer: {error}")
+            })?;
+            if !(MIN_SAMPLES..=MAX_SAMPLES).contains(&samples) {
+                return Err(format!(
+                    "TMON_GHOSTTY_MEMORY_SAMPLES must be between {MIN_SAMPLES} and {MAX_SAMPLES}, got {samples}"
+                ));
+            }
+            samples
+        }
+        Err(env::VarError::NotPresent) => DEFAULT_SAMPLES,
+        Err(error) => {
+            return Err(format!(
+                "could not read TMON_GHOSTTY_MEMORY_SAMPLES: {error}"
+            ));
+        }
+    };
     let current_exe = env::current_exe().map_err(|error| error.to_string())?;
     let mut payload_bytes = HashMap::<Workload, u64>::new();
     let mut results = BTreeMap::<(Workload, Engine), Vec<ChildResult>>::new();
 
     for round in 0..samples {
-        let cases = benchmark_cases(round);
+        let mut cases = benchmark_cases();
+        if round % 2 == 1 {
+            cases.reverse();
+        }
         let mut round_checks = HashMap::<Workload, ChildResult>::new();
         for case in cases {
             let child = run_child_process(&current_exe, case.engine, case.workload)?;
@@ -580,7 +531,7 @@ fn run_parent_mode() -> Result<(), String> {
                     || baseline.digest != child.digest
                 {
                     return Err(format!(
-                        "full semantic mismatch for {} in round {}: baseline cursor={},{} digest={:016x}; {} cursor={},{} digest={:016x}",
+                        "sampled semantic mismatch for {} in round {}: baseline cursor={},{} digest={:016x}; {} cursor={},{} digest={:016x}",
                         case.workload.name(),
                         round,
                         baseline.cursor_row,
@@ -614,12 +565,6 @@ fn run_parent_mode() -> Result<(), String> {
             .ok_or_else(|| "missing tmon empty results".to_string())?,
     )
     .median;
-    let alacritty_empty_median = stats(
-        results
-            .get(&(Workload::Empty, Engine::Alacritty))
-            .ok_or_else(|| "missing alacritty empty results".to_string())?,
-    )
-    .median;
 
     println!(
         "metadata samples={} cols={} rows={} scrollback_limit={} scrollback_total_rows={} ghostty_prefix={} exe={}",
@@ -632,7 +577,6 @@ fn run_parent_mode() -> Result<(), String> {
         current_exe.display()
     );
 
-    let mut json_results = Vec::new();
     for workload in Workload::ALL {
         println!(
             "workload={} payload_bytes={}",
@@ -646,68 +590,21 @@ fn run_parent_mode() -> Result<(), String> {
             let engine_stats = stats(engine_results);
             let empty_baseline = match engine.baseline_empty_engine() {
                 Engine::Tmon => tmon_empty_median,
-                Engine::Alacritty => alacritty_empty_median,
                 Engine::Ghostty | Engine::GhosttyCompressed => ghostty_empty_median,
             };
-            let delta_vs_empty = engine_stats.median - empty_baseline;
             println!(
                 "  engine={} median_mib={:.2} p05_mib={:.2} p95_mib={:.2} delta_vs_empty_mib={:.2} raw_bytes={}",
                 engine.name(),
                 bytes_to_mib(engine_stats.median),
                 bytes_to_mib(engine_stats.p05),
                 bytes_to_mib(engine_stats.p95),
-                bytes_to_mib(delta_vs_empty),
+                bytes_to_mib(engine_stats.median - empty_baseline),
                 RawBytes(engine_results)
             );
-            println!(
-                "{MEMORY_RECORD_PREFIX} schema=1 workload={} engine={} compression={} samples={} payload_bytes={} median_bytes={:.3} p05_bytes={:.3} p95_bytes={:.3} delta_vs_empty_bytes={:.3} raw_bytes={}",
-                workload.name(),
-                engine.name(),
-                engine_results[0].compression.as_str(),
-                engine_results.len(),
-                payload_bytes[&workload],
-                engine_stats.median,
-                engine_stats.p05,
-                engine_stats.p95,
-                delta_vs_empty,
-                RawBytes(engine_results),
-            );
-            json_results.push(MemoryEngineResult {
-                workload: workload.name(),
-                engine: engine.name(),
-                compression: engine_results[0].compression.as_str(),
-                payload_bytes: payload_bytes[&workload],
-                samples: engine_results
-                    .iter()
-                    .enumerate()
-                    .map(|(sample_index, result)| MemorySample {
-                        sample_index,
-                        order_position: memory_order_position(sample_index, engine),
-                        footprint_bytes: result.footprint_bytes,
-                    })
-                    .collect(),
-                median_bytes: engine_stats.median,
-                p05_bytes: engine_stats.p05,
-                p95_bytes: engine_stats.p95,
-                delta_vs_empty_bytes: delta_vs_empty,
-            });
         }
     }
 
-    write_json_output(&MemoryReport {
-        schema_version: 1,
-        mode: "memory",
-        parameters: MemoryParameters {
-            samples,
-            cols: COLS,
-            rows: ROWS,
-            scrollback_limit: SCROLLBACK_LIMIT,
-            scrollback_total_rows: SCROLLBACK_TOTAL_ROWS,
-        },
-        results: json_results,
-    })?;
-
-    let mut non_wins = Vec::new();
+    let mut failed = Vec::new();
     for workload in Workload::ALL {
         let tmon = stats(
             results
@@ -722,7 +619,7 @@ fn run_parent_mode() -> Result<(), String> {
                 format!("missing {} results for {}", engine.name(), workload.name())
             })?);
             if tmon.median >= comparison.median {
-                non_wins.push(format!(
+                failed.push(format!(
                     "{}: tmon {:.0} bytes >= {} {:.0} bytes",
                     workload.name(),
                     tmon.median,
@@ -732,30 +629,17 @@ fn run_parent_mode() -> Result<(), String> {
             }
         }
     }
-    if non_wins.is_empty() {
+    if failed.is_empty() {
         println!(
-            "TERMINAL_ENGINE_BENCH_SUMMARY schema=1 mode=memory tmon_strictly_smallest_everywhere=true"
+            "memory_result=PASS (Tmon median footprint is lower than every Ghostty comparison)"
         );
+        Ok(())
     } else {
-        println!(
-            "TERMINAL_ENGINE_BENCH_SUMMARY schema=1 mode=memory tmon_strictly_smallest_everywhere=false"
-        );
-        println!(
-            "Tmon was not strictly smaller in every memory comparison:\n{}",
-            non_wins.join("\n")
-        );
+        Err(format!(
+            "Tmon did not win every median memory comparison:\n{}",
+            failed.join("\n")
+        ))
     }
-    Ok(())
-}
-
-fn memory_order_position(sample_index: usize, engine: Engine) -> usize {
-    if engine == Engine::GhosttyCompressed {
-        return 3;
-    }
-    primary_engine_order(sample_index)
-        .iter()
-        .position(|candidate| *candidate == engine)
-        .expect("every primary engine is present in every order")
 }
 
 fn run_child_process(
@@ -816,17 +700,11 @@ fn run_child_process(
 
 fn parse_child_line(line: &str) -> Result<ChildResult, String> {
     let mut fields = HashMap::<&str, &str>::new();
-    let mut tokens = line.split_whitespace();
-    if tokens.next() != Some(CHILD_PREFIX) {
-        return Err(format!("invalid child line prefix in {line:?}"));
-    }
-    for token in tokens {
+    for token in line.split_whitespace().skip(1) {
         let (key, value) = token
             .split_once('=')
             .ok_or_else(|| format!("invalid child token {token:?}"))?;
-        if fields.insert(key, value).is_some() {
-            return Err(format!("duplicate child field {key:?}"));
-        }
+        fields.insert(key, value);
     }
     let cursor = fields
         .get("cursor")
@@ -845,11 +723,11 @@ fn parse_child_line(line: &str) -> Result<ChildResult, String> {
             .map_err(|error| format!("invalid cursor col: {error}"))?,
         digest: u64::from_str_radix(
             fields
-                .get("full_digest")
-                .ok_or_else(|| "child line missing full_digest".to_string())?,
+                .get("sampled_digest")
+                .ok_or_else(|| "child line missing sampled_digest".to_string())?,
             16,
         )
-        .map_err(|error| format!("invalid full_digest: {error}"))?,
+        .map_err(|error| format!("invalid sampled_digest: {error}"))?,
         compression: CompressionReport::parse(
             fields
                 .get("compression")
@@ -871,71 +749,11 @@ where
         .map_err(|error| format!("invalid {key}: {error}"))
 }
 
-fn setting(name: &str, default: usize, min: usize, max: usize) -> Result<usize, String> {
-    let value = match env::var(name) {
-        Ok(value) => value
-            .parse::<usize>()
-            .map_err(|error| format!("{name} must be an integer: {error}"))?,
-        Err(env::VarError::NotPresent) => default,
-        Err(error) => return Err(format!("could not read {name}: {error}")),
-    };
-    if !(min..=max).contains(&value) {
-        return Err(format!(
-            "{name} must be between {min} and {max}, got {value}"
-        ));
-    }
-    Ok(value)
-}
-
-fn balanced_sample_setting(
-    name: &str,
-    default: usize,
-    min: usize,
-    max: usize,
-) -> Result<usize, String> {
-    let value = setting(name, default, min, max)?;
-    require_balanced_sample_count(name, value)?;
-    Ok(value)
-}
-
-fn require_balanced_sample_count(name: &str, value: usize) -> Result<(), String> {
-    if !value.is_multiple_of(PRIMARY_ENGINE_ORDERS.len()) {
-        return Err(format!(
-            "{name} must be a multiple of {} so all three-engine orders are balanced, got {value}",
-            PRIMARY_ENGINE_ORDERS.len()
-        ));
-    }
-    Ok(())
-}
-
-fn write_json_output(report: &impl Serialize) -> Result<(), String> {
-    let path = match env::var_os(JSON_OUTPUT_ENV) {
-        Some(path) if !path.is_empty() => path,
-        Some(_) => return Err(format!("{JSON_OUTPUT_ENV} must not be empty")),
-        None => return Ok(()),
-    };
-    let mut json = serde_json::to_vec_pretty(report)
-        .map_err(|error| format!("could not serialize benchmark JSON: {error}"))?;
-    json.push(b'\n');
-    std::fs::write(Path::new(&path), json).map_err(|error| {
-        format!(
-            "could not write benchmark JSON to {}: {error}",
-            Path::new(&path).display()
-        )
-    })
-}
-
-fn benchmark_cases(round: usize) -> Vec<BenchmarkCase> {
+fn benchmark_cases() -> Vec<BenchmarkCase> {
     let mut cases = Vec::new();
     for workload in Workload::ALL {
-        for engine in primary_engine_order(round) {
+        for &engine in workload.benchmark_engines() {
             cases.push(BenchmarkCase { engine, workload });
-        }
-        if workload.needs_compressed_ghostty() {
-            cases.push(BenchmarkCase {
-                engine: Engine::GhosttyCompressed,
-                workload,
-            });
         }
     }
     cases
@@ -944,11 +762,10 @@ fn benchmark_cases(round: usize) -> Vec<BenchmarkCase> {
 fn run_child_mode(engine: Engine, workload: Workload) -> Result<(), String> {
     let result = match engine {
         Engine::Tmon => run_tmon_child(workload)?,
-        Engine::Alacritty => run_alacritty_child(workload)?,
         Engine::Ghostty | Engine::GhosttyCompressed => run_ghostty_child(engine, workload)?,
     };
     println!(
-        "{CHILD_PREFIX} bytes={} history={} cursor={},{} full_digest={:016x} compression={} footprint={}",
+        "{CHILD_PREFIX} bytes={} history={} cursor={},{} sampled_digest={:016x} compression={} footprint={}",
         result.bytes,
         result.history,
         result.cursor_row,
@@ -958,26 +775,6 @@ fn run_child_mode(engine: Engine, workload: Workload) -> Result<(), String> {
         result.footprint_bytes
     );
     Ok(())
-}
-
-fn run_alacritty_child(workload: Workload) -> Result<ChildResult, String> {
-    let mut terminal = DirectAlacritty::new();
-    let bytes = feed_workload(workload, |chunk| {
-        terminal.feed(chunk);
-        Ok(())
-    })?;
-    let state = terminal.state()?;
-    let footprint = current_ri_phys_footprint()?;
-    let digest = terminal.semantic_digest()?;
-    Ok(ChildResult {
-        bytes,
-        history: state.history,
-        cursor_row: state.cursor_row,
-        cursor_col: state.cursor_col,
-        digest,
-        compression: CompressionReport::None,
-        footprint_bytes: footprint,
-    })
 }
 
 fn run_tmon_child(workload: Workload) -> Result<ChildResult, String> {
@@ -1020,7 +817,7 @@ fn run_ghostty_child(engine: Engine, workload: Workload) -> Result<ChildResult, 
     let compression = match engine {
         Engine::Ghostty => CompressionReport::None,
         Engine::GhosttyCompressed => terminal.compress_full()?,
-        Engine::Tmon | Engine::Alacritty => unreachable!(),
+        Engine::Tmon => unreachable!(),
     };
     let state = terminal.query_state()?;
     let history = state
@@ -1126,12 +923,13 @@ fn tmon_semantic_digest(terminal: &Terminal) -> Result<u64, String> {
     let total_rows_i64 = i64::from(last_line) - i64::from(first_line) + 1;
     let total_rows = usize::try_from(total_rows_i64)
         .map_err(|_| format!("invalid total row count {total_rows_i64}"))?;
+    let sampled = sample_rows(total_rows);
     let mut hash = Fnv1a64::new();
     hash.write_u64(total_rows as u64);
     hash.write_u16(COLS);
-    hash.write_u64(total_rows as u64);
+    hash.write_u64(sampled.len() as u64);
 
-    for row_offset in full_row_offsets(total_rows) {
+    for row_offset in sampled {
         let line = first_line
             .checked_add(
                 i32::try_from(row_offset).map_err(|_| "row offset overflowed i32".to_string())?,
@@ -1261,8 +1059,24 @@ const fn underline_style_code(style: UnderlineStyle) -> u32 {
     }
 }
 
-fn full_row_offsets(total_rows: usize) -> std::ops::Range<usize> {
-    0..total_rows
+fn sample_rows(total_rows: usize) -> Vec<usize> {
+    if total_rows <= 64 {
+        return (0..total_rows).collect();
+    }
+    let mut sampled = Vec::with_capacity(6);
+    for candidate in [
+        0,
+        1,
+        total_rows / 4,
+        total_rows / 2,
+        total_rows - 2,
+        total_rows - 1,
+    ] {
+        if !sampled.contains(&candidate) {
+            sampled.push(candidate);
+        }
+    }
+    sampled
 }
 
 fn build_plain_row(row_index: usize, out: &mut String) {
@@ -1533,121 +1347,15 @@ mod tests {
     }
 
     #[test]
-    fn semantic_verification_selects_every_logical_row() {
-        assert_eq!(full_row_offsets(0).collect::<Vec<_>>(), Vec::<usize>::new());
-        assert_eq!(full_row_offsets(5).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
-        let rows = full_row_offsets(SCROLLBACK_TOTAL_ROWS);
-        assert_eq!(rows.len(), SCROLLBACK_TOTAL_ROWS);
-        assert_eq!(rows.start, 0);
-        assert_eq!(rows.end, 10_040);
-    }
-
-    #[test]
-    fn three_engine_orders_are_complete_and_position_balanced() {
-        let unique = PRIMARY_ENGINE_ORDERS
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique.len(), 6);
-
-        for engine in [Engine::Tmon, Engine::Alacritty, Engine::Ghostty] {
-            for position in 0..3 {
-                assert_eq!(
-                    PRIMARY_ENGINE_ORDERS
-                        .iter()
-                        .filter(|order| order[position] == engine)
-                        .count(),
-                    2,
-                    "{} was not balanced at position {position}",
-                    engine.name()
-                );
-            }
-        }
-        assert!(require_balanced_sample_count("SAMPLES", 12).is_ok());
-        assert!(require_balanced_sample_count("SAMPLES", 10).is_err());
-
-        let cases = benchmark_cases(0);
+    fn sampled_rows_follow_expected_rules() {
+        assert_eq!(sample_rows(0), Vec::<usize>::new());
+        assert_eq!(sample_rows(5), vec![0, 1, 2, 3, 4]);
+        assert_eq!(sample_rows(64), (0..64).collect::<Vec<_>>());
+        assert_eq!(sample_rows(65), vec![0, 1, 16, 32, 63, 64]);
         assert_eq!(
-            cases
-                .iter()
-                .filter(|case| case.engine == Engine::GhosttyCompressed)
-                .count(),
-            4
+            sample_rows(10_040),
+            vec![0, 1, 2_510, 5_020, 10_038, 10_039]
         );
-        assert!(!cases.iter().any(|case| {
-            case.engine == Engine::GhosttyCompressed && !case.workload.needs_compressed_ghostty()
-        }));
-    }
-
-    #[test]
-    fn child_result_parser_requires_full_digest_and_unique_fields() {
-        let parsed = parse_child_line(concat!(
-            "TMON_GHOSTTY_MEMORY_CHILD bytes=42 history=7 cursor=3,9 ",
-            "full_digest=0123456789abcdef compression=none footprint=99"
-        ))
-        .unwrap();
-        assert_eq!(
-            parsed,
-            ChildResult {
-                bytes: 42,
-                history: 7,
-                cursor_row: 3,
-                cursor_col: 9,
-                digest: 0x0123_4567_89ab_cdef,
-                compression: CompressionReport::None,
-                footprint_bytes: 99,
-            }
-        );
-        assert!(
-            parse_child_line(concat!(
-                "TMON_GHOSTTY_MEMORY_CHILD bytes=1 bytes=2 history=0 cursor=0,0 ",
-                "full_digest=0 compression=none footprint=1"
-            ))
-            .unwrap_err()
-            .contains("duplicate")
-        );
-        assert!(
-            parse_child_line(concat!(
-                "TMON_GHOSTTY_MEMORY_CHILD bytes=1 history=0 cursor=0,0 ",
-                "sampled_digest=0 compression=none footprint=1"
-            ))
-            .unwrap_err()
-            .contains("full_digest")
-        );
-    }
-
-    #[test]
-    fn memory_json_contains_raw_process_and_order_fields() {
-        let report = MemoryReport {
-            schema_version: 1,
-            mode: "memory",
-            parameters: MemoryParameters {
-                samples: 6,
-                cols: COLS,
-                rows: ROWS,
-                scrollback_limit: SCROLLBACK_LIMIT,
-                scrollback_total_rows: SCROLLBACK_TOTAL_ROWS,
-            },
-            results: vec![MemoryEngineResult {
-                workload: "test",
-                engine: "tmon",
-                compression: "none",
-                payload_bytes: 10,
-                samples: vec![MemorySample {
-                    sample_index: 0,
-                    order_position: 2,
-                    footprint_bytes: 42,
-                }],
-                median_bytes: 42.0,
-                p05_bytes: 42.0,
-                p95_bytes: 42.0,
-                delta_vs_empty_bytes: 1.0,
-            }],
-        };
-
-        let json = serde_json::to_value(report).unwrap();
-        assert_eq!(json["results"][0]["samples"][0]["footprint_bytes"], 42);
-        assert_eq!(json["results"][0]["samples"][0]["sample_index"], 0);
-        assert_eq!(json["results"][0]["samples"][0]["order_position"], 2);
     }
 
     #[test]

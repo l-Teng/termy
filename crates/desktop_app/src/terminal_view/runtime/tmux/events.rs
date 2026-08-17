@@ -22,13 +22,6 @@ fn parse_tmux_mouse_mode_subscription(value: &str) -> Option<TmuxPaneMouseMode> 
     })
 }
 
-fn tmux_display_events_request_redraw(pane_is_active: bool, events: &[TerminalEvent]) -> bool {
-    pane_is_active
-        && events
-            .iter()
-            .any(|event| matches!(event, TerminalEvent::Wakeup))
-}
-
 impl TerminalView {
     pub(in crate::terminal_view) fn request_tmux_resize_convergence(
         &mut self,
@@ -192,6 +185,7 @@ impl TerminalView {
                     if let Some(terminal) = self.pane_terminal_by_id(&pane_id) {
                         terminal.feed_output(&bytes);
                         if self.is_active_pane_id(&pane_id) {
+                            should_redraw = true;
                             self.schedule_tmux_title_refresh();
                         }
                     }
@@ -224,26 +218,6 @@ impl TerminalView {
                     return self.recover_from_tmux_runtime_exit(reason, cx);
                 }
             }
-        }
-
-        // Every display terminal is drained, including inactive panes, so its
-        // coalesced wakeup can be reset without building a repaint backlog.
-        // Tmux remains authoritative for lifecycle/title/process metadata;
-        // only a committed display wakeup from the visible pane repaints.
-        let active_pane_id = self.active_pane_id().map(str::to_owned);
-        let mut display_has_more = false;
-        for pane in self.session.tabs.iter().flat_map(|tab| tab.panes.iter()) {
-            let (events, has_more) = pane.terminal().drain_events(&mut |_| None);
-            display_has_more |= has_more;
-            if tmux_display_events_request_redraw(
-                active_pane_id.as_deref() == Some(pane.id.as_str()),
-                &events,
-            ) {
-                should_redraw = true;
-            }
-        }
-        if display_has_more {
-            let _ = self.event_wakeup_tx.try_send(());
         }
 
         self.ensure_tmux_title_refresh_wakeup(cx);
@@ -296,17 +270,6 @@ mod tests {
         );
         assert_eq!(parse_tmux_mouse_mode_subscription("0011"), None);
         assert_eq!(parse_tmux_mouse_mode_subscription("00x10"), None);
-    }
-
-    #[test]
-    fn only_active_pane_display_wakeups_request_redraw() {
-        let wakeup = [TerminalEvent::Wakeup];
-        assert!(tmux_display_events_request_redraw(true, &wakeup));
-        assert!(!tmux_display_events_request_redraw(false, &wakeup));
-        assert!(!tmux_display_events_request_redraw(
-            true,
-            &[TerminalEvent::Title("ignored".to_string())],
-        ));
     }
 
     #[test]
