@@ -29,3 +29,4 @@ winreg = "0.55"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+termy_terminal_test_support = { path = "../terminal_test_support" }

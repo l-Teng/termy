@@ -1,6 +1,6 @@
 [package]
 name = "termy"
-version = "0.2.38"
+version = "0.3.0"
 edition = "2024"
 
 [package.metadata.bundle]
@@ -77,3 +77,4 @@ winresource = "0.1"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+termy_terminal_test_support = { path = "../terminal_test_support" }

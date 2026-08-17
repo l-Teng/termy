@@ -33,6 +33,7 @@ Termy is a Rust workspace split by ownership boundary, not by implementation con
 - `release_core/` (`termy_release_core`): release metadata and version helpers.
 - `auto_update/` (`termy_auto_update`): update discovery, verification, and platform update decisions.
 - `cli_install_core/` (`termy_cli_install_core`): shared CLI install/path helpers.
+- `terminal_test_support/` (`termy_terminal_test_support`): dev-only sanitized real-application terminal traces shared by Tmon, Core, and desktop renderer tests.
 - `xtask/` (`xtask`): repository automation and generated-doc checks.
 
 Each crate has its own `README.md` with `Owner`, `Validation`, and `Forbidden Dependencies` sections. Update the local README when a crate gains or loses ownership of a responsibility, changes its test command, or changes its dependency boundary.

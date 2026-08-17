@@ -1251,6 +1251,9 @@ mod tests {
         Arc,
         atomic::{AtomicU64, Ordering},
     };
+    use termy_terminal_test_support::{
+        CLAUDE_CODE_2_1_233_CURSOR_CELL, CLAUDE_CODE_2_1_233_INITIAL_FRAME,
+    };
 
     #[test]
     fn terminal_size_clamps_absurd_dimensions() {
@@ -1281,6 +1284,49 @@ mod tests {
 
         let cursor = terminal.cursor_position();
         assert_eq!(cursor, (2, 3));
+    }
+
+    #[test]
+    fn real_tui_claude_code_trace_is_chunk_invariant() {
+        let trace = CLAUDE_CODE_2_1_233_INITIAL_FRAME;
+        let bytes = trace.bytes();
+        let replay = |chunk_size| {
+            let terminal = Terminal::new_display(
+                TerminalSize {
+                    cols: trace.cols,
+                    rows: trace.rows,
+                    ..TerminalSize::default()
+                },
+                None,
+            );
+            for chunk in bytes.chunks(chunk_size) {
+                terminal.feed_output(chunk);
+            }
+            terminal
+        };
+        let baseline = replay(bytes.len());
+        let expected_cells = baseline.render_read(true).cells;
+
+        for chunk_size in [bytes.len(), 1, 7, 64] {
+            let terminal = replay(chunk_size);
+            let cells = terminal.render_read(true).cells;
+            assert_eq!(cells, expected_cells, "chunk size {chunk_size}");
+
+            let (expected_row, expected_col) = CLAUDE_CODE_2_1_233_CURSOR_CELL;
+            let cursor_cell = &cells[expected_row * usize::from(trace.cols) + expected_col];
+            assert_eq!(cursor_cell.text, " ");
+            assert_eq!(
+                cursor_cell.foreground,
+                crate::TerminalRenderColor::DefaultForeground
+            );
+            assert_eq!(
+                cursor_cell.background,
+                crate::TerminalRenderColor::DefaultBackground
+            );
+            assert!(cursor_cell.inverse);
+            assert_eq!(terminal.cursor_state(), None);
+            assert!(terminal.alternate_screen_mode());
+        }
     }
 
     #[test]

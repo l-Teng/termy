@@ -1,0 +1,12 @@
+[package]
+name = "termy_terminal_test_support"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Shared sanitized terminal application traces for Termy tests"
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -5011,14 +5011,26 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_reverse_video_cursor_paints_default_foreground_background() {
-        let terminal = NativeTerminal::new_display(TerminalSize::default(), None);
-        terminal
-            .hydrate_output("❯\u{a0}\x1b[7m \r\x1b[1B\x1b[27m\x1b[1A\x1b[3G\x1b[?25l".as_bytes());
+    fn claude_code_trace_paints_the_reverse_video_cursor() {
+        use termy_terminal_test_support::{
+            CLAUDE_CODE_2_1_233_CURSOR_CELL, CLAUDE_CODE_2_1_233_INITIAL_FRAME,
+        };
+
+        let trace = CLAUDE_CODE_2_1_233_INITIAL_FRAME;
+        let terminal = NativeTerminal::new_display(
+            TerminalSize {
+                cols: trace.cols,
+                rows: trace.rows,
+                ..TerminalSize::default()
+            },
+            None,
+        );
+        terminal.feed_output(&trace.bytes());
 
         let mut cursor_cell = None;
+        let (expected_row, expected_col) = CLAUDE_CODE_2_1_233_CURSOR_CELL;
         terminal.visit_viewport_cells(|_, line, col, cell| {
-            if line == 0 && col == 2 {
+            if line == expected_row as i32 && col == expected_col {
                 cursor_cell = Some(cell.clone());
             }
         });

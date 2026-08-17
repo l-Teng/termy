@@ -32,6 +32,7 @@ Termy is a single repository with several product surfaces. Keep changes in the 
 - `termy_command_core`, `termy_config_core`, `termy_theme_core`, `termy_search`, `termy_ssh_core`, and `termy_themes` are pure domain crates.
 - `termy_ffi` and `termy_native_sdk` are embedding/native-integration surfaces.
 - `termy_cli`, `termy_cli_install_core`, `termy_release_core`, and `termy_auto_update` own command-line, install, release, and update support.
+- `termy_terminal_test_support` owns the dev-only sanitized terminal-application trace corpus shared by engine, core, and desktop tests.
 - Desktop update presentation and toast state live under `crates/desktop_app/src/ui/` because they have no non-desktop consumers.
 - `xtask` owns repository automation such as generated docs.
 

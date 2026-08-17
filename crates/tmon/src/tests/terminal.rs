@@ -1,4 +1,7 @@
 use super::*;
+use termy_terminal_test_support::{
+    CLAUDE_CODE_2_1_233_CURSOR_CELL, CLAUDE_CODE_2_1_233_INITIAL_FRAME,
+};
 
 #[test]
 fn display_terminal_uses_independent_parser_and_grid() {
@@ -16,6 +19,57 @@ fn display_terminal_uses_independent_parser_and_grid() {
     assert_eq!(frame.cells[1].character, 'k');
     assert_eq!(frame.cells[2].foreground, Color::Indexed(1));
     assert_eq!(terminal.drain_events().0, vec![Event::Wakeup]);
+}
+
+#[test]
+fn real_tui_claude_code_cursor_trace_is_chunk_invariant() {
+    let trace = CLAUDE_CODE_2_1_233_INITIAL_FRAME;
+    let bytes = trace.bytes();
+    let replay = |chunk_size| {
+        let terminal = Terminal::new_display(
+            Size {
+                cols: trace.cols,
+                rows: trace.rows,
+                ..Size::default()
+            },
+            Config::default(),
+        );
+        for chunk in bytes.chunks(chunk_size) {
+            terminal.feed_output(chunk);
+        }
+        terminal
+    };
+    let baseline = replay(bytes.len());
+    let expected_snapshot = baseline.snapshot();
+    let expected_state = baseline.state_snapshot();
+
+    for chunk_size in [bytes.len(), 1, 2, 7, 64, 257] {
+        let terminal = replay(chunk_size);
+        assert_eq!(
+            terminal.snapshot(),
+            expected_snapshot,
+            "chunk size {chunk_size}"
+        );
+        assert_eq!(
+            terminal.state_snapshot(),
+            expected_state,
+            "chunk size {chunk_size}"
+        );
+
+        let (row, col) = CLAUDE_CODE_2_1_233_CURSOR_CELL;
+        let cell = terminal
+            .with_viewport_cell(row, col, |_, line, cell| {
+                assert_eq!(line, row as i32);
+                *cell
+            })
+            .expect("Claude Code cursor cell should be inside the viewport");
+        assert_eq!(cell.character, ' ');
+        assert_eq!(cell.foreground, Color::Default);
+        assert_eq!(cell.background, Color::Default);
+        assert!(cell.attributes.inverse());
+        assert_eq!(terminal.cursor_state(), None);
+        assert!(terminal.alternate_screen_mode());
+    }
 }
 
 #[test]
