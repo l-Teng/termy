@@ -238,15 +238,9 @@ fn terminal_cell_underline(
 ) -> Option<termy_terminal_ui::TerminalUnderline> {
     let cell = cell.as_core();
     let style = core_terminal_underline_style(cell.underline_style)?;
-    let color = cell.underline_color.map(|color| {
-        resolve_core_color(
-            color,
-            context.colors.foreground,
-            context.colors,
-            context.core_palette,
-        )
-        .into()
-    });
+    let color = cell
+        .underline_color
+        .map(|color| resolve_core_color(color, context.colors, context.core_palette).into());
     Some(termy_terminal_ui::TerminalUnderline { style, color })
 }
 
@@ -495,7 +489,6 @@ struct ResolvedCellColors {
 
 fn resolve_core_color(
     color: termy_core::TerminalRenderColor,
-    default: gpui::Rgba,
     colors: &TerminalColors,
     palette: Option<&TerminalPalette>,
 ) -> gpui::Rgba {
@@ -508,10 +501,10 @@ fn resolve_core_color(
     match color {
         termy_core::TerminalRenderColor::DefaultForeground => palette
             .and_then(|palette| palette.foreground)
-            .map_or(default, from_core),
+            .map_or(colors.foreground, from_core),
         termy_core::TerminalRenderColor::DefaultBackground => palette
             .and_then(|palette| palette.background)
-            .map_or(default, from_core),
+            .map_or(colors.background, from_core),
         termy_core::TerminalRenderColor::Cursor => palette
             .and_then(|palette| palette.cursor)
             .map_or(colors.cursor, from_core),
@@ -559,22 +552,11 @@ fn resolve_cell_colors<'a>(
         std::mem::swap(&mut fg_source, &mut bg_source);
     }
     let (mut fg, mut bg, uses_terminal_default_bg, dim, character) = (
-        resolve_core_color(
-            fg_source,
-            context.colors.foreground,
-            context.colors,
-            context.core_palette,
-        ),
-        resolve_core_color(
-            bg_source,
-            context.colors.background,
-            context.colors,
-            context.core_palette,
-        ),
+        resolve_core_color(fg_source, context.colors, context.core_palette),
+        resolve_core_color(bg_source, context.colors, context.core_palette),
         matches!(
             bg_source,
-            termy_core::TerminalRenderColor::DefaultForeground
-                | termy_core::TerminalRenderColor::DefaultBackground
+            termy_core::TerminalRenderColor::DefaultBackground
         ),
         cell.dim,
         cell.text.chars().next().unwrap_or('\0'),
@@ -5007,7 +4989,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_core_cell_colors_classifies_inverse_background_after_swap() {
+    fn resolve_core_cell_colors_keeps_inverse_default_foreground_background_explicit() {
         let context = test_build_context(0.2);
         let mut inverse_default_background = termy_core::TerminalRenderCell {
             background: termy_core::TerminalRenderColor::Indexed(4),
@@ -5017,14 +4999,39 @@ mod tests {
 
         let resolved = resolve_cell_colors(&inverse_default_background, context);
 
-        assert!(resolved.uses_terminal_default_bg);
-        assert!((resolved.bg.a - 0.2).abs() <= f32::EPSILON);
+        assert!(!resolved.uses_terminal_default_bg);
+        assert_eq!(resolved.bg, context.colors.foreground);
+        assert!((resolved.bg.a - 1.0).abs() <= f32::EPSILON);
 
         inverse_default_background.foreground = termy_core::TerminalRenderColor::Indexed(2);
         inverse_default_background.background = termy_core::TerminalRenderColor::DefaultBackground;
         let explicit = resolve_cell_colors(&inverse_default_background, context);
         assert!(!explicit.uses_terminal_default_bg);
         assert!((explicit.bg.a - 1.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn claude_code_reverse_video_cursor_paints_default_foreground_background() {
+        let terminal = NativeTerminal::new_display(TerminalSize::default(), None);
+        terminal
+            .hydrate_output("❯\u{a0}\x1b[7m \r\x1b[1B\x1b[27m\x1b[1A\x1b[3G\x1b[?25l".as_bytes());
+
+        let mut cursor_cell = None;
+        terminal.visit_viewport_cells(|_, line, col, cell| {
+            if line == 0 && col == 2 {
+                cursor_cell = Some(cell.clone());
+            }
+        });
+        let cursor_cell = cursor_cell.expect("Claude cursor cell should be present");
+        assert_eq!(cursor_cell.text, " ");
+        assert!(cursor_cell.inverse);
+        assert_eq!(terminal.cursor_state(), None);
+
+        let context = test_build_context(0.2);
+        let resolved = resolve_cell_colors(&cursor_cell, context);
+        assert_eq!(resolved.bg, context.colors.foreground);
+        assert!(!resolved.uses_terminal_default_bg);
+        assert!((resolved.bg.a - 1.0).abs() <= f32::EPSILON);
     }
 
     #[test]
