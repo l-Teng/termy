@@ -240,6 +240,7 @@ bump kind:
     export NEW
     perl -i -pe '$done ||= s/^version = ".*"/version = "$ENV{NEW}"/' crates/desktop_app/Cargo.toml
     perl -i -pe '$done ||= s/^version = ".*"/version = "$ENV{NEW}"/' crates/cli/Cargo.toml
+    cargo update --workspace --offline
     echo "Bumped $CURRENT -> $NEW"
 
 # Set exact version in desktop app + cli Cargo.toml (e.g. just set-version 0.2.12)
@@ -254,4 +255,5 @@ set-version version:
     export NEW
     perl -i -pe '$done ||= s/^version = ".*"/version = "$ENV{NEW}"/' crates/desktop_app/Cargo.toml
     perl -i -pe '$done ||= s/^version = ".*"/version = "$ENV{NEW}"/' crates/cli/Cargo.toml
+    cargo update --workspace --offline
     echo "Set $CURRENT -> $NEW"
