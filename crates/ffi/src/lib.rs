@@ -4279,9 +4279,9 @@ mod tests {
             cell_height: 18.0,
         };
         #[cfg(target_os = "windows")]
-        let command: &[u8] = b"echo alpha Beta && echo beta gamma";
+        let command: &[u8] = b"echo alpha beta Beta";
         #[cfg(not(target_os = "windows"))]
-        let command: &[u8] = b"printf 'alpha Beta\nbeta gamma'";
+        let command: &[u8] = b"printf 'alpha beta Beta'";
         let mut terminal = ptr::null_mut();
 
         assert_eq!(
@@ -4305,12 +4305,12 @@ mod tests {
             });
 
         let matches = unsafe { slice::from_raw_parts(batch.matches_ptr, batch.matches_len) };
-        assert!(!matches.is_empty());
-        assert!(
-            matches
-                .iter()
-                .all(|search_match| search_match.start_col == 0)
+        assert_eq!(
+            matches.len(),
+            1,
+            "case-sensitive search must exclude uppercase Beta"
         );
+        assert_eq!(matches[0].start_col, 6);
 
         assert_eq!(
             unsafe { termy_search_batch_free(&mut batch) },
