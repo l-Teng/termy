@@ -65,6 +65,8 @@ jobs:
       - name: Run comparison
         id: comparison
         shell: bash
+        env:
+          TERMY_CORE_TEST_BACKEND: alacritty
         run: |
           set -euo pipefail
           report="$RUNNER_TEMP/$TMON_BENCH_REPORT_NAME"
@@ -123,6 +125,7 @@ jobs:
         if: ${{ always() && steps.checkout.outcome == 'success' && steps.setup_rust.outcome == 'success' }}
         shell: bash
         env:
+          TERMY_CORE_TEST_BACKEND: alacritty
           TMON_BENCH_ALLOCATIONS_ONLY: "1"
         run: |
           set -euo pipefail
