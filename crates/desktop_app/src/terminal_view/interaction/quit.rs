@@ -6,15 +6,48 @@ enum CloseRequestTarget {
     Application,
     WindowClose,
     TabClose { tab_id: TabId },
+    WorkspaceDelete { workspace_id: u64 },
 }
 
 impl TerminalView {
-    fn tab_is_pinned_for_close_target(&self, target: CloseRequestTarget) -> bool {
+    fn close_request_is_blocked(
+        &mut self,
+        target: CloseRequestTarget,
+        cx: &mut Context<Self>,
+    ) -> bool {
         match target {
-            CloseRequestTarget::TabClose { tab_id } => self
-                .tab_index_by_id(tab_id)
-                .and_then(|index| self.session.tabs.get(index))
-                .is_some_and(|tab| tab.pinned),
+            CloseRequestTarget::TabClose { tab_id } => {
+                let blocked = self
+                    .tab_index_by_id(tab_id)
+                    .and_then(|index| self.session.tabs.get(index))
+                    .is_some_and(|tab| tab.pinned);
+                if blocked {
+                    self.notify_pinned_tab_close_blocked(cx);
+                }
+                blocked
+            }
+            CloseRequestTarget::WorkspaceDelete { workspace_id } => {
+                let Some(blocker) = self.workspace_delete_blocker(workspace_id) else {
+                    return false;
+                };
+                match blocker {
+                    workspaces::WorkspaceDeleteBlocker::Missing => {}
+                    workspaces::WorkspaceDeleteBlocker::LastWorkspace => {
+                        crate::ui::toast::info("The last workspace cannot be deleted");
+                        self.notify_overlay(cx);
+                    }
+                    workspaces::WorkspaceDeleteBlocker::PinnedWorkspace => {
+                        crate::ui::toast::info(
+                            "Pinned workspaces must be unpinned before deleting",
+                        );
+                        self.notify_overlay(cx);
+                    }
+                    workspaces::WorkspaceDeleteBlocker::PinnedTab => {
+                        self.notify_pinned_tab_close_blocked(cx);
+                    }
+                }
+                true
+            }
             CloseRequestTarget::Application | CloseRequestTarget::WindowClose => false,
         }
     }
@@ -166,6 +199,26 @@ impl TerminalView {
                 .find(|(_, tab)| tab.id == tab_id && Self::tab_is_busy(tab))
                 .map(|(index, tab)| vec![self.tab_title_for_warning(index, tab, fallback_title)])
                 .unwrap_or_default(),
+            CloseRequestTarget::WorkspaceDelete { workspace_id } => {
+                let Some(workspace_index) = self
+                    .session
+                    .workspaces
+                    .iter()
+                    .position(|entry| entry.id == workspace_id)
+                else {
+                    return Vec::new();
+                };
+                let tabs = if workspace_index == self.session.active_workspace {
+                    self.session.tabs.as_slice()
+                } else {
+                    self.session.workspaces[workspace_index].tabs.as_slice()
+                };
+                tabs.iter()
+                    .enumerate()
+                    .filter(|(_, tab)| Self::tab_is_busy(tab))
+                    .map(|(index, tab)| self.tab_title_for_warning(index, tab, fallback_title))
+                    .collect()
+            }
         }
     }
 
@@ -173,6 +226,7 @@ impl TerminalView {
         match target {
             CloseRequestTarget::Application | CloseRequestTarget::WindowClose => "Quit Termy?",
             CloseRequestTarget::TabClose { .. } => "Close Tab?",
+            CloseRequestTarget::WorkspaceDelete { .. } => "Delete Workspace?",
         }
     }
 
@@ -182,6 +236,7 @@ impl TerminalView {
                 &["Quit", "Cancel"]
             }
             CloseRequestTarget::TabClose { .. } => &["Close Tab", "Cancel"],
+            CloseRequestTarget::WorkspaceDelete { .. } => &["Delete Workspace", "Cancel"],
         }
     }
 
@@ -189,6 +244,7 @@ impl TerminalView {
         match target {
             CloseRequestTarget::Application | CloseRequestTarget::WindowClose => "Quit anyway?",
             CloseRequestTarget::TabClose { .. } => "Close it anyway?",
+            CloseRequestTarget::WorkspaceDelete { .. } => "Delete this workspace anyway?",
         }
     }
 
@@ -256,6 +312,12 @@ impl TerminalView {
                 self.close_tab_by_id(tab_id, cx);
                 false
             }
+            CloseRequestTarget::WorkspaceDelete { workspace_id } => {
+                if !self.close_request_is_blocked(target, cx) {
+                    let _ = self.delete_workspace_by_id(workspace_id, cx);
+                }
+                false
+            }
         }
     }
 
@@ -278,14 +340,14 @@ impl TerminalView {
                         self.allow_quit_without_prompt = true;
                         return true;
                     }
-                    CloseRequestTarget::TabClose { .. } => {}
+                    CloseRequestTarget::TabClose { .. }
+                    | CloseRequestTarget::WorkspaceDelete { .. } => {}
                 }
             }
             return false;
         }
 
-        if self.tab_is_pinned_for_close_target(target) {
-            self.notify_pinned_tab_close_blocked(cx);
+        if self.close_request_is_blocked(target, cx) {
             return false;
         }
 
@@ -318,7 +380,10 @@ impl TerminalView {
                     .update(cx, |view, _| {
                         view.quit_prompt_in_flight = false;
                         if confirmed {
-                            if !matches!(target, CloseRequestTarget::TabClose { .. }) {
+                            if matches!(
+                                target,
+                                CloseRequestTarget::Application | CloseRequestTarget::WindowClose
+                            ) {
                                 view.allow_quit_without_prompt = true;
                             }
                             follow_through = true;
@@ -340,6 +405,13 @@ impl TerminalView {
                     }
                     CloseRequestTarget::TabClose { tab_id } => {
                         let _ = this.update(cx, |view, cx| view.close_tab_by_id(tab_id, cx));
+                    }
+                    CloseRequestTarget::WorkspaceDelete { workspace_id } => {
+                        let _ = this.update(cx, |view, cx| {
+                            if !view.close_request_is_blocked(target, cx) {
+                                let _ = view.delete_workspace_by_id(workspace_id, cx);
+                            }
+                        });
                     }
                 }
             });
@@ -409,6 +481,19 @@ impl TerminalView {
         let target = Self::tab_close_request_target(self.effective_tab_count_for_close(), tab_id);
         let _ = self.request_close(target, window, cx);
     }
+
+    pub(in super::super) fn request_workspace_delete_by_id(
+        &mut self,
+        workspace_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.request_close(
+            CloseRequestTarget::WorkspaceDelete { workspace_id },
+            window,
+            cx,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -425,6 +510,9 @@ mod tests {
         ));
         assert!(!TerminalView::should_force_close_when_prompt_in_flight(
             CloseRequestTarget::TabClose { tab_id: 1 }
+        ));
+        assert!(!TerminalView::should_force_close_when_prompt_in_flight(
+            CloseRequestTarget::WorkspaceDelete { workspace_id: 1 }
         ));
     }
 
@@ -460,6 +548,12 @@ mod tests {
             false,
             0,
         ));
+        assert!(!TerminalView::should_prompt_for_close_target(
+            CloseRequestTarget::WorkspaceDelete { workspace_id: 1 },
+            true,
+            false,
+            0,
+        ));
     }
 
     #[test]
@@ -476,6 +570,12 @@ mod tests {
             true,
             0,
         ));
+        assert!(TerminalView::should_prompt_for_close_target(
+            CloseRequestTarget::WorkspaceDelete { workspace_id: 7 },
+            false,
+            true,
+            1,
+        ));
     }
 
     #[test]
@@ -483,6 +583,23 @@ mod tests {
         assert_eq!(
             TerminalView::close_warning_detail(CloseRequestTarget::Application, &[]),
             None
+        );
+    }
+
+    #[test]
+    fn workspace_delete_warning_uses_destructive_workspace_copy() {
+        let target = CloseRequestTarget::WorkspaceDelete { workspace_id: 7 };
+        assert_eq!(
+            TerminalView::close_warning_title(target),
+            "Delete Workspace?"
+        );
+        assert_eq!(
+            TerminalView::close_warning_buttons(target),
+            &["Delete Workspace", "Cancel"]
+        );
+        assert_eq!(
+            TerminalView::close_warning_final_prompt(target),
+            "Delete this workspace anyway?"
         );
     }
 }

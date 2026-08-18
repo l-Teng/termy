@@ -15,6 +15,9 @@ pub enum Utf8LocaleOverridePlan {
 fn locale_has_utf8_tag(locale: &str) -> bool {
     let locale = locale.trim();
     let locale = locale.split_once('@').map_or(locale, |(base, _)| base);
+    if locale.eq_ignore_ascii_case("utf-8") || locale.eq_ignore_ascii_case("utf8") {
+        return true;
+    }
     let Some((_, encoding)) = locale.split_once('.') else {
         return false;
     };
@@ -115,6 +118,25 @@ fn effective_locale_for_decision<'a>(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locale_override_plan_preserves_charset_only_utf8() {
+        for lc_ctype in ["UTF-8", "utf8"] {
+            assert_eq!(
+                utf8_locale_override_plan(None, Some(lc_ctype), Some("C.UTF-8")),
+                Utf8LocaleOverridePlan::None
+            );
+        }
+    }
+
+    #[test]
+    fn charset_only_utf8_detection_stays_strict_and_respects_lc_all() {
+        assert!(!locale_has_utf8_tag("en_US.fakeutf8"));
+        assert_eq!(
+            utf8_locale_override_plan(Some("C"), Some("UTF-8"), Some("C.UTF-8")),
+            Utf8LocaleOverridePlan::LcAllAndLcCtype
+        );
+    }
 
     #[test]
     fn preferred_utf8_locale_maps_charset_only_utf8_to_default() {

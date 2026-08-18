@@ -225,9 +225,11 @@ impl TerminalView {
         for index in 0..self.session.workspaces.len() {
             let is_active = index == self.session.active_workspace;
             let is_renaming = self.renaming_workspace == Some(index);
+            let workspace_id = self.session.workspaces[index].id;
             let name = self.workspace_display_name(index);
             let status = self.workspace_status(index);
             let pinned = self.session.workspaces[index].pinned;
+            let can_delete_workspace = self.session.workspaces.len() > 1;
             let tab_count = if is_active {
                 self.session.tabs.len()
             } else {
@@ -392,6 +394,42 @@ impl TerminalView {
                             .text_color(count_text)
                             .child(format!("{tab_count}")),
                     )
+                    .children(can_delete_workspace.then(|| {
+                        let mut delete_text = row_text;
+                        delete_text.a = 0.45;
+
+                        div()
+                            .id(("workspace-sidebar-delete", workspace_id))
+                            .flex_none()
+                            .w(px(18.0))
+                            .h(px(20.0))
+                            .ml(px(4.0))
+                            .rounded(px(TAB_ITEM_RADIUS))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(delete_text)
+                            .hover(move |style| {
+                                style
+                                    .bg(palette.close_button_hover_bg)
+                                    .text_color(palette.close_button_hover_text)
+                            })
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                                    window.prevent_default();
+                                    this.request_workspace_delete_by_id(workspace_id, window, cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(
+                                gpui::svg()
+                                    .path(gpui::SharedString::from("icons/tab_strip/x.svg"))
+                                    .size(px(9.0))
+                                    .text_color(delete_text),
+                            )
+                    }))
                     .children(drop_marker),
             );
         }

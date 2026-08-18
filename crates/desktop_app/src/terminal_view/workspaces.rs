@@ -31,6 +31,14 @@ pub(crate) enum WorkspaceStatus {
     Attention,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceDeleteBlocker {
+    Missing,
+    LastWorkspace,
+    PinnedWorkspace,
+    PinnedTab,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WorkspaceSidebarResizeDragState {
     start_window_x: f32,
@@ -201,6 +209,39 @@ impl TerminalView {
 
     pub(crate) fn has_other_workspaces(&self) -> bool {
         self.session.workspaces.len() > 1
+    }
+
+    pub(super) fn workspace_delete_blocker(
+        &self,
+        workspace_id: u64,
+    ) -> Option<WorkspaceDeleteBlocker> {
+        let Some(index) = self
+            .session
+            .workspaces
+            .iter()
+            .position(|entry| entry.id == workspace_id)
+        else {
+            return Some(WorkspaceDeleteBlocker::Missing);
+        };
+        if self.session.workspaces.len() <= 1 {
+            return Some(WorkspaceDeleteBlocker::LastWorkspace);
+        }
+
+        let entry = &self.session.workspaces[index];
+        if entry.pinned {
+            return Some(WorkspaceDeleteBlocker::PinnedWorkspace);
+        }
+        let live_tabs = if index == self.session.active_workspace {
+            self.session.tabs.as_slice()
+        } else {
+            entry.tabs.as_slice()
+        };
+        let has_pinned_tab = live_tabs.iter().any(|tab| tab.pinned)
+            || entry
+                .pending_restore
+                .as_ref()
+                .is_some_and(|stored| stored.tabs.iter().any(|tab| tab.pinned));
+        has_pinned_tab.then_some(WorkspaceDeleteBlocker::PinnedTab)
     }
 
     /// Sidebar status for the workspace at `index`. The active workspace only
@@ -489,6 +530,91 @@ impl TerminalView {
         self.restore_workspace_tabs(index);
         self.set_tab_scrollback_options(self.session.active_tab, true);
         self.reset_view_state_after_workspace_change(cx);
+    }
+
+    fn replacement_workspace_index_before_deletion(
+        removed_index: usize,
+        workspace_count: usize,
+    ) -> Option<usize> {
+        if workspace_count <= 1 || removed_index >= workspace_count {
+            return None;
+        }
+        if removed_index + 1 < workspace_count {
+            Some(removed_index + 1)
+        } else {
+            Some(removed_index - 1)
+        }
+    }
+
+    pub(in crate::terminal_view) fn delete_workspace_by_id(
+        &mut self,
+        workspace_id: u64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.workspace_delete_blocker(workspace_id).is_some() {
+            return false;
+        }
+        let Some(removed_index) = self
+            .session
+            .workspaces
+            .iter()
+            .position(|entry| entry.id == workspace_id)
+        else {
+            return false;
+        };
+        let deleting_active = removed_index == self.session.active_workspace;
+        let replacement_id = if deleting_active {
+            let replacement_index = Self::replacement_workspace_index_before_deletion(
+                removed_index,
+                self.session.workspaces.len(),
+            )
+            .expect("deletable workspace must have a replacement");
+            if let Err(error) = self.materialize_pending_workspace(replacement_index) {
+                log::error!("Failed to start replacement workspace before deletion: {error}");
+                crate::ui::toast::error("Could not start the replacement workspace");
+                self.notify_overlay(cx);
+                return false;
+            }
+            self.session.workspaces[replacement_index].id
+        } else {
+            self.session.workspaces[self.session.active_workspace].id
+        };
+
+        let removed_tabs = if deleting_active {
+            self.session.tabs.as_slice()
+        } else {
+            self.session.workspaces[removed_index].tabs.as_slice()
+        };
+        let removed_pane_ids = removed_tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter().map(|pane| pane.id.clone()))
+            .collect::<Vec<_>>();
+        let removed_tab_ids = removed_tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        let _ = self.release_forwarded_mouse_presses_for_panes(&removed_pane_ids);
+        for tab_id in removed_tab_ids {
+            self.session.native_pane_zoom_snapshots.remove(&tab_id);
+            self.session.native_pane_layout_trees.remove(&tab_id);
+        }
+
+        if deleting_active {
+            self.session.tabs.clear();
+            self.session.active_tab = 0;
+        }
+        self.session.workspaces.remove(removed_index);
+        let replacement_index = self
+            .session
+            .workspaces
+            .iter()
+            .position(|entry| entry.id == replacement_id)
+            .expect("workspace deletion must retain the selected replacement");
+        if deleting_active {
+            self.restore_workspace_tabs(replacement_index);
+            self.set_tab_scrollback_options(self.session.active_tab, true);
+        } else {
+            self.session.active_workspace = replacement_index;
+        }
+        self.reset_view_state_after_workspace_change(cx);
+        true
     }
 
     pub(crate) fn set_workspace_pinned(
@@ -972,6 +1098,34 @@ mod tests {
         assert_eq!(
             TerminalView::next_workspace_sidebar_collapsed(true, true),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn workspace_deletion_prefers_next_then_previous_replacement() {
+        assert_eq!(
+            TerminalView::replacement_workspace_index_before_deletion(0, 3),
+            Some(1)
+        );
+        assert_eq!(
+            TerminalView::replacement_workspace_index_before_deletion(1, 3),
+            Some(2)
+        );
+        assert_eq!(
+            TerminalView::replacement_workspace_index_before_deletion(2, 3),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn workspace_deletion_refuses_missing_or_last_replacement() {
+        assert_eq!(
+            TerminalView::replacement_workspace_index_before_deletion(0, 1),
+            None
+        );
+        assert_eq!(
+            TerminalView::replacement_workspace_index_before_deletion(3, 3),
+            None
         );
     }
 }
