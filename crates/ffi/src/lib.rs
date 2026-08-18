@@ -4019,47 +4019,6 @@ mod tests {
         assert_eq!(unsafe { termy_config_free(config) }, TermyFfiStatus::Ok);
     }
 
-    fn wait_for_terminal_search(
-        terminal: *mut TermyFfiTerminal,
-        description: &str,
-        mut search: impl FnMut(&mut TermyFfiSearchBatch) -> TermyFfiStatus,
-    ) -> TermyFfiSearchBatch {
-        let timeout = Duration::from_secs(5);
-        let deadline = std::time::Instant::now() + timeout;
-        let mut attempts = 0;
-
-        loop {
-            let mut batch = TermyFfiSearchBatch::default();
-            assert_eq!(search(&mut batch), TermyFfiStatus::Ok);
-            attempts += 1;
-
-            if batch.matches_len > 0 {
-                return batch;
-            }
-
-            assert_eq!(
-                unsafe { termy_search_batch_free(&mut batch) },
-                TermyFfiStatus::Ok
-            );
-
-            let now = std::time::Instant::now();
-            assert!(
-                now < deadline,
-                "timed out after {timeout:?} waiting for {description} ({attempts} search attempts)"
-            );
-
-            let wait_ms = deadline
-                .saturating_duration_since(now)
-                .min(Duration::from_millis(25))
-                .as_millis() as u64;
-            let mut woke = false;
-            assert_eq!(
-                unsafe { termy_terminal_wait_for_wakeup(terminal, wait_ms, &mut woke) },
-                TermyFfiStatus::Ok
-            );
-        }
-    }
-
     #[test]
     fn terminal_search_returns_visible_matches() {
         let size = TermyFfiSize {
@@ -4068,22 +4027,24 @@ mod tests {
             cell_width: 9.0,
             cell_height: 18.0,
         };
-        #[cfg(target_os = "windows")]
-        let command: &[u8] = b"echo alpha beta && echo beta gamma";
-        #[cfg(not(target_os = "windows"))]
-        let command: &[u8] = b"printf 'alpha beta\nbeta gamma'";
         let mut terminal = ptr::null_mut();
 
         assert_eq!(
-            unsafe { termy_terminal_new(size, command.as_ptr(), command.len(), &mut terminal,) },
+            unsafe { termy_display_terminal_new(size, &mut terminal) },
+            TermyFfiStatus::Ok
+        );
+        let output = b"alpha beta\r\nbeta gamma";
+        assert_eq!(
+            unsafe { termy_terminal_feed_output(terminal, output.as_ptr(), output.len()) },
             TermyFfiStatus::Ok
         );
 
         let query = b"beta";
-        let mut batch =
-            wait_for_terminal_search(terminal, "case-insensitive beta matches", |batch| unsafe {
-                termy_terminal_search(terminal, query.as_ptr(), query.len(), batch)
-            });
+        let mut batch = TermyFfiSearchBatch::default();
+        assert_eq!(
+            unsafe { termy_terminal_search(terminal, query.as_ptr(), query.len(), &mut batch) },
+            TermyFfiStatus::Ok
+        );
         assert!(batch.matches_len >= 1);
 
         let matches = unsafe { slice::from_raw_parts(batch.matches_ptr, batch.matches_len) };
@@ -4278,20 +4239,22 @@ mod tests {
             cell_width: 9.0,
             cell_height: 18.0,
         };
-        #[cfg(target_os = "windows")]
-        let command: &[u8] = b"echo alpha beta Beta";
-        #[cfg(not(target_os = "windows"))]
-        let command: &[u8] = b"printf 'alpha beta Beta'";
         let mut terminal = ptr::null_mut();
 
         assert_eq!(
-            unsafe { termy_terminal_new(size, command.as_ptr(), command.len(), &mut terminal,) },
+            unsafe { termy_display_terminal_new(size, &mut terminal) },
+            TermyFfiStatus::Ok
+        );
+        let output = b"alpha beta Beta";
+        assert_eq!(
+            unsafe { termy_terminal_feed_output(terminal, output.as_ptr(), output.len()) },
             TermyFfiStatus::Ok
         );
 
         let query = b"beta";
-        let mut batch =
-            wait_for_terminal_search(terminal, "case-sensitive beta matches", |batch| unsafe {
+        let mut batch = TermyFfiSearchBatch::default();
+        assert_eq!(
+            unsafe {
                 termy_terminal_search_with_options(
                     terminal,
                     query.as_ptr(),
@@ -4300,9 +4263,11 @@ mod tests {
                         case_sensitive: true,
                         regex: false,
                     },
-                    batch,
+                    &mut batch,
                 )
-            });
+            },
+            TermyFfiStatus::Ok
+        );
 
         let matches = unsafe { slice::from_raw_parts(batch.matches_ptr, batch.matches_len) };
         assert_eq!(
