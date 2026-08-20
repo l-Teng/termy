@@ -160,6 +160,32 @@ pub struct ThemeRegistryEntry {
     pub checksum_sha256: Option<String>,
 }
 
+/// Current on-disk format version for `theme_registry.cache`.
+pub const THEME_REGISTRY_CACHE_VERSION: u32 = 1;
+
+/// One theme listing normalized from the public registry or its legacy payload.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThemeStoreTheme {
+    pub name: String,
+    pub slug: String,
+    pub description: String,
+    pub latest_version: Option<String>,
+    pub file_url: Option<String>,
+}
+
+/// Shared persisted representation of `theme_registry.cache`.
+///
+/// Field order is part of the bincode format. Add a new version instead of
+/// reordering or changing fields in place.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThemeRegistryCache {
+    pub version: u32,
+    pub fetched_at: u64,
+    pub registry_url: String,
+    pub etag: Option<String>,
+    pub themes: Vec<ThemeStoreTheme>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeMetadata {

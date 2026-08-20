@@ -387,7 +387,16 @@ impl TerminalView {
         working_dir: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.add_tab_with_working_dir_and_windows_shell(working_dir, None, cx)
+        self.add_tab_with_working_dir_and_windows_shell(working_dir, None, None, cx)
+    }
+
+    pub(crate) fn add_tab_with_launch(
+        &mut self,
+        working_dir: Option<&str>,
+        launch: Option<&TerminalLaunch>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.add_tab_with_working_dir_and_windows_shell(working_dir, None, launch, cx)
     }
 
     pub(crate) fn add_tab_with_windows_shell(
@@ -395,19 +404,36 @@ impl TerminalView {
         windows_shell: RuntimeWindowsShell,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.add_tab_with_working_dir_and_windows_shell(None, Some(windows_shell), cx)
+        self.add_tab_with_working_dir_and_windows_shell(None, Some(windows_shell), None, cx)
     }
 
     fn add_tab_with_working_dir_and_windows_shell(
         &mut self,
         working_dir: Option<&str>,
         windows_shell: Option<RuntimeWindowsShell>,
+        launch: Option<&TerminalLaunch>,
         cx: &mut Context<Self>,
     ) -> bool {
         match self.runtime_kind() {
             RuntimeKind::Tmux => {
+                if matches!(launch, Some(TerminalLaunch::Program { .. })) {
+                    crate::ui::toast::error(
+                        "Structured program launches are not supported in tmux tabs",
+                    );
+                    return false;
+                }
                 let added = self.tmux_add_tab(working_dir, cx);
                 if added {
+                    if let Some(TerminalLaunch::ShellCommand(command)) = launch {
+                        let mut input = command.as_bytes().to_vec();
+                        input.push(b'\n');
+                        if !self.send_input_to_active_pane(&input) {
+                            crate::ui::toast::error(
+                                "Failed to send the plugin command to the new tmux tab",
+                            );
+                            return false;
+                        }
+                    }
                     self.sync_plugin_lifecycle_state(true, cx);
                 }
                 added
@@ -423,13 +449,13 @@ impl TerminalView {
                 let terminal_runtime = windows_shell
                     .map(|shell| runtime_config_for_windows_shell(&self.terminal_runtime, shell));
                 let terminal_runtime = terminal_runtime.as_ref().unwrap_or(&self.terminal_runtime);
-                let terminal = match Terminal::new_native(
+                let terminal = match Terminal::new_native_with_launch(
                     size,
                     preferred_working_dir.as_deref(),
                     Some(&self.native_terminal_wakeup_router),
                     Some(&self.tab_shell_integration),
                     Some(terminal_runtime),
-                    None,
+                    launch,
                 ) {
                     Ok(terminal) => terminal,
                     Err(error) => {
@@ -763,9 +789,9 @@ impl TerminalView {
     pub(crate) fn focus_terminal_after_tab_activation(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
-        self.focus_handle.focus(window, cx);
+        self.focus_handle.focus(window);
         self.reset_cursor_blink_phase();
     }
 
@@ -811,17 +837,67 @@ impl TerminalView {
     }
 
     pub(crate) fn split_active_pane_vertical(&mut self, cx: &mut Context<Self>) -> bool {
+        self.split_active_pane_vertical_with_launch(None, None, cx)
+    }
+
+    pub(crate) fn split_active_pane_vertical_with_launch(
+        &mut self,
+        working_dir: Option<&str>,
+        launch: Option<&TerminalLaunch>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         match self.runtime_kind() {
-            RuntimeKind::Tmux => self.tmux_split_active_pane_vertical(cx),
-            RuntimeKind::Native => self.native_split_active_pane(NativeSplitAxis::Vertical, cx),
+            RuntimeKind::Tmux => {
+                if matches!(launch, Some(TerminalLaunch::Program { .. })) {
+                    crate::ui::toast::error(
+                        "Structured program launches are not supported in tmux panes",
+                    );
+                    return false;
+                }
+                let split = self.tmux_split_active_pane_vertical_with_working_dir(working_dir, cx);
+                split && self.send_shell_launch_to_active_pane(launch)
+            }
+            RuntimeKind::Native => {
+                self.native_split_active_pane(NativeSplitAxis::Vertical, working_dir, launch, cx)
+            }
         }
     }
 
     pub(crate) fn split_active_pane_horizontal(&mut self, cx: &mut Context<Self>) -> bool {
+        self.split_active_pane_horizontal_with_launch(None, None, cx)
+    }
+
+    pub(crate) fn split_active_pane_horizontal_with_launch(
+        &mut self,
+        working_dir: Option<&str>,
+        launch: Option<&TerminalLaunch>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         match self.runtime_kind() {
-            RuntimeKind::Tmux => self.tmux_split_active_pane_horizontal(cx),
-            RuntimeKind::Native => self.native_split_active_pane(NativeSplitAxis::Horizontal, cx),
+            RuntimeKind::Tmux => {
+                if matches!(launch, Some(TerminalLaunch::Program { .. })) {
+                    crate::ui::toast::error(
+                        "Structured program launches are not supported in tmux panes",
+                    );
+                    return false;
+                }
+                let split =
+                    self.tmux_split_active_pane_horizontal_with_working_dir(working_dir, cx);
+                split && self.send_shell_launch_to_active_pane(launch)
+            }
+            RuntimeKind::Native => {
+                self.native_split_active_pane(NativeSplitAxis::Horizontal, working_dir, launch, cx)
+            }
         }
+    }
+
+    fn send_shell_launch_to_active_pane(&self, launch: Option<&TerminalLaunch>) -> bool {
+        let Some(TerminalLaunch::ShellCommand(command)) = launch else {
+            return true;
+        };
+        let mut input = command.as_bytes().to_vec();
+        input.push(b'\n');
+        self.send_input_to_active_pane(&input)
     }
 
     pub(crate) fn close_active_pane(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1232,10 +1308,12 @@ impl TerminalView {
         cols: u16,
         rows: u16,
         cell_size: Size<Pixels>,
+        working_dir: Option<&str>,
+        launch: Option<&TerminalLaunch>,
         cx: &mut Context<Self>,
     ) -> Result<Terminal, String> {
-        let preferred_working_dir = self.preferred_working_dir_for_new_session(None, cx);
-        Terminal::new_native(
+        let preferred_working_dir = self.preferred_working_dir_for_new_session(working_dir, cx);
+        Terminal::new_native_with_launch(
             TerminalSize {
                 cols: cols.max(1),
                 rows: rows.max(1),
@@ -1246,7 +1324,7 @@ impl TerminalView {
             Some(&self.native_terminal_wakeup_router),
             Some(&self.tab_shell_integration),
             Some(&self.terminal_runtime),
-            None,
+            launch,
         )
         .map_err(|error| format!("Failed to split pane: {error}"))
     }
@@ -1271,7 +1349,13 @@ impl TerminalView {
         true
     }
 
-    fn native_split_active_pane(&mut self, axis: NativeSplitAxis, cx: &mut Context<Self>) -> bool {
+    fn native_split_active_pane(
+        &mut self,
+        axis: NativeSplitAxis,
+        working_dir: Option<&str>,
+        launch: Option<&TerminalLaunch>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.clear_native_zoom_snapshot_for_active_tab();
         let Some((active_pane_id, left, top, width, height, pane_zoom_steps)) = self
             .session
@@ -1336,7 +1420,14 @@ impl TerminalView {
         };
 
         let cell_size = self.layout_cell_size();
-        let terminal = match self.native_make_terminal(split_size.2, split_size.3, cell_size, cx) {
+        let terminal = match self.native_make_terminal(
+            split_size.2,
+            split_size.3,
+            cell_size,
+            working_dir,
+            launch,
+            cx,
+        ) {
             Ok(terminal) => terminal,
             Err(error) => {
                 crate::ui::toast::error(error);

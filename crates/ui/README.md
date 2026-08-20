@@ -2,13 +2,18 @@
 
 Termy's settings design system as reusable GPUI components.
 
+The crate also owns the pinned `glassy-ui` integration: startup initialization,
+light/dark theme synchronization, bundled assets and fonts, and direct
+re-exports of the published component API used by desktop surfaces.
+
 ## Owner
 
 This crate owns Termy's chrome vocabulary: color tokens derived from the active
-terminal theme, layout metrics, and the stateless components built on them —
-sidebar, section headers, grouped cards, setting rows, controls (select,
-stepper, switch, slider, text field, segmented control, shortcut box), and
-status surfaces (badge, banner, toast, empty state).
+terminal theme, layout metrics, and Termy-specific stateless chrome — sidebar,
+section headers, grouped cards, setting rows, slider, stepper, segmented
+control, shortcut box, banner, toast, and empty state. Generic controls such as
+buttons, switches, selects, inputs, badges, tooltips, dialogs, and menus come
+directly from `glassy-ui`.
 
 Keep product behavior out of here. Config keys, plugin inventory, SSH hosts, and
 command execution stay in `crates/desktop_app/`; this crate only knows how a
@@ -39,3 +44,7 @@ cargo test -p termy settings
 - `termy` / `crates/desktop_app`
 - `termy_terminal_ui`
 - `termy_config_core`, `termy_command_core`, `termy_plugin_runtime`, `termy_ssh_core`
+
+`glassy-ui` is the allowed external component dependency. Keep both it and GPUI
+exactly pinned at the workspace root so every element shares the same GPUI
+types.

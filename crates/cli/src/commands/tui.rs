@@ -260,8 +260,10 @@ fn run_tui() -> io::Result<()> {
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
-    if app.should_edit_config {
-        crate::commands::edit_config::run();
+    if app.should_edit_config
+        && let Err(error) = crate::commands::edit_config::run()
+    {
+        eprintln!("Error: {error}");
     }
 
     Ok(())

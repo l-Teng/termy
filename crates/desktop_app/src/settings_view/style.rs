@@ -195,6 +195,7 @@ impl SettingsWindow {
     /// nothing changed so a repaint does not churn the global.
     pub(super) fn sync_ui_tokens(&self, cx: &mut Context<Self>) {
         let tokens = self.ui_tokens();
+        termy_ui::sync_glassy_theme(&tokens, cx);
         if cx.try_global::<termy_ui::Tokens>() != Some(&tokens) {
             termy_ui::set_tokens(tokens, cx);
         }

@@ -508,23 +508,25 @@ impl SettingsWindow {
             loop {
                 smol::Timer::after(Duration::from_millis(SETTINGS_SCROLL_ANIMATION_TICK_MS)).await;
 
-                let continue_animating = cx.update(|cx| {
-                    this.update(cx, |view, cx| {
-                        if view.scroll_animation_token != token {
-                            return false;
-                        }
+                let continue_animating = cx
+                    .update(|cx| {
+                        this.update(cx, |view, cx| {
+                            if view.scroll_animation_token != token {
+                                return false;
+                            }
 
-                        let t = (started_at.elapsed().as_secs_f32() / duration.as_secs_f32())
-                            .clamp(0.0, 1.0);
-                        let eased = t * t * (3.0 - 2.0 * t);
-                        let x = start_x + (target_x - start_x) * eased;
-                        let y = start_y + (target_y - start_y) * eased;
-                        scroll_handle.set_offset(point(px(x), px(y)));
-                        cx.notify();
-                        t < 1.0
+                            let t = (started_at.elapsed().as_secs_f32() / duration.as_secs_f32())
+                                .clamp(0.0, 1.0);
+                            let eased = t * t * (3.0 - 2.0 * t);
+                            let x = start_x + (target_x - start_x) * eased;
+                            let y = start_y + (target_y - start_y) * eased;
+                            scroll_handle.set_offset(point(px(x), px(y)));
+                            cx.notify();
+                            t < 1.0
+                        })
+                        .unwrap_or(false)
                     })
-                    .unwrap_or(false)
-                });
+                    .unwrap_or(false);
 
                 if !continue_animating {
                     break;
@@ -552,7 +554,7 @@ impl SettingsWindow {
         self.sidebar_search_active = true;
         self.sidebar_search_selecting = false;
         if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window, cx);
+            self.focus_handle.focus(window);
         }
 
         if let Some(anchor) = self.setting_scroll_anchors.get(setting_key).cloned() {
@@ -867,7 +869,7 @@ impl SettingsWindow {
         if is_active {
             let font = Font {
                 family: self.config.ui_font_family.clone().into(),
-                ..Font::default()
+                ..gpui::font("")
             };
             return TextInputElement::new(
                 cx.entity(),
@@ -944,7 +946,7 @@ impl SettingsWindow {
                     }
                     view.sidebar_search_selecting = event.click_count == 1;
                     view.refresh_search_navigation(window, cx);
-                    view.focus_handle.focus(window, cx);
+                    view.focus_handle.focus(window);
                     cx.notify();
                 }),
             )

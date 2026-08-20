@@ -64,23 +64,29 @@ icons! {
     Folder => "folder",
 }
 
-/// Asset source for the kit's icons.
-///
-/// Hosts that already have their own [`AssetSource`] should delegate to
-/// [`icon_bytes`] for paths under `icons/` rather than registering this.
+/// Combined asset source for Glassy UI and Termy's own icon set.
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(asset) = glassy_ui::Assets.load(path)? {
+            return Ok(Some(asset));
+        }
         Ok(icon_bytes(path).map(Cow::Borrowed))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        Ok(EMBEDDED_ICONS
+        let mut assets = glassy_ui::Assets.list(path)?;
+        for icon in EMBEDDED_ICONS
             .iter()
             .filter(|(icon_path, _)| icon_path.starts_with(path))
             .map(|(icon_path, _)| SharedString::from(*icon_path))
-            .collect())
+        {
+            if !assets.contains(&icon) {
+                assets.push(icon);
+            }
+        }
+        Ok(assets)
     }
 }
 
@@ -173,6 +179,12 @@ mod tests {
     fn unknown_paths_are_misses_rather_than_errors() {
         assert!(icon_bytes("icons/nope.svg").is_none());
         assert_eq!(Assets.load("icons/nope.svg").unwrap(), None);
-        assert_eq!(Assets.list("icons/").unwrap().len(), EMBEDDED_ICONS.len());
+        let listed = Assets.list("icons/").unwrap();
+        for (path, _) in EMBEDDED_ICONS {
+            assert!(
+                listed.contains(&SharedString::from(*path)),
+                "missing {path} from combined asset list"
+            );
+        }
     }
 }

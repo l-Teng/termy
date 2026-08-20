@@ -17,7 +17,7 @@ Baseline audit: **2026-06-01** (app version **0.3.0**).
 | G3 | Workspace unit tests in CI | `cargo test --workspace` on every PR | Met | 2026-06-01 | `architecture-checks.yml` `workspace-tests` |
 | G4 | Formatting | `cargo fmt --check` on every PR | Met | 2026-06-01 | `architecture-checks.yml` `fmt` |
 | G5 | Local CI parity | `just validate` matches PR CI | Met | 2026-06-01 | `justfile` |
-| G6 | Max file size | No `.rs` file &gt; 1,500 lines; no new files &gt; 800 without ADR | Partial | 2026-06-13 | `scripts/check-file-sizes.sh` (10-file allowlist; shrink over time) |
+| G6 | Max file size | No `.rs` file &gt; 1,500 lines; no new files &gt; 800 without ADR | Partial | 2026-08-20 | `scripts/check-file-sizes.sh` (allowlist is the source of truth; shrink over time) |
 | G7 | Tmux integration | CI installs tmux ≥ 3.3; ignored tests run on macOS | Met | 2026-06-01 | `architecture-checks.yml` (fail if tmux &lt; 3.3) |
 | G9 | Perf regression | Benchmark gates on macOS perf workflow | Partial | 2026-06-01 | `macos-performance.yml` |
 | G10 | Crash visibility | Panic writes crash log; user-visible startup failure | Partial | 2026-06-13 | Runtime panic hook + startup alert; watch `main` before Met |

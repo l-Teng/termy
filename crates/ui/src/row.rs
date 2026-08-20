@@ -8,7 +8,6 @@ use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px,
 };
 
-use crate::feedback::Badge;
 use crate::metrics::{
     BODY_SIZE, CARD_ROW_PADDING_X, CARD_ROW_PADDING_Y, CONTROL_WIDTH, LABEL_LINE_HEIGHT,
     LABEL_SIZE, RESET_SLOT_SIZE, ROW_LANE_GAP,
@@ -28,7 +27,7 @@ pub enum RowTone {
 pub struct SettingRow {
     label: SharedString,
     description: Option<SharedString>,
-    badge: Option<Badge>,
+    badge: Option<AnyElement>,
     control: Option<AnyElement>,
     reset: Option<AnyElement>,
     error: Option<SharedString>,
@@ -54,8 +53,8 @@ impl SettingRow {
     }
 
     /// Inline state chip beside the label, such as `SAVED`.
-    pub fn badge(mut self, badge: Badge) -> Self {
-        self.badge = Some(badge);
+    pub fn badge(mut self, badge: impl IntoElement) -> Self {
+        self.badge = Some(badge.into_any_element());
         self
     }
 

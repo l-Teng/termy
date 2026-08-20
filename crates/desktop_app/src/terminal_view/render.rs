@@ -1957,9 +1957,13 @@ impl TerminalView {
                                             .on_mouse_down(
                                                 MouseButton::Left,
                                                 cx.listener(move |this, _event, _window, cx| {
-                                                    crate::config::execute_fix_for_toast(toast_id);
-                                                    crate::ui::toast::dismiss_toast(toast_id);
-                                                    crate::ui::toast::success("Config fixed");
+                                                    if !this.cancel_plugin_invocation(toast_id, cx) {
+                                                        crate::config::execute_fix_for_toast(
+                                                            toast_id,
+                                                        );
+                                                        crate::ui::toast::dismiss_toast(toast_id);
+                                                        crate::ui::toast::success("Config fixed");
+                                                    }
                                                     this.notify_overlay(cx);
                                                     cx.stop_propagation();
                                                 }),
@@ -2234,6 +2238,7 @@ impl TerminalView {
             let state = self.terminal_context_menu.clone()?;
             let plugin_commands = self.plugin_commands_for_placement(
                 termy_plugin_runtime::PluginCommandPlacement::TerminalContextMenu,
+                cx,
             );
             let overlay_style = self.overlay_style();
             let menu_width = if plugin_commands.is_empty() {
@@ -2654,6 +2659,7 @@ impl TerminalView {
             let state = self.tab_context_menu.clone()?;
             let plugin_commands = self.plugin_commands_for_placement(
                 termy_plugin_runtime::PluginCommandPlacement::TabContextMenu,
+                cx,
             );
             let overlay_style = self.overlay_style();
             let menu_width = if plugin_commands.is_empty() {

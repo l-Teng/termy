@@ -71,14 +71,24 @@ Commands require `id`, `title`, and `run`. They may also declare search `keyword
 and Windows. Commands with inputs use the same palette input flow from every
 surface. Use `placements: []` for a keybinding-only command.
 
+Use `when` to make a command available only in matching context. Supported filters
+are `hasSelection`, `hasWorkingDirectory`, `runtimes`, and `platforms`. Termy
+checks the condition when listing the command and again immediately before running
+it.
+
 Inputs appear sequentially before the handler runs:
 
 - `text` returns a string and supports a placeholder, default, required flag, and maximum length.
 - `select` returns the value of one fixed option.
+- `pick` calls `loadOptions({ query, context })` as the user types and returns the selected option value.
 - `confirm` returns a boolean.
 
 Commands without inputs run immediately. Inputs are delivered as
 `inputs.<input-id>` to `run`.
+
+Pick loaders may be async and return the same `{ value, label, keywords?, status? }`
+shape as select options. Termy debounces requests and ignores stale results. Keep
+loaders side-effect free; they cannot return actions.
 
 ## Read the active context
 
@@ -86,6 +96,11 @@ Every handler receives a read-only snapshot with `platform`, `appVersion`, the
 resolved session launch `shell`, and the active `runtime` (`native` or `tmux`). It
 may also include `workingDirectory`, `activeCommand`, `selectedText`, `activeTab`,
 and `activePane`.
+
+`context.origin` contains stable `windowId`, `tabId`, and `paneId` values captured
+when the request starts. Use it to keep an async action aimed at its original
+terminal even if the user changes tabs. Active tab and pane snapshots include the
+same stable IDs.
 
 Tab and pane indexes are zero-based. Selected text is capped at 64 KiB on a UTF-8
 boundary; `selectedTextTruncated` reports whether Termy shortened it.
@@ -104,6 +119,11 @@ The context also exposes `context.toasts.info(message)`, `success(message)`,
 `warning(message)`, and `error(message)`. These emit notifications directly and do
 not require an SDK import or returned action.
 
+Long-running handlers should stop when `context.signal` aborts. They can update the
+cancellable loading toast with
+`context.progress.report({ message?, percentage? })`; percentages range from 0 to
+100.
+
 ## Plugin settings
 
 Declare typed `toggle`, `text`, `select`, and `secret` settings beside `commands`.
@@ -121,15 +141,29 @@ an action array, `{ actions: [...] }`, or nothing. Handlers may be async.
 
 | Type | Purpose |
 | --- | --- |
-| `terminal.run` | Run a shell command, optionally in a working directory. |
+| `terminal.run` | Legacy action that opens a tab and runs a shell command. |
+| `terminal.sendText` | Send text, optionally followed by Enter, to `origin`, `active`, or an exact terminal target. |
+| `terminal.open` | Open a tab, right/down split, or window with an optional working directory and launch. |
 | `termy.command` | Invoke a built-in Termy command. |
 | `clipboard.write` | Copy text to the system clipboard. |
 | `url.open` | Open an `http` or `https` URL. |
-| `view.open` | Open a native view declared by the same plugin. Add `target: "commandPalette"` to use the palette surface; the default is a modal. Requires `native-ui` in `plugin.json`. |
+| `view.open` | Open a native view with optional JSON `params`. Add `target: "commandPalette"` to use the palette surface; the default is a modal. Requires `native-ui`. |
+| `view.replace` | Replace the current plugin view and params in place. |
+| `view.close` | Close the current plugin view. |
 | `toast` | Show an info, success, warning, or error notification. |
 
-Never interpolate free-form text directly into `terminal.run`. Map select values to
-fixed commands or quote values correctly for the target shell.
+Exact terminal targets are scoped to the Termy window that delivered the
+invocation. `focus: false` restores the previous pane after opening a tab or
+split; a newly created OS window necessarily becomes focused.
+
+`terminal.open.launch` accepts `{ type: "shell", command }` or
+`{ type: "program", program, args? }`. Prefer structured programs when exact argv
+boundaries matter. Structured program launches require the native runtime; tmux
+rejects them because preserving argv would otherwise require shell parsing.
+
+Never interpolate free-form text directly into `terminal.run` or a shell launch.
+Map selected values to fixed commands or quote values correctly for the target
+shell.
 
 ## Bind a plugin command
 

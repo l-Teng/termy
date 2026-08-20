@@ -152,7 +152,8 @@ Each command accepts these fields:
 | `enabled` | no | Set to `false` to keep the command visible but unavailable. |
 | `disabledReason` | no | Explanation shown for a disabled command. |
 | `icon` | no | One of `command`, `play`, `terminal`, `folder`, `link`, `clipboard`, `settings`, or `info`. |
-| `inputs` | no | Text, select, and confirm prompts collected before `run`. |
+| `inputs` | no | Text, select, async pick, and confirm prompts collected before `run`. |
+| `when` | no | Declarative context filter: `hasSelection`, `hasWorkingDirectory`, `runtimes`, and `platforms`. |
 | `run` | yes | Async or synchronous command handler. |
 
 Termy namespaces runtime commands as `<plugin-id>.<command-id>`, so command IDs only need to be unique inside their plugin.
@@ -220,6 +221,11 @@ inputs: [
 
 Text inputs support `placeholder`, `defaultValue`, `required`, and `maxLength`. Select inputs support `placeholder`, `defaultValue`, `required`, and a fixed `options` array. Confirm inputs return a boolean and support `defaultValue`.
 
+Use `type: "pick"` for options loaded asynchronously from local files or a remote
+service. Its `loadOptions({ query, context })` returns the same option shape as a
+select and is debounced as the user types. Keep loaders side-effect free; they
+cannot emit actions.
+
 Treat text input as untrusted. Do not interpolate it directly into a shell command; prefer a select input mapped to fixed commands, or apply quoting appropriate for the target shell.
 
 ## Plugin settings
@@ -283,6 +289,11 @@ type JsonValue =
   | { [key: string]: JsonValue };
 
 type PluginContext = {
+  readonly origin: {
+    readonly windowId: string;
+    readonly tabId?: string;
+    readonly paneId?: string;
+  };
   readonly workingDirectory?: string;
   readonly activeCommand?: string;
   readonly selectedText?: string;
@@ -290,11 +301,13 @@ type PluginContext = {
   readonly shell: string;
   readonly runtime: "native" | "tmux";
   readonly activeTab?: {
+    readonly id: string;
     readonly index: number;
     readonly title: string;
     readonly paneCount: number;
   };
   readonly activePane?: {
+    readonly id: string;
     readonly index: number;
     readonly kind: "terminal";
   };
@@ -309,6 +322,10 @@ type PluginContext = {
     warning(message: string): void;
     error(message: string): void;
   };
+  readonly signal: AbortSignal;
+  readonly progress: {
+    report(update: { message?: string; percentage?: number }): void;
+  };
   readonly storage: {
     get<T = JsonValue>(key: string): Promise<T | undefined>;
     set(key: string, value: JsonValue): Promise<void>;
@@ -322,7 +339,16 @@ type PluginContext = {
 };
 ```
 
-The context is a read-only snapshot taken when the command starts. `shell` is the resolved shell program Termy uses to launch sessions, while `runtime` identifies the active `native` or `tmux` backend. `workingDirectory`, `activeCommand`, `selectedText`, `activeTab`, and `activePane` are absent when Termy cannot provide them. Tab and pane indexes are zero-based. Selected text is capped at 64 KiB on a UTF-8 boundary; check `selectedTextTruncated` before assuming it is complete.
+The context is a read-only snapshot taken when the request starts. `origin` is a
+stable target for actions even if the user switches tabs while async work is
+running. `shell` is the resolved shell program Termy uses to launch sessions,
+while `runtime` identifies the active `native` or `tmux` backend.
+`workingDirectory`, `activeCommand`, `selectedText`, `activeTab`, and `activePane`
+are absent when Termy cannot provide them. Tab and pane indexes are zero-based.
+Selected text is capped at 64 KiB on a UTF-8 boundary; check
+`selectedTextTruncated` before assuming it is complete. Long-running commands
+should stop work when `context.signal` aborts and may update Termy's cancellable
+loading toast with `context.progress.report(...)`.
 
 For example, a command can copy the current terminal selection while identifying where it came from:
 
@@ -401,7 +427,7 @@ export default definePlugin({
     todos: {
       title: "Todos",
 
-      async render({ context }) {
+      async render({ params, context }) {
         const todos = await context.storage.get<Array<{
           id: string;
           title: string;
@@ -452,7 +478,15 @@ footer, set `target: "commandPalette"`:
 return { type: "view.open", view: "todos", target: "commandPalette" };
 ```
 
-The v1 component set is `TermyUI.Column`, `Row`, `Text`, `TextInput`, `Button`, `Checkbox`, `Divider`, `Spacer`, and fragments. Layout uses fixed gap and alignment enums; text uses fixed variant and tone enums; buttons use `secondary`, `primary`, or `danger`. Every input and interactive control needs a unique lowercase stable `id`. Controls send a named `action`, optional string `payload`, their current value, and the current text/checkbox `values` map to `onAction`. No JavaScript callback crosses into the native renderer.
+The v1 component set is `TermyUI.Column`, `Row`, `Text`, `TextInput`, `TextArea`,
+`Select`, `List`, `ListItem`, `EmptyState`, `Progress`, `Button`, `Checkbox`,
+`Divider`, `Spacer`, and fragments. Layout and styling remain semantic. Every
+input and interactive control needs a unique lowercase stable `id`. Controls are
+keyboard accessible and send named actions, not callbacks.
+
+`view.open` accepts bounded JSON `params`; `render` and `onAction` receive the
+same frozen params object. A view action may return `view.replace` to navigate in
+place or `view.close` to dismiss itself.
 
 Views are limited to 32 per plugin, 256 nodes, 16 levels of nesting, 64 children per node, 64 value-bearing controls, and 4,096 characters per text value. Termy serializes interactions per plugin, disables controls while one is running, rejects stale plugin revisions, and rerenders after successful actions. Escape, the close button, or clicking outside the panel closes a view.
 
@@ -485,8 +519,13 @@ export default definePlugin({
 | Event | Payload | When it runs |
 | --- | --- | --- |
 | `terminal.ready` | `{ type }` | Once for a terminal window after the plugin catalog is ready. |
-| `tab.activated` | `{ type, previousTabIndex? }` | When the active terminal tab changes. |
+| `tab.activated` | `{ type, previousTabIndex?, previousTabId? }` | When the active terminal tab changes. |
+| `pane.activated` | `{ type, previousPaneId? }` | When the active pane changes. |
+| `tab.created` | `{ type, tabId }` | When a tab is created. |
+| `tab.closed` | `{ type, tabId }` | When a tab is closed. |
+| `terminal.bell` | `{ type }` | When the active native terminal rings its bell. |
 | `workingDirectory.changed` | `{ type, previousWorkingDirectory?, workingDirectory? }` | When the active terminal's working directory changes. |
+| `command.started` | `{ type, command? }` | When a command starts in the active terminal. |
 | `command.finished` | `{ type, command?, exitCode?, durationMs? }` | When a command finishes in the active terminal. |
 
 Event handlers receive the same read-only context, settings, storage, paths, and toast helpers as commands. They may be synchronous or async and return the same native actions. Events stay ordered within each plugin; different subscribed plugins can run concurrently and retain the normal execution timeout.
@@ -499,11 +538,18 @@ A handler can return nothing, one action, an action array, or `{ actions: [...] 
 
 | Action | Shape | Effect |
 | --- | --- | --- |
-| Run in the terminal | `{ type: "terminal.run", command, workingDirectory? }` | Run a shell command, optionally in a specific directory. |
+| Run in the terminal (legacy) | `{ type: "terminal.run", command, workingDirectory? }` | Open a tab and run a shell command. Prefer the explicit actions below. |
+| Send terminal text | `{ type: "terminal.sendText", text, submit?, target? }` | Send text to `origin`, `active`, or an exact `{ windowId, tabId?, paneId? }` target. |
+| Open a terminal | `{ type: "terminal.open", location?, workingDirectory?, launch?, target?, focus? }` | Open a tab, right/down split, or window. `launch` is a shell command or structured program plus argv. |
 | Run a Termy command | `{ type: "termy.command", command }` | Invoke a built-in Termy command by its stable command name. |
 | Copy text | `{ type: "clipboard.write", text }` | Write text to the system clipboard. |
 | Open a URL | `{ type: "url.open", url }` | Open an `http` or `https` URL with the system browser. |
+| Open/replace/close a view | `{ type: "view.open", view, target?, params? }`, `{ type: "view.replace", view, params? }`, or `{ type: "view.close" }` | Navigate bounded native UI. |
 | Show a toast | `{ type: "toast", level, message }` | Show an `info`, `success`, `warning`, or `error` notification. |
+
+Exact terminal targets are scoped to the Termy window that delivered the
+invocation. `focus: false` restores the previous pane after opening a tab or
+split; a newly created OS window necessarily becomes focused.
 
 Toasts emitted through `context.toasts` run before returned actions, and returned actions keep their existing order. Keep handlers focused and return only the effects the command needs.
 

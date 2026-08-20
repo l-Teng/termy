@@ -22,6 +22,7 @@ use termy_core::{
     encode_mouse_report, keystroke_to_input_with_options, load_config_from_contents,
     load_config_from_default_path, load_config_from_path,
 };
+use termy_themes::{THEME_REGISTRY_CACHE_VERSION, ThemeRegistryCache, ThemeStoreTheme};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1570,25 +1571,6 @@ fn settings_color_hex(app: &cfg::AppConfig, id: cfg::ColorSettingId) -> Option<S
 
 const SETTINGS_THEME_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/termy-org/themes/main/index.json";
-const SETTINGS_THEME_REGISTRY_CACHE_VERSION: u32 = 1;
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct SettingsThemeStoreTheme {
-    name: String,
-    slug: String,
-    description: String,
-    latest_version: Option<String>,
-    file_url: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SettingsThemeRegistryCache {
-    version: u32,
-    fetched_at: u64,
-    registry_url: String,
-    etag: Option<String>,
-    themes: Vec<SettingsThemeStoreTheme>,
-}
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1602,14 +1584,14 @@ struct SettingsLegacyThemeStoreTheme {
 }
 
 impl SettingsLegacyThemeStoreTheme {
-    fn into_theme(self) -> Option<SettingsThemeStoreTheme> {
+    fn into_theme(self) -> Option<ThemeStoreTheme> {
         let name = self.name.trim().to_string();
         let slug = termy_themes::normalize_theme_id(&self.slug);
         if name.is_empty() || slug.is_empty() {
             return None;
         }
 
-        Some(SettingsThemeStoreTheme {
+        Some(ThemeStoreTheme {
             name,
             slug,
             description: self.description,
@@ -1691,18 +1673,16 @@ fn settings_theme_registry_fetch_url(registry_url: &str) -> String {
     )
 }
 
-fn settings_load_theme_registry_cache(
-    config_path: Option<&Path>,
-) -> Option<SettingsThemeRegistryCache> {
+fn settings_load_theme_registry_cache(config_path: Option<&Path>) -> Option<ThemeRegistryCache> {
     let path = settings_theme_registry_cache_path(config_path)?;
     let bytes = std::fs::read(path).ok()?;
-    let cache: SettingsThemeRegistryCache = bincode::deserialize(&bytes).ok()?;
-    (cache.version == SETTINGS_THEME_REGISTRY_CACHE_VERSION).then_some(cache)
+    let cache: ThemeRegistryCache = bincode::deserialize(&bytes).ok()?;
+    (cache.version == THEME_REGISTRY_CACHE_VERSION).then_some(cache)
 }
 
 fn settings_save_theme_registry_cache(
     config_path: Option<&Path>,
-    themes: &[SettingsThemeStoreTheme],
+    themes: &[ThemeStoreTheme],
     registry_url: &str,
     etag: Option<String>,
 ) {
@@ -1713,8 +1693,8 @@ fn settings_save_theme_registry_cache(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let cache = SettingsThemeRegistryCache {
-        version: SETTINGS_THEME_REGISTRY_CACHE_VERSION,
+    let cache = ThemeRegistryCache {
+        version: THEME_REGISTRY_CACHE_VERSION,
         fetched_at: settings_current_unix_timestamp(),
         registry_url: registry_url.to_string(),
         etag,
@@ -1729,11 +1709,11 @@ fn settings_save_theme_registry_cache(
 fn settings_parse_theme_store_payload(
     raw_json: &str,
     registry_url: &str,
-) -> Result<Vec<SettingsThemeStoreTheme>, String> {
+) -> Result<Vec<ThemeStoreTheme>, String> {
     let payload: SettingsThemeStorePayload = serde_json::from_str(raw_json)
         .map_err(|error| format!("Invalid theme registry response: {error}"))?;
 
-    let mut parsed: Vec<SettingsThemeStoreTheme> = match payload {
+    let mut parsed: Vec<ThemeStoreTheme> = match payload {
         SettingsThemeStorePayload::Legacy(themes) => themes
             .into_iter()
             .filter_map(SettingsLegacyThemeStoreTheme::into_theme)
@@ -1743,14 +1723,12 @@ fn settings_parse_theme_store_payload(
             .into_iter()
             .filter_map(|theme| {
                 let slug = termy_themes::normalize_theme_id(&theme.slug);
-                (!slug.is_empty() && !theme.name.trim().is_empty()).then(|| {
-                    SettingsThemeStoreTheme {
-                        name: theme.name.trim().to_string(),
-                        slug,
-                        description: theme.description,
-                        latest_version: Some(theme.latest_version),
-                        file_url: Some(termy_themes::registry_file_url(registry_url, &theme.file)),
-                    }
+                (!slug.is_empty() && !theme.name.trim().is_empty()).then(|| ThemeStoreTheme {
+                    name: theme.name.trim().to_string(),
+                    slug,
+                    description: theme.description,
+                    latest_version: Some(theme.latest_version),
+                    file_url: Some(termy_themes::registry_file_url(registry_url, &theme.file)),
                 })
             })
             .collect(),
@@ -1766,7 +1744,7 @@ fn settings_parse_theme_store_payload(
 
 fn settings_fetch_theme_registry_themes(
     config_path: Option<&Path>,
-) -> Result<Vec<SettingsThemeStoreTheme>, String> {
+) -> Result<Vec<ThemeStoreTheme>, String> {
     let registry_url = settings_theme_registry_url();
     let cached = settings_load_theme_registry_cache(config_path);
     let cached_etag = cached.as_ref().and_then(|cache| {

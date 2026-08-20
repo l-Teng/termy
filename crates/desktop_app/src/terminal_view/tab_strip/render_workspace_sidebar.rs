@@ -335,7 +335,7 @@ impl TerminalView {
                                     Font {
                                         family: font_family.clone(),
                                         weight: FontWeight::NORMAL,
-                                        ..Default::default()
+                                        ..gpui::font("")
                                     },
                                     px(TAB_TITLE_FONT_SIZE),
                                     row_text.into(),

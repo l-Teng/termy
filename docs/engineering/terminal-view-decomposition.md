@@ -1,6 +1,6 @@
 # `terminal_view/` decomposition plan
 
-**Problem:** `crates/desktop_app/src/terminal_view/mod.rs` (~5.0k lines) and `render.rs` (~4k lines) concentrate behavior, review cost, and merge conflicts.
+**Problem:** `crates/desktop_app/src/terminal_view/mod.rs` (~5.9k lines) and `render.rs` (~5.4k lines) concentrate behavior, review cost, and merge conflicts.
 
 **Goal:** No file above **1,500** lines by v1.0; no new file above **800** lines without an ADR. Median tab/render PR touches ≤3 files.
 
@@ -29,7 +29,7 @@
 
 Execute **one tranche per release** (or per month), each ≤500 lines moved, with `cargo test -p termy` green.
 
-**Progress (2026-08-12):** Extracted render/debug metrics into `terminal_view/metrics.rs`, render-cache state into `terminal_view/render_cache.rs`, background/chrome appearance helpers into `terminal_view/appearance.rs`, pane move/drop state into `interaction/pane_move.rs`, cursor-move state into `interaction/mouse.rs`, hovered-link state into `interaction/selection.rs`, plugin UI host wiring into `plugin_ui/host.rs`, and several other interaction/scrollbar state types into their owning modules. `mod.rs` is currently 6,282 lines, so the earlier reduction has regressed and the remaining tranches are still required.
+**Progress (2026-08-20):** Extracted render/debug metrics into `terminal_view/metrics.rs`, render-cache state into `terminal_view/render_cache.rs`, background/chrome appearance helpers into `terminal_view/appearance.rs`, pane move/drop state into `interaction/pane_move.rs`, cursor-move state into `interaction/mouse.rs`, hovered-link state into `interaction/selection.rs`, plugin UI host wiring into `plugin_ui/host.rs`, and several other interaction/scrollbar state types into their owning modules. `mod.rs` remains roughly 5.9k lines, so the remaining tranches are still required.
 
 ### Tranche 1 — Session & window glue (E1 Q2)
 
@@ -71,11 +71,8 @@ Add `scripts/check-file-sizes.sh` (or `xtask check-file-sizes`):
 - Warn (or fail) if a PR **adds** a new file over **800** lines.
 - Allowlist file paths with issue links until tranche completes (shrink allowlist over time).
 
-Initial allowlist (see `scripts/check-file-sizes.sh` — shrink as tranches land):
-
-- `terminal_view/mod.rs`, `terminal_view/render.rs` (tranches 1–4)
-- `terminal_ui/src/grid.rs`, `core/src/runtime.rs`
-- Grandfathered until split: `command_palette/mod.rs`, `inline_input.rs`, `tabs/lifecycle.rs`, `settings_view/sections.rs`, `ffi/src/lib.rs`, `xtask/src/benchmark.rs`
+The authoritative allowlist lives in `scripts/check-file-sizes.sh`; do not
+duplicate it here. Shrink it as decomposition tranches land.
 
 ---
 

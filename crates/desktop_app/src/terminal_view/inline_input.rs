@@ -2,8 +2,8 @@ use super::*;
 use crate::text_editing;
 use gpui::{
     Bounds, ContentMask, ElementInputHandler, Entity, EntityInputHandler, Font, Hsla, IntoElement,
-    PaintQuad, Pixels, ShapedLine, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
-    canvas, fill, point, px, size,
+    PaintQuad, Pixels, ShapedLine, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, fill,
+    point, px, size,
 };
 use std::ops::Range;
 
@@ -912,8 +912,6 @@ impl IntoElement for InlineInputElement {
                                 line.paint(
                                     point(row_bounds.left() + offset_x, row_bounds.top()),
                                     row_bounds.size.height,
-                                    TextAlign::Left,
-                                    None,
                                     window,
                                     cx,
                                 )
@@ -1197,7 +1195,7 @@ impl TerminalView {
             return;
         }
 
-        self.focus_handle.focus(window, cx);
+        self.focus_handle.focus(window);
 
         let target_utf16 = match self.active_inline_input_state() {
             Some(state) => state.character_index_for_point(event.position),
@@ -1531,10 +1529,6 @@ impl EntityInputHandler for TerminalView {
             return Some(state.character_index_for_point(point));
         }
         None
-    }
-
-    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
-        true
     }
 }
 

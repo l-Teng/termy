@@ -3,7 +3,10 @@ use super::{
     command_palette::{CommandPaletteMode, style::CommandPaletteStyle},
 };
 use crate::commands;
-use crate::text_input::{TextInputAlignment, TextInputElement, TextInputProvider, TextInputState};
+use crate::text_input::{
+    MultilineTextInputElement, TextInputAlignment, TextInputElement, TextInputProvider,
+    TextInputState,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, AnyWindowHandle, App, AppContext, AsyncApp, ClipboardItem, Context, FocusHandle,
@@ -11,11 +14,12 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, ParentElement, Render, Rgba, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
 };
+use serde_json::Value;
 use std::{borrow::Cow, collections::BTreeMap};
 use termy_plugin_runtime::{
-    PluginContext, PluginRuntime, PluginUiAlignment, PluginUiButtonVariant, PluginUiGap,
-    PluginUiNode, PluginUiTextVariant, PluginUiTone, PluginViewAction, PluginViewDescriptor,
-    PluginViewRender, PluginViewTarget, PluginViewValue,
+    PluginContext, PluginOriginContext, PluginRuntime, PluginUiAlignment, PluginUiButtonVariant,
+    PluginUiGap, PluginUiNode, PluginUiTextVariant, PluginUiTone, PluginViewAction,
+    PluginViewDescriptor, PluginViewRender, PluginViewTarget, PluginViewValue,
 };
 
 const PANEL_WIDTH: f32 = 620.0;
@@ -32,6 +36,7 @@ struct ActiveInput {
     id: String,
     state: TextInputState,
     selecting: bool,
+    multiline: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -55,10 +60,15 @@ pub(super) struct PluginUiView {
     runtime: PluginRuntime,
     descriptor: PluginViewDescriptor,
     revision: String,
+    params: Value,
+    origin: Option<PluginOriginContext>,
     target: PluginViewTarget,
     nodes: Vec<PluginUiNode>,
     values: BTreeMap<String, PluginViewValue>,
     active_input: Option<ActiveInput>,
+    focused_control: Option<String>,
+    open_select: Option<String>,
+    list_queries: BTreeMap<String, String>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
     loading: bool,
@@ -73,6 +83,7 @@ impl PluginUiView {
         runtime: PluginRuntime,
         descriptor: PluginViewDescriptor,
         revision: String,
+        params: Value,
         target: PluginViewTarget,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -82,10 +93,15 @@ impl PluginUiView {
             runtime,
             descriptor,
             revision,
+            params,
+            origin: None,
             target,
             nodes: Vec::new(),
             values: BTreeMap::new(),
             active_input: None,
+            focused_control: None,
+            open_select: None,
+            list_queries: BTreeMap::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
             loading: true,
@@ -94,8 +110,8 @@ impl PluginUiView {
         }
     }
 
-    fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_handle.focus(window, cx);
+    fn focus(&self, window: &mut Window, _cx: &mut Context<Self>) {
+        self.focus_handle.focus(window);
     }
 
     pub(in crate::terminal_view) fn target(&self) -> PluginViewTarget {
@@ -110,28 +126,57 @@ impl PluginUiView {
         &self,
         cx: &mut Context<Self>,
     ) -> Result<termy_plugin_runtime::PluginContext, String> {
-        self.parent
+        let mut context = self
+            .parent
             .update(cx, |view, cx| view.plugin_context(cx))
-            .map_err(|_| "Plugin view lost its terminal window".to_string())
+            .map_err(|_| "Plugin view lost its terminal window".to_string())?;
+        if let Some(origin) = &self.origin {
+            context.origin = origin.clone();
+        }
+        Ok(context)
     }
 
     pub(super) fn load(&mut self, context: PluginContext, cx: &mut Context<Self>) {
+        if self.origin.is_none() {
+            self.origin = Some(context.origin.clone());
+        }
         self.loading = true;
         self.error = None;
         let runtime = self.runtime.clone();
         let plugin_id = self.descriptor.plugin_id.clone();
         let view_id = self.descriptor.id.clone();
         let revision = self.revision.clone();
+        let params = self.params.clone();
         let window_handle = self.window_handle;
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = smol::unblock(move || {
-                runtime.render_view(&plugin_id, &view_id, &revision, context)
+                runtime.render_view(&plugin_id, &view_id, &revision, params, context)
             })
             .await;
             Self::finish_request(this, window_handle, result, cx);
         })
         .detach();
+    }
+
+    pub(super) fn replace(
+        &mut self,
+        descriptor: PluginViewDescriptor,
+        revision: String,
+        params: Value,
+        context: PluginContext,
+        cx: &mut Context<Self>,
+    ) {
+        self.descriptor = descriptor;
+        self.revision = revision;
+        self.params = params;
+        self.nodes.clear();
+        self.values.clear();
+        self.active_input = None;
+        self.focused_control = None;
+        self.open_select = None;
+        self.list_queries.clear();
+        self.load(context, cx);
     }
 
     fn finish_request(
@@ -140,7 +185,7 @@ impl PluginUiView {
         result: Result<PluginViewRender, String>,
         cx: &mut AsyncApp,
     ) {
-        cx.update(|cx| {
+        let _ = cx.update(|cx| {
             let actions = this
                 .update(cx, |view, cx| view.apply_render_result(result, cx))
                 .ok()
@@ -193,6 +238,9 @@ impl PluginUiView {
         if render.plugin_id != self.descriptor.plugin_id || render.revision != self.revision {
             return Err("Plugin view returned a response from the wrong revision".to_string());
         }
+        if render.params != self.params {
+            return Err("Plugin view returned a response for the wrong params".to_string());
+        }
         let (_, current_revision) = self
             .runtime
             .view_with_revision(&self.descriptor.plugin_id, &self.descriptor.id)
@@ -214,8 +262,19 @@ impl PluginUiView {
     fn collect_values(nodes: &[PluginUiNode], values: &mut BTreeMap<String, PluginViewValue>) {
         for node in nodes {
             match node {
-                PluginUiNode::TextInput { id, value, .. } => {
+                PluginUiNode::TextInput { id, value, .. }
+                | PluginUiNode::TextArea { id, value, .. }
+                | PluginUiNode::Select { id, value, .. } => {
                     values.insert(id.clone(), PluginViewValue::Text(value.clone()));
+                }
+                PluginUiNode::List {
+                    id, selected_id, ..
+                } => {
+                    values.insert(
+                        id.clone(),
+                        PluginViewValue::Text(selected_id.clone().unwrap_or_default()),
+                    );
+                    Self::collect_values(node.children(), values);
                 }
                 PluginUiNode::Checkbox { id, checked, .. } => {
                     values.insert(id.clone(), PluginViewValue::Toggle(*checked));
@@ -243,7 +302,7 @@ impl PluginUiView {
             .as_ref()
             .is_some_and(|input| input.id == id)
         {
-            self.focus_handle.focus(window, cx);
+            self.focus_handle.focus(window);
             return;
         }
         self.commit_active_input();
@@ -259,8 +318,10 @@ impl PluginUiView {
             id: id.to_string(),
             state: TextInputState::new(value),
             selecting: false,
+            multiline: Self::input_is_multiline(&self.nodes, id),
         });
-        self.focus_handle.focus(window, cx);
+        self.focused_control = Some(id.to_string());
+        self.focus_handle.focus(window);
         cx.notify();
     }
 
@@ -272,12 +333,12 @@ impl PluginUiView {
             .min(4_096)
     }
 
-    fn bounded_input_text(text: &str, max_length: usize) -> Cow<'_, str> {
+    fn bounded_input_text(text: &str, max_length: usize, multiline: bool) -> Cow<'_, str> {
         for (count, character) in text.chars().enumerate() {
-            if matches!(character, '\n' | '\r') || count == max_length {
+            if (!multiline && matches!(character, '\n' | '\r')) || count == max_length {
                 return Cow::Owned(
                     text.chars()
-                        .filter(|character| !matches!(character, '\n' | '\r'))
+                        .filter(|character| multiline || !matches!(character, '\n' | '\r'))
                         .take(max_length)
                         .collect(),
                 );
@@ -291,7 +352,7 @@ impl PluginUiView {
         let Some(input) = self.active_input.as_mut() else {
             return;
         };
-        let bounded = Self::bounded_input_text(input.state.text(), max_length);
+        let bounded = Self::bounded_input_text(input.state.text(), max_length, input.multiline);
         if bounded.as_ref() != input.state.text() {
             input.state.set_text(bounded.into_owned());
         }
@@ -301,7 +362,11 @@ impl PluginUiView {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        let text = Self::bounded_input_text(&text, self.active_input_limit());
+        let multiline = self
+            .active_input
+            .as_ref()
+            .is_some_and(|input| input.multiline);
+        let text = Self::bounded_input_text(&text, self.active_input_limit(), multiline);
         if let Some(input) = self.active_input.as_mut() {
             input.state.replace_text_in_range(None, text.as_ref());
             self.enforce_active_input_limit();
@@ -384,14 +449,18 @@ impl PluginUiView {
 
     fn input_limit(nodes: &[PluginUiNode], id: &str) -> Option<usize> {
         for node in nodes {
-            if let PluginUiNode::TextInput {
-                id: input_id,
-                max_length,
-                ..
-            } = node
-                && input_id == id
-            {
-                return Some(*max_length);
+            match node {
+                PluginUiNode::TextInput {
+                    id: input_id,
+                    max_length,
+                    ..
+                }
+                | PluginUiNode::TextArea {
+                    id: input_id,
+                    max_length,
+                    ..
+                } if input_id == id => return Some(*max_length),
+                _ => {}
             }
             if let Some(limit) = Self::input_limit(node.children(), id) {
                 return Some(limit);
@@ -400,18 +469,34 @@ impl PluginUiView {
         None
     }
 
+    fn input_is_multiline(nodes: &[PluginUiNode], id: &str) -> bool {
+        for node in nodes {
+            if matches!(node, PluginUiNode::TextArea { id: input_id, .. } if input_id == id) {
+                return true;
+            }
+            if Self::input_is_multiline(node.children(), id) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn active_submit(nodes: &[PluginUiNode], id: &str) -> Option<String> {
         for node in nodes {
-            if let PluginUiNode::TextInput {
-                id: input_id,
-                submit,
-                disabled,
-                ..
-            } = node
-                && input_id == id
-                && !disabled
-            {
-                return submit.clone();
+            match node {
+                PluginUiNode::TextInput {
+                    id: input_id,
+                    submit,
+                    disabled,
+                    ..
+                }
+                | PluginUiNode::TextArea {
+                    id: input_id,
+                    submit,
+                    disabled,
+                    ..
+                } if input_id == id && !disabled => return submit.clone(),
+                _ => {}
             }
             if let Some(action) = Self::active_submit(node.children(), id) {
                 return Some(action);
@@ -446,6 +531,7 @@ impl PluginUiView {
         if self.busy || self.loading {
             return;
         }
+        self.focused_control = Some(control_id.clone());
         self.commit_active_input();
         if let Some(value) = value.as_ref() {
             self.values.insert(control_id.clone(), value.clone());
@@ -472,6 +558,7 @@ impl PluginUiView {
         let plugin_id = self.descriptor.plugin_id.clone();
         let view_id = self.descriptor.id.clone();
         let revision = self.revision.clone();
+        let params = self.params.clone();
         let values = self.values.clone();
         let action = PluginViewAction {
             id,
@@ -482,7 +569,9 @@ impl PluginUiView {
         let window_handle = self.window_handle;
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = smol::unblock(move || {
-                runtime.invoke_view_action(&plugin_id, &view_id, &revision, action, values, context)
+                runtime.invoke_view_action(
+                    &plugin_id, &view_id, &revision, params, action, values, context,
+                )
             })
             .await;
             Self::finish_request(this, window_handle, result, cx);
@@ -501,10 +590,283 @@ impl PluginUiView {
         });
     }
 
+    fn interactive_control_ids(nodes: &[PluginUiNode], ids: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                PluginUiNode::TextInput { id, disabled, .. }
+                | PluginUiNode::TextArea { id, disabled, .. }
+                | PluginUiNode::Select { id, disabled, .. }
+                | PluginUiNode::Button { id, disabled, .. }
+                | PluginUiNode::Checkbox { id, disabled, .. }
+                    if !disabled =>
+                {
+                    ids.push(id.clone());
+                }
+                PluginUiNode::ListItem {
+                    id,
+                    action,
+                    disabled,
+                    ..
+                } if !disabled && action.is_some() => ids.push(id.clone()),
+                PluginUiNode::List { id, .. } => ids.push(id.clone()),
+                _ => {}
+            }
+            if !matches!(node, PluginUiNode::List { .. }) {
+                Self::interactive_control_ids(node.children(), ids);
+            }
+        }
+    }
+
+    fn node_with_id(nodes: &[PluginUiNode], id: &str) -> Option<PluginUiNode> {
+        for node in nodes {
+            let matches = match node {
+                PluginUiNode::TextInput { id: node_id, .. }
+                | PluginUiNode::TextArea { id: node_id, .. }
+                | PluginUiNode::Select { id: node_id, .. }
+                | PluginUiNode::List { id: node_id, .. }
+                | PluginUiNode::ListItem { id: node_id, .. }
+                | PluginUiNode::Button { id: node_id, .. }
+                | PluginUiNode::Checkbox { id: node_id, .. } => node_id == id,
+                _ => false,
+            };
+            if matches {
+                return Some(node.clone());
+            }
+            if let Some(found) = Self::node_with_id(node.children(), id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn cycle_control_focus(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut ids = Vec::new();
+        Self::interactive_control_ids(&self.nodes, &mut ids);
+        if ids.is_empty() {
+            return;
+        }
+        let current = self
+            .focused_control
+            .as_ref()
+            .or_else(|| self.active_input.as_ref().map(|input| &input.id));
+        let next = current
+            .and_then(|current| ids.iter().position(|id| id == current))
+            .map_or_else(
+                || if reverse { ids.len() - 1 } else { 0 },
+                |index| {
+                    if reverse {
+                        index.checked_sub(1).unwrap_or(ids.len() - 1)
+                    } else {
+                        (index + 1) % ids.len()
+                    }
+                },
+            );
+        let id = ids[next].clone();
+        let text_input = matches!(
+            Self::node_with_id(&self.nodes, &id),
+            Some(PluginUiNode::TextInput { .. } | PluginUiNode::TextArea { .. })
+        );
+        if text_input {
+            self.activate_input(&id, window, cx);
+        } else {
+            self.commit_active_input();
+            self.active_input = None;
+            self.focused_control = Some(id);
+            self.focus_handle.focus(window);
+            cx.notify();
+        }
+    }
+
+    fn move_focused_choice(&mut self, direction: isize, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.focused_control.clone() else {
+            return false;
+        };
+        let Some(node) = Self::node_with_id(&self.nodes, &id) else {
+            return false;
+        };
+        let choices = match node {
+            PluginUiNode::Select { options, .. } => options
+                .into_iter()
+                .map(|option| option.value)
+                .collect::<Vec<_>>(),
+            PluginUiNode::List { children, .. } => {
+                let query = self
+                    .list_queries
+                    .get(&id)
+                    .map(|query| query.to_lowercase())
+                    .unwrap_or_default();
+                children
+                    .into_iter()
+                    .filter_map(|child| match child {
+                        PluginUiNode::ListItem {
+                            id,
+                            title,
+                            subtitle,
+                            keywords,
+                            disabled,
+                            ..
+                        } if !disabled
+                            && (query.is_empty()
+                                || title.to_lowercase().contains(&query)
+                                || subtitle.as_ref().is_some_and(|value| {
+                                    value.to_lowercase().contains(&query)
+                                })
+                                || keywords
+                                    .iter()
+                                    .any(|value| value.to_lowercase().contains(&query))) =>
+                        {
+                            Some(id)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            }
+            _ => return false,
+        };
+        if choices.is_empty() {
+            return true;
+        }
+        let current = self.values.get(&id).and_then(|value| match value {
+            PluginViewValue::Text(value) => Some(value.as_str()),
+            PluginViewValue::Toggle(_) => None,
+        });
+        let index = current
+            .and_then(|current| choices.iter().position(|choice| choice == current))
+            .map_or(0, |index| {
+                (index as isize + direction).rem_euclid(choices.len() as isize) as usize
+            });
+        self.values
+            .insert(id, PluginViewValue::Text(choices[index].clone()));
+        cx.notify();
+        true
+    }
+
+    fn activate_focused_control(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.focused_control.clone() else {
+            return false;
+        };
+        let Some(node) = Self::node_with_id(&self.nodes, &id) else {
+            return false;
+        };
+        match node {
+            PluginUiNode::Button {
+                action, payload, ..
+            } => self.dispatch(action, id, payload, None, cx),
+            PluginUiNode::Checkbox {
+                action, payload, ..
+            } => {
+                let current = self
+                    .values
+                    .get(&id)
+                    .is_some_and(|value| matches!(value, PluginViewValue::Toggle(true)));
+                self.dispatch(
+                    action,
+                    id,
+                    payload,
+                    Some(PluginViewValue::Toggle(!current)),
+                    cx,
+                );
+            }
+            PluginUiNode::Select { action, .. } => {
+                if self.open_select.as_deref() != Some(id.as_str()) {
+                    self.open_select = Some(id);
+                    cx.notify();
+                    return true;
+                }
+                self.open_select = None;
+                if let Some(action) = action
+                    && let Some(value) = self.values.get(&id).cloned()
+                {
+                    self.dispatch(action, id, None, Some(value), cx);
+                } else {
+                    cx.notify();
+                }
+            }
+            PluginUiNode::List {
+                action, children, ..
+            } => {
+                let selected = self.values.get(&id).and_then(|value| match value {
+                    PluginViewValue::Text(value) => Some(value.clone()),
+                    PluginViewValue::Toggle(_) => None,
+                });
+                let Some(selected) = selected else {
+                    return true;
+                };
+                let item = children.into_iter().find_map(|child| match child {
+                    PluginUiNode::ListItem {
+                        id,
+                        payload,
+                        action,
+                        disabled: false,
+                        ..
+                    } if id == selected => Some((payload, action)),
+                    _ => None,
+                });
+                if let Some((payload, item_action)) = item
+                    && let Some(action) = item_action.or(action)
+                {
+                    self.dispatch(
+                        action,
+                        id,
+                        payload,
+                        Some(PluginViewValue::Text(selected)),
+                        cx,
+                    );
+                }
+            }
+            PluginUiNode::ListItem {
+                action: Some(action),
+                payload,
+                ..
+            } => self.dispatch(
+                action,
+                id.clone(),
+                payload,
+                Some(PluginViewValue::Text(id)),
+                cx,
+            ),
+            _ => return false,
+        }
+        true
+    }
+
+    fn edit_focused_list_query(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.focused_control.clone() else {
+            return false;
+        };
+        if !matches!(
+            Self::node_with_id(&self.nodes, &id),
+            Some(PluginUiNode::List {
+                filtering: true,
+                ..
+            })
+        ) {
+            return false;
+        }
+        let query = self.list_queries.entry(id).or_default();
+        if key == "backspace" {
+            query.pop();
+        } else if key == "space" || key == " " {
+            if query.chars().count() >= 256 {
+                return true;
+            }
+            query.push(' ');
+        } else if key.chars().count() == 1 && !key.chars().all(char::is_control) {
+            if query.chars().count() >= 256 {
+                return true;
+            }
+            query.push_str(key);
+        } else {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let modifiers = event.keystroke.modifiers;
@@ -514,9 +876,6 @@ impl PluginUiView {
             self.close(cx);
             return;
         }
-        let Some(active_id) = self.active_input.as_ref().map(|input| input.id.clone()) else {
-            return;
-        };
         let secondary =
             modifiers.secondary() && !modifiers.alt && !modifiers.function && !modifiers.shift;
         let shift_only = modifiers.shift
@@ -524,6 +883,28 @@ impl PluginUiView {
             && !modifiers.alt
             && !modifiers.function
             && !modifiers.platform;
+        if event.keystroke.key.eq_ignore_ascii_case("tab") && (plain || shift_only) {
+            cx.stop_propagation();
+            self.cycle_control_focus(shift_only, window, cx);
+            return;
+        }
+        let Some(active_id) = self.active_input.as_ref().map(|input| input.id.clone()) else {
+            let handled = match event.keystroke.key.as_str() {
+                key if plain && self.edit_focused_list_query(key, cx) => true,
+                "up" | "left" if plain => self.move_focused_choice(-1, cx),
+                "down" | "right" if plain => self.move_focused_choice(1, cx),
+                "enter" | "space" if plain => self.activate_focused_control(cx),
+                _ => false,
+            };
+            if handled {
+                cx.stop_propagation();
+            }
+            return;
+        };
+        let multiline = self
+            .active_input
+            .as_ref()
+            .is_some_and(|input| input.multiline);
         let alt_only = modifiers.alt
             && !modifiers.control
             && !modifiers.shift
@@ -552,6 +933,18 @@ impl PluginUiView {
                         .as_ref()
                         .map(|input| PluginViewValue::Text(input.state.text().to_string()));
                     self.dispatch(action, active_id.clone(), None, value, cx);
+                } else if let Some(input) =
+                    self.active_input.as_mut().filter(|input| input.multiline)
+                {
+                    input.state.replace_text_in_range(None, "\n");
+                    self.enforce_active_input_limit();
+                }
+                true
+            }
+            "enter" if shift_only && multiline => {
+                if let Some(input) = self.active_input.as_mut() {
+                    input.state.replace_text_in_range(None, "\n");
+                    self.enforce_active_input_limit();
                 }
                 true
             }
@@ -603,6 +996,18 @@ impl PluginUiView {
                 }
                 true
             }
+            "up" if plain && multiline => {
+                if let Some(input) = self.active_input.as_mut() {
+                    input.state.move_up();
+                }
+                true
+            }
+            "down" if plain && multiline => {
+                if let Some(input) = self.active_input.as_mut() {
+                    input.state.move_down();
+                }
+                true
+            }
             "left" if shift_only => {
                 if let Some(input) = self.active_input.as_mut() {
                     input.state.select_left();
@@ -612,6 +1017,18 @@ impl PluginUiView {
             "right" if shift_only => {
                 if let Some(input) = self.active_input.as_mut() {
                     input.state.select_right();
+                }
+                true
+            }
+            "up" if shift_only && multiline => {
+                if let Some(input) = self.active_input.as_mut() {
+                    input.state.select_up();
+                }
+                true
+            }
+            "down" if shift_only && multiline => {
+                if let Some(input) = self.active_input.as_mut() {
+                    input.state.select_down();
                 }
                 true
             }
@@ -723,398 +1140,6 @@ impl PluginUiView {
                 .max(PANEL_MIN_HEIGHT.min(height)),
         )
     }
-
-    fn gap(gap: PluginUiGap) -> f32 {
-        match gap {
-            PluginUiGap::None => 0.0,
-            PluginUiGap::Small => 8.0,
-            PluginUiGap::Medium => 12.0,
-            PluginUiGap::Large => 20.0,
-        }
-    }
-
-    fn align(element: gpui::Div, alignment: PluginUiAlignment) -> gpui::Div {
-        match alignment {
-            PluginUiAlignment::Start => element.items_start(),
-            PluginUiAlignment::Center => element.items_center(),
-            PluginUiAlignment::End => element.items_end(),
-            PluginUiAlignment::Stretch => element,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_node(
-        &self,
-        node: &PluginUiNode,
-        path: &str,
-        style: PluginUiStyle,
-        ui_font: &SharedString,
-        terminal_font: &SharedString,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        match node {
-            PluginUiNode::Column {
-                gap,
-                align,
-                children,
-            } => {
-                let children = children
-                    .iter()
-                    .enumerate()
-                    .map(|(index, child)| {
-                        self.render_node(
-                            child,
-                            &format!("{path}-{index}"),
-                            style,
-                            ui_font,
-                            terminal_font,
-                            cx,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                Self::align(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(Self::gap(*gap)))
-                        .children(children),
-                    *align,
-                )
-                .into_any_element()
-            }
-            PluginUiNode::Row {
-                gap,
-                align,
-                children,
-            } => {
-                let children = children
-                    .iter()
-                    .enumerate()
-                    .map(|(index, child)| {
-                        self.render_node(
-                            child,
-                            &format!("{path}-{index}"),
-                            style,
-                            ui_font,
-                            terminal_font,
-                            cx,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                Self::align(
-                    div()
-                        .w_full()
-                        .flex()
-                        .gap(px(Self::gap(*gap)))
-                        .children(children),
-                    *align,
-                )
-                .into_any_element()
-            }
-            PluginUiNode::Text {
-                text,
-                variant,
-                tone,
-            } => {
-                let color = match tone {
-                    PluginUiTone::Default => style.primary_text,
-                    PluginUiTone::Muted => style.muted_text,
-                    PluginUiTone::Success => style.success,
-                    PluginUiTone::Danger => style.danger,
-                };
-                let mut element = div()
-                    .w_full()
-                    .text_color(color)
-                    .font_family(ui_font.clone());
-                element = match variant {
-                    PluginUiTextVariant::Heading => element
-                        .text_size(px(18.0))
-                        .font_weight(FontWeight::SEMIBOLD),
-                    PluginUiTextVariant::Body => element.text_size(px(13.0)),
-                    PluginUiTextVariant::Caption => element.text_size(px(11.0)),
-                    PluginUiTextVariant::Code => element
-                        .font_family(terminal_font.clone())
-                        .text_size(px(12.0))
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(CONTROL_RADIUS))
-                        .bg(style.control_bg),
-                };
-                element.child(text.clone()).into_any_element()
-            }
-            PluginUiNode::TextInput {
-                id,
-                label,
-                placeholder,
-                disabled,
-                ..
-            } => {
-                let active = self
-                    .active_input
-                    .as_ref()
-                    .is_some_and(|input| input.id == *id);
-                let value = if active {
-                    self.active_input
-                        .as_ref()
-                        .map(|input| input.state.text().to_string())
-                        .unwrap_or_default()
-                } else {
-                    self.values
-                        .get(id)
-                        .and_then(|value| match value {
-                            PluginViewValue::Text(value) => Some(value.clone()),
-                            PluginViewValue::Toggle(_) => None,
-                        })
-                        .unwrap_or_default()
-                };
-                let entity = cx.entity();
-                let focus_handle = self.focus_handle.clone();
-                let mouse_down_id = id.clone();
-                let mouse_move_id = id.clone();
-                let mouse_up_id = id.clone();
-                let mouse_up_out_id = id.clone();
-                let can_edit = !*disabled && !self.busy;
-                let field = div()
-                    .id(SharedString::from(format!(
-                        "plugin-ui-{}-{}-{path}",
-                        self.descriptor.plugin_id, self.descriptor.id
-                    )))
-                    .w_full()
-                    .min_w(px(120.0))
-                    .h(px(INPUT_HEIGHT))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .px(px(10.0))
-                    .rounded(px(CONTROL_RADIUS))
-                    .border_1()
-                    .border_color(if active {
-                        style.accent
-                    } else {
-                        style.panel_border
-                    })
-                    .bg(style.control_bg)
-                    .when(can_edit, |element| {
-                        element
-                            .cursor_text()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                                    view.handle_input_mouse_down(&mouse_down_id, event, window, cx);
-                                }),
-                            )
-                            .on_mouse_move(cx.listener(
-                                move |view, event: &MouseMoveEvent, _window, cx| {
-                                    view.handle_input_mouse_move(&mouse_move_id, event, cx);
-                                },
-                            ))
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(move |view, _, _, cx| {
-                                    view.handle_input_mouse_up(&mouse_up_id, cx);
-                                }),
-                            )
-                            .on_mouse_up_out(
-                                MouseButton::Left,
-                                cx.listener(move |view, _, _, cx| {
-                                    view.handle_input_mouse_up(&mouse_up_out_id, cx);
-                                }),
-                            )
-                    })
-                    .children((value.is_empty()).then(|| {
-                        div()
-                            .absolute()
-                            .left(px(10.0))
-                            .right(px(10.0))
-                            .text_size(px(13.0))
-                            .text_color(style.muted_text)
-                            .child(placeholder.clone().unwrap_or_default())
-                    }))
-                    .child(
-                        div()
-                            .w_full()
-                            .h(px(22.0))
-                            .overflow_hidden()
-                            .when(active, |element| {
-                                element.child(TextInputElement::new(
-                                    entity,
-                                    focus_handle,
-                                    Font {
-                                        family: ui_font.clone(),
-                                        ..Font::default()
-                                    },
-                                    px(13.0),
-                                    style.primary_text.into(),
-                                    style.input_selection.into(),
-                                    TextInputAlignment::Left,
-                                ))
-                            })
-                            .when(!active && !value.is_empty(), |element| {
-                                element.child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(13.0))
-                                        .text_color(style.primary_text)
-                                        .child(value),
-                                )
-                            }),
-                    );
-                div()
-                    .flex_1()
-                    .min_w(px(120.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(5.0))
-                    .children(label.as_ref().map(|label| {
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(style.muted_text)
-                            .child(label.clone())
-                    }))
-                    .child(field)
-                    .into_any_element()
-            }
-            PluginUiNode::Button {
-                id,
-                action,
-                label,
-                payload,
-                variant,
-                disabled,
-            } => {
-                let enabled = !*disabled && !self.busy;
-                let (background, foreground) = match variant {
-                    PluginUiButtonVariant::Secondary => (style.control_bg, style.primary_text),
-                    PluginUiButtonVariant::Primary => (style.accent, style.accent_text),
-                    PluginUiButtonVariant::Danger => (style.danger, style.accent_text),
-                };
-                let action_id = action.clone();
-                let control_id = id.clone();
-                let action_payload = payload.clone();
-                div()
-                    .id(SharedString::from(format!(
-                        "plugin-ui-{}-{}-{path}",
-                        self.descriptor.plugin_id, self.descriptor.id
-                    )))
-                    .flex_none()
-                    .h(px(INPUT_HEIGHT))
-                    .px(px(14.0))
-                    .rounded(px(CONTROL_RADIUS))
-                    .bg(background)
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(foreground)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .opacity(if enabled { 1.0 } else { 0.55 })
-                    .when(enabled, |element| {
-                        element
-                            .cursor_pointer()
-                            .hover(move |element| element.bg(style.control_hover))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |view, _: &MouseDownEvent, _window, cx| {
-                                    cx.stop_propagation();
-                                    view.dispatch(
-                                        action_id.clone(),
-                                        control_id.clone(),
-                                        action_payload.clone(),
-                                        None,
-                                        cx,
-                                    );
-                                }),
-                            )
-                    })
-                    .child(label.clone())
-                    .into_any_element()
-            }
-            PluginUiNode::Checkbox {
-                id,
-                action,
-                label,
-                payload,
-                checked,
-                disabled,
-            } => {
-                let enabled = !*disabled && !self.busy;
-                let action_id = action.clone();
-                let control_id = id.clone();
-                let action_payload = payload.clone();
-                let next_value = !*checked;
-                div()
-                    .id(SharedString::from(format!(
-                        "plugin-ui-{}-{}-{path}",
-                        self.descriptor.plugin_id, self.descriptor.id
-                    )))
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(9.0))
-                    .opacity(if enabled { 1.0 } else { 0.55 })
-                    .when(enabled, |element| {
-                        element.cursor_pointer().on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |view, _: &MouseDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                view.dispatch(
-                                    action_id.clone(),
-                                    control_id.clone(),
-                                    action_payload.clone(),
-                                    Some(PluginViewValue::Toggle(next_value)),
-                                    cx,
-                                );
-                            }),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .rounded(px(5.0))
-                            .border_1()
-                            .border_color(if *checked {
-                                style.accent
-                            } else {
-                                style.panel_border
-                            })
-                            .bg(if *checked {
-                                style.accent
-                            } else {
-                                style.control_bg
-                            })
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(style.accent_text)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(if *checked { "✓" } else { "" }),
-                    )
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .text_size(px(13.0))
-                            .text_color(style.primary_text)
-                            .child(label.clone()),
-                    )
-                    .into_any_element()
-            }
-            PluginUiNode::Divider => div()
-                .w_full()
-                .h(px(1.0))
-                .bg(style.panel_border)
-                .into_any_element(),
-            PluginUiNode::Spacer { size } => div()
-                .flex_none()
-                .w(px(Self::gap(*size)))
-                .h(px(Self::gap(*size)))
-                .into_any_element(),
-        }
-    }
 }
 
 impl TextInputProvider for PluginUiView {
@@ -1175,7 +1200,11 @@ impl gpui::EntityInputHandler for PluginUiView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = Self::bounded_input_text(text, self.active_input_limit());
+        let multiline = self
+            .active_input
+            .as_ref()
+            .is_some_and(|input| input.multiline);
+        let text = Self::bounded_input_text(text, self.active_input_limit(), multiline);
         if let Some(state) = self.text_input_state_mut() {
             state.replace_text_in_range(range, text.as_ref());
             self.enforce_active_input_limit();
@@ -1191,7 +1220,11 @@ impl gpui::EntityInputHandler for PluginUiView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = Self::bounded_input_text(new_text, self.active_input_limit());
+        let multiline = self
+            .active_input
+            .as_ref()
+            .is_some_and(|input| input.multiline);
+        let text = Self::bounded_input_text(new_text, self.active_input_limit(), multiline);
         let selected_range = (text.as_ref() == new_text)
             .then_some(new_selected_range)
             .flatten();
@@ -1222,10 +1255,6 @@ impl gpui::EntityInputHandler for PluginUiView {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         Some(self.text_input_state()?.character_index_for_point(point))
-    }
-
-    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
-        self.text_input_state().is_some()
     }
 }
 
@@ -1460,9 +1489,8 @@ impl Render for PluginUiView {
             .into_any_element()
     }
 }
-
 mod host;
-
+mod render_nodes;
 #[cfg(test)]
 #[path = "plugin_ui_tests.rs"]
 mod tests;

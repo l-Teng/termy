@@ -330,24 +330,11 @@ impl SettingsWindow {
             SettingsSection::Keybindings => "Keyboard shortcuts",
             SettingsSection::ThemeStore | SettingsSection::Plugins | SettingsSection::Ssh => return,
         };
-        let title = "Reset Section";
-        let message = format!(
-            "Are you sure you want to reset all {section_name} settings to their default values?"
-        );
-
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let confirmed = termy_native_sdk::confirm(title, &message);
-            if !confirmed {
-                return;
-            }
-
-            let _ = cx.update(|cx| {
-                this.update(cx, |view, cx| {
-                    view.reset_section_to_defaults(section, cx);
-                })
-            });
-        })
-        .detach();
+        self.pending_confirmation = Some(PendingSettingsConfirmation::ResetSection {
+            section,
+            section_name,
+        });
+        cx.notify();
     }
 
     pub(super) fn confirm_reset_setting_to_default(
@@ -355,22 +342,8 @@ impl SettingsWindow {
         setting_key: &'static str,
         cx: &mut Context<Self>,
     ) {
-        let title = "Reset Setting";
-        let message = "Are you sure you want to reset this setting to its default value?";
-
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let confirmed = termy_native_sdk::confirm(title, message);
-            if !confirmed {
-                return;
-            }
-
-            let _ = cx.update(|cx| {
-                this.update(cx, |view, cx| {
-                    view.reset_setting_to_default(setting_key, cx);
-                })
-            });
-        })
-        .detach();
+        self.pending_confirmation = Some(PendingSettingsConfirmation::ResetSetting { setting_key });
+        cx.notify();
     }
 
     pub(super) fn reset_section_to_defaults(
@@ -1034,7 +1007,7 @@ impl SettingsWindow {
             field,
             self.editable_field_value(field),
         ));
-        self.focus_handle.focus(window, cx);
+        self.focus_handle.focus(window);
         cx.notify();
     }
 

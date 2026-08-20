@@ -19,6 +19,12 @@ use std::{
 };
 
 use crate::Size;
+use crate::pty_limits::{
+    MAX_PROTOCOL_REPLY_BACKLOG_BYTES, MAX_PROTOCOL_REPLY_BACKLOG_ENTRIES,
+    MAX_WRITE_BACKLOG_BYTES as MAX_WRITER_BACKLOG_BYTES,
+    MAX_WRITE_BACKLOG_ENTRIES as MAX_WRITER_BACKLOG_ENTRIES,
+    MAX_WRITE_CHUNK_BYTES as MAX_WRITER_WRITE_CHUNK,
+};
 
 const F_GETFL: c_int = 3;
 const F_SETFD: c_int = 2;
@@ -56,11 +62,6 @@ const EXIT_DRAIN_TIME_BUDGET: Duration = Duration::from_millis(25);
 // before escalating. The watcher remains responsible for reaping the child and
 // waking the reader so final output keeps its normal ordering.
 const DROP_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
-const MAX_WRITER_BACKLOG_BYTES: usize = 8 * 1024 * 1024;
-const MAX_WRITER_BACKLOG_ENTRIES: usize = 4096;
-const MAX_PROTOCOL_REPLY_BACKLOG_BYTES: usize = 2 * 1024 * 1024;
-const MAX_PROTOCOL_REPLY_BACKLOG_ENTRIES: usize = 256;
-const MAX_WRITER_WRITE_CHUNK: usize = 16 * 1024;
 const WRITER_POLL_TIMEOUT_MS: c_int = 10;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

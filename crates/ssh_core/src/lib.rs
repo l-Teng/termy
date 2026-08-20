@@ -267,10 +267,9 @@ impl<B: KeyringBackend> SshHostManager<B> {
             && let Err(error) =
                 self.apply_secret_transition(&host.id, None, &host.authentication, secret_update)
         {
-            if let Some(snapshot) = snapshot.as_ref() {
-                let _ = self.restore_secret_snapshot(&host.id, snapshot);
-            }
-            return Err(error);
+            return Err(snapshot.as_ref().map_or(error.clone(), |snapshot| {
+                self.rollback_error(&host.id, snapshot, error)
+            }));
         }
 
         let mut next_hosts = self.hosts.clone();
@@ -315,10 +314,9 @@ impl<B: KeyringBackend> SshHostManager<B> {
                 secret_update,
             )
         {
-            if let Some(snapshot) = snapshot.as_ref() {
-                let _ = self.restore_secret_snapshot(host_id, snapshot);
-            }
-            return Err(error);
+            return Err(snapshot.as_ref().map_or(error.clone(), |snapshot| {
+                self.rollback_error(host_id, snapshot, error)
+            }));
         }
 
         let mut next_hosts = self.hosts.clone();
@@ -343,8 +341,7 @@ impl<B: KeyringBackend> SshHostManager<B> {
         let snapshot = self.secret_snapshot(host_id)?;
 
         if let Err(error) = self.clear_all_secrets(host_id) {
-            let _ = self.restore_secret_snapshot(host_id, &snapshot);
-            return Err(error);
+            return Err(self.rollback_error(host_id, &snapshot, error));
         }
 
         let mut next_hosts = self.hosts.clone();
@@ -819,6 +816,28 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct FailingMutationKeyring;
+
+    impl KeyringBackend for FailingMutationKeyring {
+        fn get_password(&self, _service: &str, _account: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+
+        fn set_password(
+            &self,
+            _service: &str,
+            _account: &str,
+            _secret: &str,
+        ) -> Result<(), String> {
+            Err("keychain mutation failed".to_string())
+        }
+
+        fn delete_password(&self, _service: &str, _account: &str) -> Result<(), String> {
+            Err("keychain mutation failed".to_string())
+        }
+    }
+
     fn key_input(identity_file: &str) -> SshHostInput {
         SshHostInput {
             display_name: "Production".to_string(),
@@ -956,6 +975,54 @@ mod tests {
             .update(&created.id, changed, SecretUpdate::Keep)
             .expect("edit interactive-only host");
         assert_eq!(manager.hosts()[0].hostname, "staging.example.com");
+    }
+
+    #[test]
+    fn credential_mutation_errors_include_failed_rollback() {
+        const EXPECTED: &str = "keychain mutation failed. The SSH credential rollback also failed: keychain mutation failed";
+
+        let create_dir = tempfile::tempdir().expect("create temp dir");
+        let mut create_manager = SshHostManager::open(
+            create_dir.path().join(HOSTS_FILE_NAME),
+            FailingMutationKeyring,
+        )
+        .expect("open create manager");
+        let create_error = create_manager
+            .create(password_input(), SecretUpdate::Set("hunter2".to_string()))
+            .expect_err("create should report the failed credential rollback");
+        assert_eq!(create_error, EXPECTED);
+
+        let update_dir = tempfile::tempdir().expect("update temp dir");
+        let mut update_manager = SshHostManager::open(
+            update_dir.path().join(HOSTS_FILE_NAME),
+            FailingMutationKeyring,
+        )
+        .expect("open update manager");
+        let update_host = update_manager
+            .create(password_input(), SecretUpdate::Keep)
+            .expect("create update fixture");
+        let update_error = update_manager
+            .update(
+                &update_host.id,
+                key_input("~/.ssh/id_ed25519"),
+                SecretUpdate::Keep,
+            )
+            .expect_err("update should report the failed credential rollback");
+        assert_eq!(update_error, EXPECTED);
+
+        let delete_dir = tempfile::tempdir().expect("delete temp dir");
+        let mut delete_manager = SshHostManager::open(
+            delete_dir.path().join(HOSTS_FILE_NAME),
+            FailingMutationKeyring,
+        )
+        .expect("open delete manager");
+        let delete_host = delete_manager
+            .create(password_input(), SecretUpdate::Keep)
+            .expect("create delete fixture");
+        let delete_error = delete_manager
+            .delete(&delete_host.id)
+            .expect_err("delete should report the failed credential rollback");
+        assert_eq!(delete_error, EXPECTED);
     }
 
     #[test]

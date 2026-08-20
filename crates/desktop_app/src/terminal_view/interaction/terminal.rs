@@ -128,7 +128,7 @@ impl TerminalView {
                     })
                 });
                 match next_delay {
-                    Ok(Some(next_delay)) => remaining = next_delay,
+                    Ok(Ok(Some(next_delay))) => remaining = next_delay,
                     _ => return,
                 }
             }
@@ -382,7 +382,7 @@ impl TerminalView {
         let font = Font {
             family: self.font_family.clone(),
             weight: FontWeight::NORMAL,
-            ..Default::default()
+            ..gpui::font("")
         };
 
         let text_system = window.text_system();

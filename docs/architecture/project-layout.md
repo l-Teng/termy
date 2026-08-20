@@ -19,6 +19,8 @@ Termy is a single repository with several product surfaces. Keep changes in the 
 - `docs/` owns contributor and architecture docs inside the repo.
 - `scripts/` owns packaging, platform, and release support.
 - `assets/` owns app icons, shell completions, UI icons, and media.
+- `tools/` owns standalone benchmark and development packages outside the main Cargo workspace.
+- `skills/` owns agent-facing workflows that must stay aligned with Termy's public contracts.
 
 ## Workspace Crates
 
@@ -47,7 +49,7 @@ The `crates/README.md` file is the workspace crate index.
 - Put user-visible app behavior in `crates/desktop_app/`; extract to sibling crates only when the behavior is shared by multiple surfaces or needs isolated tests.
 - Update repo docs and public website docs together when a public behavior or embedding contract changes.
 - Keep release packaging rooted in `scripts/` and documented in [Release Packaging](release-packaging.md). Do not add parallel packaging entrypoints unless they become the documented source of truth.
-- Keep root-level directory indexes (`crates/README.md`, `scripts/README.md`) aligned with ownership changes.
+- Keep root-level directory indexes (`crates/README.md`, `docs/README.md`, `scripts/README.md`, `skills/README.md`, and `tools/README.md`) aligned with ownership changes.
 
 ## Validation
 

@@ -78,7 +78,6 @@ fn image_extension(format: gpui::ImageFormat) -> &'static str {
         gpui::ImageFormat::Bmp => "bmp",
         gpui::ImageFormat::Tiff => "tiff",
         gpui::ImageFormat::Svg => "svg",
-        gpui::ImageFormat::Ico => "ico",
     }
 }
 
@@ -113,19 +112,15 @@ fn clipboard_item_to_terminal_paste_input(
         return Ok(Some(text.into_bytes()));
     }
 
-    let Some(entry) = item.entries().iter().find(|entry| {
-        matches!(
-            entry,
-            gpui::ClipboardEntry::ExternalPaths(_) | gpui::ClipboardEntry::Image(_)
-        )
-    }) else {
+    let Some(entry) = item
+        .entries()
+        .iter()
+        .find(|entry| matches!(entry, gpui::ClipboardEntry::Image(_)))
+    else {
         return Ok(None);
     };
 
     match entry {
-        gpui::ClipboardEntry::ExternalPaths(paths) => {
-            Ok(Some(shell_quote_paths(paths.paths()).into_bytes()))
-        }
         gpui::ClipboardEntry::Image(image) => {
             let path = write_clipboard_image_to_temp_file(image)?;
             Ok(Some(shell_quote_path(&path).into_bytes()))
@@ -261,7 +256,7 @@ impl TerminalView {
             .is_some_and(|terminal| terminal.alternate_screen_mode())
     }
 
-    fn send_input_to_pane(&self, pane_id: &str, input: &[u8]) -> bool {
+    pub(in crate::terminal_view) fn send_input_to_pane(&self, pane_id: &str, input: &[u8]) -> bool {
         match self.runtime_kind() {
             RuntimeKind::Tmux => self.tmux_send_input_to_pane(pane_id, input),
             RuntimeKind::Native => {
@@ -287,7 +282,7 @@ impl TerminalView {
         }
     }
 
-    fn send_input_to_active_pane(&self, input: &[u8]) -> bool {
+    pub(in crate::terminal_view) fn send_input_to_active_pane(&self, input: &[u8]) -> bool {
         let Some(pane_id) = self.active_pane_id() else {
             return false;
         };
@@ -1072,7 +1067,6 @@ mod tests {
         assert_eq!(image_extension(gpui::ImageFormat::Bmp), "bmp");
         assert_eq!(image_extension(gpui::ImageFormat::Tiff), "tiff");
         assert_eq!(image_extension(gpui::ImageFormat::Svg), "svg");
-        assert_eq!(image_extension(gpui::ImageFormat::Ico), "ico");
     }
 
     #[test]

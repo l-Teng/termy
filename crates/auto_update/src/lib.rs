@@ -41,7 +41,7 @@ impl AutoUpdater {
         let weak = entity;
         cx.spawn(async move |cx: &mut AsyncApp| {
             let result = bg.await;
-            cx.update(|cx| {
+            let _ = cx.update(|cx| {
                 let Some(this) = weak.upgrade() else { return };
                 this.update(cx, |this, cx| {
                     match result {
@@ -126,7 +126,7 @@ impl AutoUpdater {
                     break;
                 };
                 let ver = progress_version.clone();
-                cx.update(|cx| {
+                let _ = cx.update(|cx| {
                     this.update(cx, |this, cx| {
                         if !matches!(
                             &this.state,
@@ -149,7 +149,7 @@ impl AutoUpdater {
         let weak_done = entity;
         cx.spawn(async move |cx: &mut AsyncApp| {
             let result = bg.await;
-            cx.update(|cx| {
+            let _ = cx.update(|cx| {
                 let Some(this) = weak_done.upgrade() else {
                     return;
                 };
@@ -192,7 +192,7 @@ impl AutoUpdater {
         let weak = entity;
         cx.spawn(async move |cx: &mut AsyncApp| {
             let result = bg.await;
-            cx.update(|cx| {
+            let _ = cx.update(|cx| {
                 let Some(this) = weak.upgrade() else { return };
                 this.update(cx, |this, cx| {
                     match result {

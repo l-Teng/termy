@@ -129,7 +129,7 @@ fn font_has_fixed_ascii_advances(text_system: &TextSystem, family: &str) -> bool
     let font = Font {
         family: family.to_string().into(),
         weight: FontWeight::NORMAL,
-        ..Font::default()
+        ..gpui::font("")
     };
     let font_id = text_system.resolve_font(&font);
     let font_size = px(TERMINAL_METRIC_FONT_SIZE);

@@ -62,6 +62,8 @@ plugin loads. Interactive CLI installs require confirmation; automation uses
 - A command or view may set `timeoutMs` from 100 through 30,000 milliseconds.
 - A child process may outlive its Worker. Stop it explicitly when cancellation
   matters.
+- User cancellation aborts `context.signal`; long operations should observe it and
+  may report a bounded message/percentage through `context.progress`.
 - Persist durable state through `context.storage` or managed files; module globals
   may be reset when an eventless host sleeps.
 
@@ -77,7 +79,7 @@ clear error.
 | Plugin source tree | 4,096 files, 16 MiB total |
 | Definitions per plugin | 512 commands, 64 settings, 32 views |
 | Command inputs | 16 per command |
-| Select options | 128 per select |
+| Select/pick options | 128 per result |
 | Returned actions | 32 per invocation |
 | Selected terminal text | 64 KiB, truncated on a UTF-8 boundary |
 | Small JSON storage | 512 values, 1 MiB total per plugin |
@@ -86,6 +88,8 @@ clear error.
 | Native UI children | 64 per node |
 | Value-bearing controls | 64 per document |
 | Text input value | 4,096 characters |
+| View params | 64 KiB JSON object |
+| Program launch | 128 args, 4,096 characters per program/arg |
 | Handler timeout | default 10 s; configurable 100–30,000 ms |
 
 Design well below the hard ceilings. Limits are safety boundaries, not targets.
@@ -96,6 +100,7 @@ Design well below the hard ceilings. Limits are safety boundaries, not targets.
 
 - Validate inputs before network, filesystem, or subprocess work.
 - Map select choices to constant commands.
+- Keep pick loaders side-effect free, apply the query, and return bounded results.
 - Prefer one typed returned action over multiple cross-boundary calls.
 - Bound output and reject work that cannot finish predictably.
 - Use async APIs for I/O and preserve useful timeout headroom.
@@ -141,7 +146,7 @@ dependency trees, or unrelated assets.
 
 ## Shell and process safety
 
-Never interpolate free-form text directly into `terminal.run`.
+Never interpolate free-form text directly into `terminal.run` or a shell launch.
 
 Prefer:
 
@@ -152,7 +157,11 @@ const commands: Record<string, string> = {
 };
 const command = typeof inputs.view === "string" ? commands[inputs.view] : undefined;
 if (!command) return;
-return { type: "terminal.run", command, workingDirectory: context.workingDirectory };
+return {
+  type: "terminal.open",
+  workingDirectory: context.workingDirectory,
+  launch: { type: "shell", command },
+};
 ```
 
 If a task truly requires user text:
@@ -162,6 +171,8 @@ If a task truly requires user text:
 - Quote for the actual target shell; do not assume POSIX on Windows.
 - Keep secrets out of arguments, logs, terminal output, and URLs.
 - Track and terminate spawned processes on cancellation/timeout when appropriate.
+- Prefer `{ type: "program", program, args }` in native terminals when exact argv
+  boundaries matter. Tmux cannot provide structured argv execution.
 
 ## Storage and secrets
 
@@ -197,6 +208,7 @@ props are rejected.
 - [ ] User-controlled text cannot become unquoted shell syntax.
 - [ ] Secrets use `secret` settings.
 - [ ] Files/network/processes are bounded and errors are surfaced.
+- [ ] Long operations observe `context.signal` and report useful progress.
 - [ ] Child processes have an ownership and cleanup plan.
 - [ ] Lifecycle handlers are cheap, idempotent, and burst-safe.
 - [ ] Storage remains below limits and large data uses managed files.

@@ -1,6 +1,5 @@
 [workspace]
 members = [
-  "crates/api",
   "crates/auto_update",
   "crates/cli",
   "crates/cli_install_core",
@@ -29,8 +28,8 @@ alacritty_terminal = "0.26"
 anyhow = "1.0"
 dirs = "6.0"
 flume = "0.11"
-gpui = { git = "https://github.com/zed-industries/zed", rev = "c8656ac96d2344fc288b551943cc12fcb6ef56ad", package = "gpui" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c8656ac96d2344fc288b551943cc12fcb6ef56ad", package = "gpui_platform", features = ["font-kit", "wayland", "x11"] }
+gpui = { version = "=0.2.2", features = ["font-kit", "wayland", "x11"] }
+glassy-ui = "=0.1.1"
 keyring = "4.1.1"
 log = "0.4"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }

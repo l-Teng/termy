@@ -47,7 +47,7 @@ use termy_core::{
     WorkingDirFallback as RuntimeWorkingDirFallback, normalize_working_directory_candidate,
     resolve_launch_working_directory, resolve_working_directory_path,
 };
-use termy_plugin_runtime::{PluginEvent, PluginRuntime};
+use termy_plugin_runtime::{PluginEvent, PluginInvocationControl, PluginRuntime};
 use termy_search::SearchState;
 use termy_terminal_ui::{
     CellRenderInfo, PaneTerminal, TerminalGrid, TerminalGridPaintCacheHandle,
@@ -1330,6 +1330,7 @@ pub struct TerminalView {
     plugin_ui: Option<Entity<PluginUiView>>,
     plugin_runtime: PluginRuntime,
     plugin_lifecycle: PluginLifecycleState,
+    plugin_invocations: HashMap<u64, PluginInvocationControl>,
     plugin_refresh_in_flight: bool,
     plugin_last_error: Option<String>,
     launch_probe_scheduled: bool,
@@ -3530,7 +3531,7 @@ impl TerminalView {
         let window_handle = window.window_handle();
 
         // Focus the terminal immediately
-        focus_handle.focus(window, cx);
+        focus_handle.focus(window);
 
         // Process terminal events on the next frame so bursty PTY wakeups do not monopolize
         // the UI executor and starve actual paints.
@@ -3843,6 +3844,7 @@ impl TerminalView {
             plugin_ui: None,
             plugin_runtime,
             plugin_lifecycle: PluginLifecycleState::new(window_handle),
+            plugin_invocations: HashMap::new(),
             plugin_refresh_in_flight: false,
             plugin_last_error: None,
             launch_probe_scheduled: false,
@@ -4050,7 +4052,7 @@ impl TerminalView {
             let weak = updater.downgrade();
             cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 smol::Timer::after(Duration::from_millis(5000)).await;
-                cx.update(|cx| AutoUpdater::check(weak, cx));
+                let _ = cx.update(|cx| AutoUpdater::check(weak, cx));
             })
             .detach();
         }
@@ -4581,9 +4583,17 @@ impl TerminalView {
 
                 for event in events {
                     match event {
-                        TerminalEvent::Wakeup | TerminalEvent::Bell => {
+                        TerminalEvent::Wakeup => {
                             if tab_index == active_tab {
                                 should_redraw = true;
+                            }
+                        }
+                        TerminalEvent::Bell => {
+                            if tab_index == active_tab {
+                                should_redraw = true;
+                                if pane_is_active {
+                                    plugin_events.push(PluginEvent::TerminalBell);
+                                }
                             }
                         }
                         TerminalEvent::Exit => {

@@ -156,7 +156,7 @@ impl SettingsWindow {
         self.blur_sidebar_search();
         self.active_input = None;
         self.capturing_action = Some(action);
-        self.focus_handle.focus(window, cx);
+        self.focus_handle.focus(window);
         cx.notify();
     }
 

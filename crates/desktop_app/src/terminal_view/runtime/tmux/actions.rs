@@ -434,11 +434,12 @@ impl TerminalView {
         )
     }
 
-    pub(in crate::terminal_view) fn tmux_split_active_pane_vertical(
+    pub(in crate::terminal_view) fn tmux_split_active_pane_vertical_with_working_dir(
         &mut self,
+        working_dir: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let working_dir = self.preferred_working_dir_for_new_session(None, cx);
+        let working_dir = self.preferred_working_dir_for_new_session(working_dir, cx);
         self.with_active_pane_action(
             "Failed to split pane",
             TmuxPostActionRefresh::ImmediateSnapshot,
@@ -448,11 +449,12 @@ impl TerminalView {
         )
     }
 
-    pub(in crate::terminal_view) fn tmux_split_active_pane_horizontal(
+    pub(in crate::terminal_view) fn tmux_split_active_pane_horizontal_with_working_dir(
         &mut self,
+        working_dir: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let working_dir = self.preferred_working_dir_for_new_session(None, cx);
+        let working_dir = self.preferred_working_dir_for_new_session(working_dir, cx);
         self.with_active_pane_action(
             "Failed to split pane",
             TmuxPostActionRefresh::ImmediateSnapshot,

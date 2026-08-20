@@ -90,13 +90,18 @@ Apply these rules:
 - Treat context as a read-only point-in-time snapshot. Check optional selection,
   directory, command, tab, pane, and event fields before use.
 - Use typed settings for configuration. Use `secret` settings for credentials.
-- Map fixed choices to fixed `terminal.run` commands. Never concatenate untrusted
-  free-form input into a shell command.
+- Prefer `terminal.sendText` and `terminal.open` over legacy `terminal.run`. Use a
+  structured `program` launch when shell parsing is unnecessary, and never
+  concatenate untrusted free-form input into a shell command.
+- Use `when` to hide context-specific commands, async `pick` inputs for bounded
+  dynamic choices, `context.origin` for stable async targeting, and
+  `context.signal`/`context.progress` for cancellable long-running work.
 - Return typed actions or emit toasts; do not reach into Termy internals.
 - Use `commands: []` for event-only plugins. Keep event handlers bounded.
 - Use async storage for small JSON and managed paths for larger files.
 - Use `.tsx`, the three Termy JSX pragmas, allowlisted `TermyUI` components, unique
-  control IDs, named actions, and `onAction` for interactive native views.
+  control IDs, named actions, and `onAction` for interactive native views. Pass
+  bounded JSON params for navigation and use `view.replace`/`view.close` for flows.
 - Paginate dynamic native-UI lists and rerender from persisted state.
 
 ## Develop and verify
@@ -125,13 +130,13 @@ plugin. Stop the watcher with Ctrl-C; this does not uninstall the managed copy.
 Verify the relevant surfaces:
 
 1. Confirm the manifest validates and the Worker loads without a Bun error.
-2. Exercise every command, input branch, disabled state, action, and toast.
+2. Exercise every command, input branch, contextual `when` state, action, and toast.
 3. Test missing optional context and both native/tmux behavior when relevant.
 4. Confirm settings update on the next invocation and secrets stay out of plain
    plugin JSON.
 5. Confirm lifecycle events are idempotent and do not create duplicate work.
-6. Confirm native controls emit the intended named action, persist correctly, and
-   rerender within document limits.
+6. Confirm native controls work by mouse and keyboard, emit the intended named
+   action, preserve view params, persist correctly, and rerender within limits.
 7. Save a source/import change, reopen the palette, and verify hot refresh.
 8. Review the diff and run the repository's nearest checks plus `git diff --check`.
 
@@ -144,6 +149,8 @@ behavior.
 - Keep capabilities minimal and manifest/source IDs consistent.
 - Keep local imports inside the plugin root; reject dependencies and symlinks.
 - Bound selection, input, storage, output, list, network, and subprocess work.
+- Keep async pick loaders side-effect free, query-aware, and below option limits.
+- Observe `context.signal` and report useful progress for longer operations.
 - Clean up child processes explicitly when cancellation matters.
 - Avoid repeated filesystem/network work in render and lifecycle hot paths.
 - Use cached/persisted data and small documents; never render an unbounded list.

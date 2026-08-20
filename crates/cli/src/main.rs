@@ -214,7 +214,12 @@ fn main() {
         Some(Action::ListThemes) => commands::list_themes::run(),
         Some(Action::ListColors) => commands::list_colors::run(),
         Some(Action::ListActions) => commands::list_actions::run(),
-        Some(Action::EditConfig) => commands::edit_config::run(),
+        Some(Action::EditConfig) => {
+            if let Err(error) = commands::edit_config::run() {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+        }
         Some(Action::ShowConfig) => commands::show_config::run(),
         Some(Action::ValidateConfig) => commands::validate_config::run(),
         Some(Action::PrettifyConfig) => commands::prettify_config::run(),

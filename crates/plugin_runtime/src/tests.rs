@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 use tempfile::TempDir;
 
 fn write_plugin(plugins: &Path, id: &str, name: &str, source: &str) -> PathBuf {
@@ -28,6 +29,292 @@ fn bun_is_available() -> bool {
         Ok(None) => false,
         Err(error) => panic!("Invalid Bun runtime configuration: {error}"),
     }
+}
+
+#[test]
+fn next_plugin_api_round_trips_pickers_progress_cancellation_params_and_native_nodes() {
+    if !bun_is_available() {
+        return;
+    }
+    let temp = TempDir::new().expect("temp dir");
+    let config_path = temp.path().join("termy.toml");
+    let plugins = temp.path().join("plugins");
+    let plugin_dir = write_plugin(
+        &plugins,
+        "next-api",
+        "Next API",
+        r#"
+export default definePlugin({
+  commands: [
+    {
+      id: "pick",
+      title: "Pick",
+      when: { hasWorkingDirectory: true, runtimes: ["native"], platforms: ["macos"] },
+      inputs: [{
+        id: "choice",
+        type: "pick",
+        label: "Choice",
+        async loadOptions({ query, context }) {
+          return [
+            { value: `${query}-one`, label: `One in ${context.origin.windowId}` },
+            { value: `${query}-two`, label: "Two", status: "remote" },
+          ];
+        },
+      }],
+      run({ inputs }) {
+        return { type: "toast", level: "info", message: String(inputs.choice) };
+      },
+    },
+    {
+      id: "progress",
+      title: "Progress",
+      run({ context }) {
+        context.progress.report({ message: "Halfway", percentage: 50 });
+        return { type: "toast", level: "success", message: "Done" };
+      },
+    },
+    {
+      id: "cancel",
+      title: "Cancel",
+      timeoutMs: 30000,
+      run({ context }) {
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => resolve(undefined), 20000);
+          context.signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new Error("abort observed"));
+          }, { once: true });
+        });
+      },
+    },
+    {
+      id: "actions",
+      title: "Actions",
+      run() {
+        return [
+          { type: "terminal.sendText", text: "echo ready", submit: true, target: "origin" },
+          {
+            type: "terminal.open",
+            location: "splitRight",
+            launch: { type: "program", program: "cargo", args: ["test"] },
+            target: "active",
+            focus: false,
+          },
+          { type: "view.replace", view: "details", params: { item: "next" } },
+          { type: "view.close" },
+        ];
+      },
+    },
+    {
+      id: "open",
+      title: "Open",
+      run() {
+        return { type: "view.open", view: "details", params: { item: "42" } };
+      },
+    },
+    {
+      id: "invalid-action",
+      title: "Invalid action",
+      run() {
+        return { type: "terminal.sendText", text: "echo nope", unexpected: true };
+      },
+    },
+  ],
+  views: {
+    details: {
+      title: "Details",
+      render({ params }) {
+        return TermyUI.createElement(
+          TermyUI.Column,
+          { gap: "small" },
+          TermyUI.createElement(TermyUI.Progress, { label: String(params.item), value: 50 }),
+          TermyUI.createElement(TermyUI.Select, {
+            id: "kind",
+            options: [{ value: "a", label: "A" }],
+            value: "a",
+          }),
+          TermyUI.createElement(
+            TermyUI.List,
+            { id: "items", selectedId: "one" },
+            TermyUI.createElement(TermyUI.ListItem, { id: "one", title: "One" }),
+          ),
+          TermyUI.createElement(TermyUI.TextArea, { id: "notes", rows: 3, value: "hello" }),
+          TermyUI.createElement(TermyUI.EmptyState, { title: "Nothing else" }),
+        );
+      },
+    },
+  },
+});
+"#,
+    );
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{"apiVersion":1,"id":"next-api","name":"Next API","capabilities":["native-ui"]}"#,
+    )
+    .expect("declare native UI capability");
+
+    let runtime = PluginRuntime::new(Some(&config_path));
+    let refresh = runtime.refresh_if_changed();
+    assert!(refresh.errors.is_empty(), "errors: {:?}", refresh.errors);
+
+    let (pick, revision) = runtime
+        .command_with_revision("next-api", "pick")
+        .expect("picker command");
+    let mut context = test_plugin_context();
+    context.origin.tab_id = Some("tab-test".to_string());
+    context.origin.pane_id = Some("pane-test".to_string());
+    context.working_directory = Some("/tmp".to_string());
+    context.platform = "macos".to_string();
+    assert!(pick.when.matches(&context));
+    let options = runtime
+        .resolve_pick_options(
+            "next-api",
+            "pick",
+            "choice",
+            &revision,
+            "q",
+            context.clone(),
+        )
+        .expect("resolve picker options");
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0].value, "q-one");
+    assert!(options[0].label.contains("window-test"));
+
+    let progress_revision = runtime
+        .command_with_revision("next-api", "progress")
+        .expect("progress command")
+        .1;
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&updates);
+    let control = PluginInvocationControl::with_progress_handler(move |progress| {
+        captured.lock().expect("progress lock").push(progress);
+    });
+    runtime
+        .invoke_with_control(
+            "next-api",
+            "progress",
+            &progress_revision,
+            BTreeMap::new(),
+            context.clone(),
+            &control,
+        )
+        .expect("progress invocation");
+    assert_eq!(
+        updates.lock().expect("progress updates").as_slice(),
+        &[PluginProgress {
+            message: Some("Halfway".to_string()),
+            percentage: Some(50),
+        }]
+    );
+
+    let action_revision = runtime
+        .command_with_revision("next-api", "actions")
+        .expect("explicit actions command")
+        .1;
+    let actions = runtime
+        .invoke(
+            "next-api",
+            "actions",
+            &action_revision,
+            BTreeMap::new(),
+            context.clone(),
+        )
+        .expect("explicit terminal and view actions");
+    assert!(matches!(
+        &actions[0],
+        PluginAction::TerminalSendText {
+            submit: true,
+            target: PluginTerminalTarget::Exact {
+                window_id,
+                tab_id: Some(tab_id),
+                pane_id: Some(pane_id),
+            },
+            ..
+        } if window_id == "window-test" && tab_id == "tab-test" && pane_id == "pane-test"
+    ));
+    assert!(matches!(
+        &actions[1],
+        PluginAction::TerminalOpen {
+            location: PluginTerminalOpenLocation::SplitRight,
+            launch: Some(PluginTerminalLaunch::Program { program, args }),
+            target: PluginTerminalTarget::Named(PluginTerminalTargetKind::Active),
+            focus: false,
+            ..
+        } if program == "cargo" && args.len() == 1 && args[0] == "test"
+    ));
+    assert!(matches!(
+        &actions[2],
+        PluginAction::ViewReplace { params, .. } if params == &json!({ "item": "next" })
+    ));
+    assert!(matches!(actions[3], PluginAction::ViewClose { .. }));
+
+    let open_revision = runtime
+        .command_with_revision("next-api", "open")
+        .expect("open command")
+        .1;
+    let actions = runtime
+        .invoke(
+            "next-api",
+            "open",
+            &open_revision,
+            BTreeMap::new(),
+            context.clone(),
+        )
+        .expect("open view");
+    assert!(matches!(
+        actions.as_slice(),
+        [PluginAction::ViewOpen { params, .. }] if params == &json!({ "item": "42" })
+    ));
+    let invalid_revision = runtime
+        .command_with_revision("next-api", "invalid-action")
+        .expect("invalid action command")
+        .1;
+    let invalid_error = runtime
+        .invoke(
+            "next-api",
+            "invalid-action",
+            &invalid_revision,
+            BTreeMap::new(),
+            context.clone(),
+        )
+        .expect_err("unknown action fields must be rejected in the Worker");
+    assert!(invalid_error.contains("does not support unexpected"));
+    let render = runtime
+        .render_view(
+            "next-api",
+            "details",
+            &open_revision,
+            json!({ "item": "42" }),
+            context.clone(),
+        )
+        .expect("render parameterized view");
+    assert_eq!(render.params, json!({ "item": "42" }));
+    assert!(format!("{:?}", render.nodes).contains("TextArea"));
+    assert!(format!("{:?}", render.nodes).contains("EmptyState"));
+
+    let cancel_revision = runtime
+        .command_with_revision("next-api", "cancel")
+        .expect("cancel command")
+        .1;
+    let cancel_control = PluginInvocationControl::new();
+    let invoked_control = cancel_control.clone();
+    let handle = thread::spawn(move || {
+        runtime.invoke_with_control(
+            "next-api",
+            "cancel",
+            &cancel_revision,
+            BTreeMap::new(),
+            context,
+            &invoked_control,
+        )
+    });
+    thread::sleep(Duration::from_millis(100));
+    cancel_control.cancel();
+    let error = handle
+        .join()
+        .expect("cancel invocation thread")
+        .expect_err("cancelled invocation must fail");
+    assert!(error.contains("cancelled"), "error: {error}");
 }
 
 #[cfg(unix)]
@@ -367,6 +654,7 @@ export default definePlugin({
         vec![PluginAction::ViewOpen {
             view: "todos".to_string(),
             target: PluginViewTarget::CommandPalette,
+            params: json!({}),
             plugin_id: "todos".to_string(),
             revision: revision.clone(),
         }]
@@ -393,20 +681,33 @@ export default definePlugin({
     ));
 
     let first = runtime
-        .render_view("todos", "todos", &revision, test_plugin_context())
+        .render_view(
+            "todos",
+            "todos",
+            &revision,
+            json!({}),
+            test_plugin_context(),
+        )
         .expect("render empty todo view");
     assert_eq!(first.plugin_id, "todos");
     assert_eq!(first.revision, revision);
     assert!(first.actions.is_empty());
     assert_eq!(first.nodes.len(), 1);
     runtime
-        .render_view("todos", "emoji", &revision, test_plugin_context())
+        .render_view(
+            "todos",
+            "emoji",
+            &revision,
+            json!({}),
+            test_plugin_context(),
+        )
         .expect("one non-BMP character must satisfy maxLength one");
     let invalid_children = runtime
         .render_view(
             "todos",
             "invalid-children",
             &revision,
+            json!({}),
             test_plugin_context(),
         )
         .expect_err("leaf components must reject children");
@@ -417,6 +718,7 @@ export default definePlugin({
             "todos",
             "todos",
             &revision,
+            json!({}),
             PluginViewAction {
                 id: "add".to_string(),
                 control_id: "add-button".to_string(),
@@ -631,6 +933,11 @@ fn native_view_documents_reject_unknown_props_and_unsafe_shapes() {
 
 fn test_plugin_context() -> PluginContext {
     PluginContext {
+        origin: PluginOriginContext {
+            window_id: "window-test".to_string(),
+            tab_id: None,
+            pane_id: None,
+        },
         working_directory: None,
         active_command: None,
         selected_text: None,
@@ -754,6 +1061,15 @@ fn manifest_capabilities_are_explicit_and_validated() {
     let error = validated_plugin_manifest(&plugin, "capabilities")
         .expect_err("capabilities must be an array");
     assert!(error.contains("Invalid plugin.json"));
+
+    fs::write(
+        &manifest,
+        r#"{"apiVersion":1,"id":"capabilities","name":"Capabilities","unexpected":true}"#,
+    )
+    .expect("write manifest with unknown field");
+    let error = validated_plugin_manifest(&plugin, "capabilities")
+        .expect_err("unknown manifest fields must be rejected");
+    assert!(error.contains("unknown field `unexpected`"));
 }
 
 #[test]
@@ -770,6 +1086,7 @@ fn plugin_manifest_schema_tracks_runtime_capabilities() {
         .map(|capability| Value::String((*capability).to_string()))
         .collect::<Vec<_>>();
     assert_eq!(schema_capabilities, &runtime_capabilities);
+    assert_eq!(schema["additionalProperties"], Value::Bool(false));
 }
 
 #[test]
@@ -1242,6 +1559,24 @@ fn action_validation_rejects_unsafe_url_schemes() {
 }
 
 #[test]
+fn rust_action_deserialization_rejects_unknown_fields() {
+    let action_error = serde_json::from_value::<PluginAction>(json!({
+        "type": "terminal.sendText",
+        "text": "echo ready",
+        "unexpected": true
+    }))
+    .expect_err("Rust action decoding must reject unknown fields");
+    assert!(action_error.to_string().contains("unknown field"));
+
+    serde_json::from_value::<PluginTerminalTarget>(json!({
+        "windowId": "window-1",
+        "tabId": "tab-1",
+        "type": "unexpected"
+    }))
+    .expect_err("Rust terminal target decoding must reject unknown fields");
+}
+
+#[test]
 fn concurrent_refreshes_share_one_catalog_load() {
     if !bun_is_available() {
         return;
@@ -1599,11 +1934,13 @@ export default definePlugin({
         shell: "/bin/zsh".to_string(),
         runtime: PluginRuntimeKind::Tmux,
         active_tab: Some(PluginTabContext {
+            id: "tab-3".to_string(),
             index: 2,
             title: "tests".to_string(),
             pane_count: 3,
         }),
         active_pane: Some(PluginPaneContext {
+            id: "pane-2".to_string(),
             index: 1,
             kind: PluginPaneKind::Terminal,
         }),
@@ -1726,7 +2063,7 @@ export default definePlugin({
             context.clone(),
         )
         .expect_err("invalid plugin action should be reported");
-    assert!(error.contains("invalid result"));
+    assert!(error.contains("Unsupported plugin action toats"));
     let error = runtime
         .invoke(
             "hello",

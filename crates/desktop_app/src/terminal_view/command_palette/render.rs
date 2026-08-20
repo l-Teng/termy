@@ -554,7 +554,7 @@ impl TerminalView {
         let style = CommandPaletteStyle::resolve(self);
         let input_font = Font {
             family: self.ui_font_family.clone(),
-            ..Font::default()
+            ..gpui::font("")
         };
         let empty_state_message = match self.command_palette.mode() {
             CommandPaletteMode::TmuxSessions
@@ -623,7 +623,7 @@ impl TerminalView {
             )
             .flex_1()
             .h(px(list_height))
-            .track_scroll(self.command_palette.scroll_handle())
+            .track_scroll(self.command_palette.scroll_handle().clone())
             .into_any_element();
             let mut list_container = div()
                 .w_full()

@@ -4,9 +4,9 @@ Shared theme data model.
 
 ## Owner
 
-This crate owns theme structs, serialization-compatible color types, and data contracts used by config, bundled themes, docs, and embedders.
+This crate owns theme structs, serialization-compatible color types, registry data contracts, and the versioned `theme_registry.cache` representation used by config, bundled themes, docs, and embedders.
 
-Keep bundled theme values in `termy_themes` and app-specific theme loading/caching in `crates/desktop_app/`.
+Keep bundled theme values in `termy_themes`. Filesystem paths, network fetching, and app-specific cache policy stay with their callers.
 
 ## Validation
 

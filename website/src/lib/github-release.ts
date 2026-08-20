@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import { gitConfig } from './shared';
 
 const GITHUB_API = 'https://api.github.com';
@@ -23,23 +25,46 @@ export interface GitHubRelease {
   assets: GitHubReleaseAsset[];
 }
 
-interface GitHubReleaseResponse {
-  id: number;
-  name: string | null;
-  tag_name: string;
-  published_at: string;
-  prerelease: boolean;
-  html_url: string;
-  body: string | null;
-  tarball_url: string;
-  zipball_url: string;
-  assets: Array<{
-    id: number;
-    name: string;
-    size: number;
-    browser_download_url: string;
-    content_type: string;
-  }>;
+const githubReleaseResponseSchema = z.object({
+  id: z.number(),
+  name: z.string().nullable(),
+  tag_name: z.string(),
+  published_at: z.string(),
+  prerelease: z.boolean(),
+  html_url: z.string(),
+  body: z.string().nullable(),
+  tarball_url: z.string(),
+  zipball_url: z.string(),
+  assets: z.array(
+    z.object({
+      id: z.number(),
+      name: z.string(),
+      size: z.number(),
+      browser_download_url: z.string(),
+      content_type: z.string(),
+    }),
+  ),
+});
+
+const githubReleaseListResponseSchema = z.array(githubReleaseResponseSchema);
+
+type GitHubReleaseResponse = z.infer<typeof githubReleaseResponseSchema>;
+
+function parseGitHubResponse<T>(
+  schema: z.ZodType<T>,
+  data: unknown,
+  context: string,
+): T {
+  const result = schema.safeParse(data);
+  if (result.success) return result.data;
+
+  const details = result.error.issues
+    .map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.join('.') : 'response';
+      return `${path}: ${issue.message}`;
+    })
+    .join('; ');
+  throw new Error(`GitHub API returned an invalid ${context}: ${details}`);
 }
 
 function githubHeaders(): Record<string, string> {
@@ -234,7 +259,11 @@ export async function fetchGitHubReleases(): Promise<GitHubRelease[]> {
     if (!res.ok) {
       throw new Error(`GitHub API ${res.status}: ${await res.text()}`);
     }
-    const data = (await res.json()) as GitHubReleaseResponse[];
+    const data = parseGitHubResponse(
+      githubReleaseListResponseSchema,
+      await res.json(),
+      'release list response',
+    );
     return data
       .filter((release) => isDesktopReleaseTag(release.tag_name))
       .map(mapGitHubRelease);
@@ -268,7 +297,13 @@ export async function fetchGitHubReleaseByTag(
   if (!res.ok) {
     throw new Error(`GitHub API ${res.status}: ${await res.text()}`);
   }
-  return mapGitHubRelease((await res.json()) as GitHubReleaseResponse);
+  return mapGitHubRelease(
+    parseGitHubResponse(
+      githubReleaseResponseSchema,
+      await res.json(),
+      `release response for tag ${tag}`,
+    ),
+  );
 }
 
 export async function fetchLatestGitHubRelease(): Promise<GitHubRelease> {
@@ -283,7 +318,11 @@ export async function fetchLatestGitHubRelease(): Promise<GitHubRelease> {
     throw new Error(`GitHub API ${res.status}: ${await res.text()}`);
   }
 
-  const data = (await res.json()) as GitHubReleaseResponse;
+  const data = parseGitHubResponse(
+    githubReleaseResponseSchema,
+    await res.json(),
+    'latest release response',
+  );
 
   return mapGitHubRelease(data);
 }

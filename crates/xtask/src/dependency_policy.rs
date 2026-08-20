@@ -25,6 +25,7 @@ const ALLOWED_LICENSES: &[&str] = &[
     "BSD-3-Clause OR Apache-2.0",
     "BSD-3-Clause OR MIT OR Apache-2.0",
     "BSD-3-Clause",
+    "bzip2-1.0.6",
     "CC0-1.0 OR Apache-2.0",
     "CC0-1.0 OR MIT-0 OR Apache-2.0",
     "CC0-1.0",
@@ -48,29 +49,7 @@ const ALLOWED_LICENSES: &[&str] = &[
     "Zlib",
 ];
 
-const REVIEWED_LICENSE_EXCEPTIONS: &[LicenseException] = &[
-    LicenseException {
-        name: "zlog",
-        version: "0.1.0",
-        license: "GPL-3.0-or-later",
-        source_contains: "github.com/zed-industries/zed?rev=c8656ac9",
-        reason: "pinned GPUI transitive crate; review on GPUI revision updates",
-    },
-    LicenseException {
-        name: "ztracing",
-        version: "0.1.0",
-        license: "GPL-3.0-or-later",
-        source_contains: "github.com/zed-industries/zed?rev=c8656ac9",
-        reason: "pinned GPUI transitive crate; review on GPUI revision updates",
-    },
-    LicenseException {
-        name: "ztracing_macro",
-        version: "0.1.0",
-        license: "GPL-3.0-or-later",
-        source_contains: "github.com/zed-industries/zed?rev=c8656ac9",
-        reason: "pinned GPUI transitive crate; review on GPUI revision updates",
-    },
-];
+const REVIEWED_LICENSE_EXCEPTIONS: &[LicenseException] = &[];
 
 pub fn run() -> Result<()> {
     let metadata = cargo_metadata()?;
@@ -255,21 +234,6 @@ mod tests {
         assert!(matches!(
             dependency_license_decision(&package),
             LicenseDecision::Denied(_)
-        ));
-    }
-
-    #[test]
-    fn dependency_policy_keeps_gpui_exceptions_pinned_to_source() {
-        let package = package(
-            "ztracing",
-            "0.1.0",
-            Some("GPL-3.0-or-later"),
-            "git+https://github.com/zed-industries/zed?rev=c8656ac9#c8656ac9",
-        );
-
-        assert!(matches!(
-            dependency_license_decision(&package),
-            LicenseDecision::ReviewedException(_)
         ));
     }
 

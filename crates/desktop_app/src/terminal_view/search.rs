@@ -381,7 +381,7 @@ impl TerminalView {
                                 self.render_inline_input_layer(
                                     Font {
                                         family: self.ui_font_family.clone(),
-                                        ..Font::default()
+                                        ..gpui::font("")
                                     },
                                     px(13.0),
                                     strong_text.into(),

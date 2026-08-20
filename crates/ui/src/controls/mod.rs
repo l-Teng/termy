@@ -6,21 +6,17 @@
 
 mod button;
 mod segmented;
-mod select;
 mod shortcut;
 mod slider;
 mod stepper;
-mod switch;
-mod text_field;
+mod theme_switch;
 
-pub use button::{Button, ButtonSize, ButtonVariant, IconButton};
+pub use button::IconButton;
 pub use segmented::SegmentedControl;
-pub use select::{Select, SelectItem, SelectMenu};
 pub use shortcut::{KeyChip, Platform, ShortcutBox, ShortcutState, format_binding};
 pub use slider::Slider;
 pub use stepper::Stepper;
-pub use switch::Switch;
-pub use text_field::TextField;
+pub use theme_switch::ThemeSwitch;
 
 use gpui::{App, ClickEvent, Window};
 

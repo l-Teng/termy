@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 
 use crate::unicode_width::character_width;
 
-const MAX_GRID_DIMENSION: u16 = 4096;
+pub(crate) const MAX_GRID_DIMENSION: u16 = 4096;
 const MAX_SCROLLBACK_LINES: usize = 1_000_000;
 const KITTY_KEYBOARD_STACK_MAX_DEPTH: usize = 4096;
 const HYPERLINK_PRUNE_MIN_LEN: usize = 4096;

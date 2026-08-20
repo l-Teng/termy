@@ -34,7 +34,7 @@ pushes to `main` and manual dispatches.
 
 ## Forbidden Dependencies
 
-- `gpui` / `gpui_platform`
+- `gpui`
 - `termy_core`
 - `termy_terminal_ui`
 - `termy_ui`

@@ -31,7 +31,7 @@ impl TerminalView {
             font: Font {
                 family: font_family.clone(),
                 weight: FontWeight::NORMAL,
-                ..Default::default()
+                ..gpui::font("")
             },
             color: Hsla {
                 h: 0.0,

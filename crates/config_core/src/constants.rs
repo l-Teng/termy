@@ -1,5 +1,3 @@
-use crate::schema::ROOT_SETTING_ALL_KEYS;
-
 pub(crate) const DEFAULT_TAB_TITLE_FALLBACK: &str = "Terminal";
 pub(crate) const DEFAULT_TAB_TITLE_EXPLICIT_PREFIX: &str = "termy:tab:";
 pub(crate) const DEFAULT_TAB_TITLE_PROMPT_FORMAT: &str = "{cwd}";
@@ -47,8 +45,6 @@ pub(crate) const MAX_MOUSE_SCROLL_MULTIPLIER: f32 = 1_000.0;
 pub(crate) const DEFAULT_CURSOR_BLINK: bool = true;
 pub(crate) const DEFAULT_WARN_ON_QUIT: bool = false;
 pub(crate) const DEFAULT_WARN_ON_QUIT_WITH_RUNNING_PROCESS: bool = true;
-
-pub const VALID_ROOT_KEYS: &[&str] = ROOT_SETTING_ALL_KEYS;
 
 pub const VALID_SECTIONS: &[&str] = &["colors", "tab_title"];
 

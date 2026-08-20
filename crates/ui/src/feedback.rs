@@ -1,87 +1,12 @@
-//! Status surfaces: badges, banners, toasts, and empty states.
+//! Termy-specific status surfaces: banners, toasts, and empty states.
 
 use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px,
 };
 
 use crate::icon::{Icon, IconName};
-use crate::metrics::{
-    BADGE_HEIGHT, BADGE_PADDING_X, BADGE_RADIUS, BADGE_SIZE, BODY_SIZE, CARD_RADIUS,
-    LABEL_LINE_HEIGHT, LABEL_SIZE,
-};
+use crate::metrics::{BODY_SIZE, CARD_RADIUS, LABEL_LINE_HEIGHT, LABEL_SIZE};
 use crate::theme::{Tone, tokens};
-
-/// Small state label: `SAVED`, `ENABLED`, `INVALID`, or a live status pill.
-#[derive(IntoElement)]
-pub struct Badge {
-    label: SharedString,
-    tone: Tone,
-    dot: bool,
-}
-
-impl Badge {
-    pub fn new(label: impl Into<SharedString>) -> Self {
-        Self {
-            label: label.into(),
-            tone: Tone::Accent,
-            dot: false,
-        }
-    }
-
-    pub fn tone(mut self, tone: Tone) -> Self {
-        self.tone = tone;
-        self
-    }
-
-    /// Grows the badge into a status pill with a leading dot — used for live
-    /// runtime state such as the plugin runtime's `Ready`.
-    pub fn dot(mut self) -> Self {
-        self.dot = true;
-        self
-    }
-}
-
-impl RenderOnce for Badge {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = tokens(cx);
-        let color = theme.tone_color(self.tone);
-        let background = match self.tone {
-            Tone::Accent => theme.accent_soft,
-            Tone::Neutral => theme.bg_input,
-            tone => theme.status_surface(tone),
-        };
-        let label_color = if self.tone == Tone::Neutral {
-            theme.text_muted
-        } else {
-            color
-        };
-
-        let mut badge = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(6.0))
-            .bg(background)
-            .text_color(label_color);
-
-        if self.dot {
-            badge = badge
-                .h(px(22.0))
-                .px(px(9.0))
-                .rounded(px(11.0))
-                .text_size(LABEL_SIZE)
-                .child(div().size(px(6.0)).flex_none().rounded_full().bg(color));
-        } else {
-            badge = badge
-                .h(BADGE_HEIGHT)
-                .px(BADGE_PADDING_X)
-                .rounded(BADGE_RADIUS)
-                .text_size(BADGE_SIZE);
-        }
-
-        badge.child(self.label)
-    }
-}
 
 /// A wide status block above the content — runtime health, a failed registry
 /// sync, a cached-data warning.

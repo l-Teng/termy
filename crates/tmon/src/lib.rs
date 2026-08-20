@@ -14,6 +14,7 @@ mod pty;
 #[cfg(target_os = "windows")]
 #[path = "pty_windows.rs"]
 mod pty;
+mod pty_limits;
 mod terminal_read;
 mod unicode_width;
 
@@ -43,13 +44,12 @@ pub use grid::{
 };
 pub use parser::{Progress, QueryColors};
 
-use grid::{Grid, LinkCandidate};
+use grid::{Grid, LinkCandidate, MAX_GRID_DIMENSION};
 use parser::{ParsedEvent, Parser};
+use pty_limits::MAX_PROTOCOL_REPLY_BACKLOG_BYTES as MAX_BUFFERED_PROTOCOL_REPLY_BYTES;
 
 const MAX_DRAIN_EVENTS: usize = 2048;
 const MAX_QUEUED_EVENTS: usize = 8192;
-const MAX_BUFFERED_PROTOCOL_REPLY_BYTES: usize = 2 * 1024 * 1024;
-const MAX_GRID_DIMENSION: u16 = 4096;
 const SYNC_WATCHDOG_DELAY: Duration = Duration::from_millis(175);
 
 type ProtocolReplySink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;

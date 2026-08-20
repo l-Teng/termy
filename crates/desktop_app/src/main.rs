@@ -30,8 +30,8 @@ use commands::{OpenConfig, OpenSettings};
 use deeplink::{DeepLinkArgument, DeepLinkRoute};
 use flume::Receiver;
 use gpui::{
-    App, AsyncApp, Bounds, Pixels, WindowBounds, WindowHandle, WindowKind, WindowOptions,
-    prelude::*, px, size,
+    App, Application, AsyncApp, Bounds, Pixels, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions, prelude::*, px, size,
 };
 use startup::StartupBlocker;
 use terminal_view::{TerminalView, initial_window_background_appearance};
@@ -270,7 +270,7 @@ fn open_main_window(
                         let native_drop_view = view.downgrade();
                         cx.spawn(async move |cx: &mut AsyncApp| {
                             while let Ok(result) = native_drop_rx.recv_async().await {
-                                cx.update(|cx| {
+                                let _ = cx.update(|cx| {
                                     let _ = native_drop_view.update(cx, |view, cx| {
                                         view.handle_native_file_drop_result(result, cx);
                                     });
@@ -390,7 +390,7 @@ fn start_theme_install_from_deeplink(cx: &mut App, slug: String) {
                     .await;
                 crate::ui::toast::dismiss_toast(install_loading_id);
 
-                cx.update(|cx| match install_result {
+                let _ = cx.update(|cx| match install_result {
                     Ok(installed_theme) => {
                         crate::ui::toast::success(installed_theme.message.clone());
                         app_actions::update_open_settings_windows(cx, |view, settings_cx| {
@@ -483,7 +483,7 @@ fn handle_open_urls(cx: &mut App, urls: &[String]) {
 fn spawn_deeplink_listener(cx: &mut App, deeplink_rx: Receiver<Vec<String>>) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         while let Ok(urls) = deeplink_rx.recv_async().await {
-            cx.update(|cx| handle_open_urls(cx, &urls));
+            let _ = cx.update(|cx| handle_open_urls(cx, &urls));
         }
     })
     .detach();
@@ -504,7 +504,7 @@ fn main() {
 
     let startup_arguments = parse_startup_arguments(cli_args);
     let (deeplink_tx, deeplink_rx) = flume::unbounded::<Vec<String>>();
-    let application = gpui_platform::application().with_assets(crate::asset_source::EmbeddedAssets);
+    let application = Application::new().with_assets(crate::asset_source::EmbeddedAssets);
 
     if !startup_arguments.deeplinks.is_empty()
         && let Err(error) = deeplink_tx.send(startup_arguments.deeplinks.clone())
@@ -522,6 +522,10 @@ fn main() {
     });
 
     application.run(move |cx: &mut App| {
+        termy_ui::init_glassy(cx);
+        if let Err(error) = termy_ui::load_fonts(cx) {
+            log::warn!("Failed to load Glassy UI assets: {error}");
+        }
         spawn_deeplink_listener(cx, deeplink_rx);
 
         cx.on_action(|_: &OpenConfig, _cx| {

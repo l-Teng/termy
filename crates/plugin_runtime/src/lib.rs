@@ -25,7 +25,8 @@ mod context;
 mod events;
 
 pub use context::{
-    PluginContext, PluginPaneContext, PluginPaneKind, PluginRuntimeKind, PluginTabContext,
+    PluginContext, PluginOriginContext, PluginPaneContext, PluginPaneKind, PluginRuntimeKind,
+    PluginTabContext,
 };
 pub use events::{PluginEvent, PluginEventDispatch, PluginEventKind};
 use events::{PluginEventSubscriptionDescriptor, RegisteredPluginEvent};
@@ -49,6 +50,9 @@ const MAX_VIEW_NODES: usize = 256;
 const MAX_VIEW_DEPTH: usize = 16;
 const MAX_VIEW_CHILDREN: usize = 64;
 const MAX_VIEW_VALUES: usize = 64;
+const MAX_VIEW_PARAMS_BYTES: usize = 64 * 1024;
+const MAX_LAUNCH_ARGS: usize = 128;
+const MAX_LAUNCH_TEXT_LENGTH: usize = 4_096;
 const PLUGIN_CAPABILITIES: [&str; 2] = ["storage", "native-ui"];
 pub const MAX_INSTALLED_PLUGINS: usize = 32;
 pub const MAX_PLUGIN_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
@@ -259,8 +263,35 @@ pub struct PluginCommand {
     pub icon: PluginIcon,
     #[serde(default)]
     pub inputs: Vec<PluginInput>,
+    #[serde(default)]
+    pub when: PluginCommandWhen,
     #[serde(default = "default_invoke_timeout_ms")]
     pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginCommandWhen {
+    #[serde(default)]
+    pub has_selection: Option<bool>,
+    #[serde(default)]
+    pub has_working_directory: Option<bool>,
+    #[serde(default)]
+    pub runtimes: Vec<PluginRuntimeKind>,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+}
+
+impl PluginCommandWhen {
+    pub fn matches(&self, context: &PluginContext) -> bool {
+        self.has_selection
+            .is_none_or(|required| context.selected_text.is_some() == required)
+            && self
+                .has_working_directory
+                .is_none_or(|required| context.working_directory.is_some() == required)
+            && (self.runtimes.is_empty() || self.runtimes.contains(&context.runtime))
+            && (self.platforms.is_empty() || self.platforms.contains(&context.platform))
+    }
 }
 
 impl PluginCommand {
@@ -321,6 +352,16 @@ pub enum PluginInput {
         required: bool,
         options: Vec<PluginSelectOption>,
     },
+    Pick {
+        id: String,
+        label: String,
+        #[serde(default)]
+        placeholder: Option<String>,
+        #[serde(default, rename = "defaultValue")]
+        default_value: Option<String>,
+        #[serde(default)]
+        required: bool,
+    },
     Confirm {
         id: String,
         label: String,
@@ -332,23 +373,27 @@ pub enum PluginInput {
 impl PluginInput {
     pub fn id(&self) -> &str {
         match self {
-            Self::Text { id, .. } | Self::Select { id, .. } | Self::Confirm { id, .. } => id,
+            Self::Text { id, .. }
+            | Self::Select { id, .. }
+            | Self::Pick { id, .. }
+            | Self::Confirm { id, .. } => id,
         }
     }
 
     pub fn label(&self) -> &str {
         match self {
-            Self::Text { label, .. } | Self::Select { label, .. } | Self::Confirm { label, .. } => {
-                label
-            }
+            Self::Text { label, .. }
+            | Self::Select { label, .. }
+            | Self::Pick { label, .. }
+            | Self::Confirm { label, .. } => label,
         }
     }
 
     pub fn placeholder(&self) -> Option<&str> {
         match self {
-            Self::Text { placeholder, .. } | Self::Select { placeholder, .. } => {
-                placeholder.as_deref()
-            }
+            Self::Text { placeholder, .. }
+            | Self::Select { placeholder, .. }
+            | Self::Pick { placeholder, .. } => placeholder.as_deref(),
             Self::Confirm { .. } => None,
         }
     }
@@ -366,13 +411,85 @@ pub struct PluginSelectOption {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(tag = "type")]
+#[serde(untagged, deny_unknown_fields)]
+pub enum PluginTerminalTarget {
+    Named(PluginTerminalTargetKind),
+    Exact {
+        #[serde(rename = "windowId")]
+        window_id: String,
+        #[serde(default, rename = "tabId")]
+        tab_id: Option<String>,
+        #[serde(default, rename = "paneId")]
+        pane_id: Option<String>,
+    },
+}
+
+impl Default for PluginTerminalTarget {
+    fn default() -> Self {
+        Self::Named(PluginTerminalTargetKind::Origin)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginTerminalTargetKind {
+    #[default]
+    Origin,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginTerminalOpenLocation {
+    #[default]
+    Tab,
+    SplitRight,
+    SplitDown,
+    Window,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum PluginTerminalLaunch {
+    Shell {
+        command: String,
+    },
+    Program {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum PluginAction {
     #[serde(rename = "terminal.run")]
     TerminalRun {
         command: String,
         #[serde(default, rename = "workingDirectory")]
         working_directory: Option<String>,
+    },
+    #[serde(rename = "terminal.sendText")]
+    TerminalSendText {
+        text: String,
+        #[serde(default)]
+        submit: bool,
+        #[serde(default)]
+        target: PluginTerminalTarget,
+    },
+    #[serde(rename = "terminal.open")]
+    TerminalOpen {
+        #[serde(default)]
+        location: PluginTerminalOpenLocation,
+        #[serde(default, rename = "workingDirectory")]
+        working_directory: Option<String>,
+        #[serde(default)]
+        launch: Option<PluginTerminalLaunch>,
+        #[serde(default)]
+        target: PluginTerminalTarget,
+        #[serde(default = "default_true")]
+        focus: bool,
     },
     #[serde(rename = "termy.command")]
     TermyCommand { command: String },
@@ -390,6 +507,25 @@ pub enum PluginAction {
         view: String,
         #[serde(default)]
         target: PluginViewTarget,
+        #[serde(default = "default_view_params")]
+        params: Value,
+        #[serde(skip)]
+        plugin_id: String,
+        #[serde(skip)]
+        revision: String,
+    },
+    #[serde(rename = "view.replace")]
+    ViewReplace {
+        view: String,
+        #[serde(default = "default_view_params")]
+        params: Value,
+        #[serde(skip)]
+        plugin_id: String,
+        #[serde(skip)]
+        revision: String,
+    },
+    #[serde(rename = "view.close")]
+    ViewClose {
         #[serde(skip)]
         plugin_id: String,
         #[serde(skip)]
@@ -515,6 +651,79 @@ pub enum PluginUiNode {
         #[serde(default)]
         disabled: bool,
     },
+    TextArea {
+        id: String,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        placeholder: Option<String>,
+        #[serde(default)]
+        value: String,
+        #[serde(default = "default_text_max_length", rename = "maxLength")]
+        max_length: usize,
+        #[serde(default = "default_text_area_rows")]
+        rows: usize,
+        #[serde(default)]
+        submit: Option<String>,
+        #[serde(default)]
+        disabled: bool,
+    },
+    Select {
+        id: String,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        placeholder: Option<String>,
+        #[serde(default)]
+        value: String,
+        options: Vec<PluginSelectOption>,
+        #[serde(default)]
+        action: Option<String>,
+        #[serde(default)]
+        disabled: bool,
+    },
+    List {
+        id: String,
+        #[serde(default)]
+        action: Option<String>,
+        #[serde(default, rename = "selectedId")]
+        selected_id: Option<String>,
+        #[serde(default, rename = "searchPlaceholder")]
+        search_placeholder: Option<String>,
+        #[serde(default = "default_true")]
+        filtering: bool,
+        #[serde(default, rename = "isLoading")]
+        is_loading: bool,
+        #[serde(default)]
+        children: Vec<PluginUiNode>,
+    },
+    ListItem {
+        id: String,
+        title: String,
+        #[serde(default)]
+        subtitle: Option<String>,
+        #[serde(default)]
+        keywords: Vec<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        payload: Option<String>,
+        #[serde(default)]
+        action: Option<String>,
+        #[serde(default)]
+        disabled: bool,
+    },
+    EmptyState {
+        title: String,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    Progress {
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        value: Option<u8>,
+    },
     Button {
         id: String,
         action: String,
@@ -547,9 +756,16 @@ pub enum PluginUiNode {
 impl PluginUiNode {
     pub fn children(&self) -> &[PluginUiNode] {
         match self {
-            Self::Column { children, .. } | Self::Row { children, .. } => children,
+            Self::Column { children, .. }
+            | Self::Row { children, .. }
+            | Self::List { children, .. } => children,
             Self::Text { .. }
             | Self::TextInput { .. }
+            | Self::TextArea { .. }
+            | Self::Select { .. }
+            | Self::ListItem { .. }
+            | Self::EmptyState { .. }
+            | Self::Progress { .. }
             | Self::Button { .. }
             | Self::Checkbox { .. }
             | Self::Divider
@@ -580,8 +796,51 @@ pub struct PluginViewAction {
 pub struct PluginViewRender {
     pub plugin_id: String,
     pub revision: String,
+    pub params: Value,
     pub nodes: Vec<PluginUiNode>,
     pub actions: Vec<PluginAction>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginProgress {
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub percentage: Option<u8>,
+}
+
+#[derive(Clone, Default)]
+pub struct PluginInvocationControl {
+    cancelled: Arc<AtomicBool>,
+    progress: Option<Arc<dyn Fn(PluginProgress) + Send + Sync>>,
+}
+
+impl PluginInvocationControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_progress_handler(handler: impl Fn(PluginProgress) + Send + Sync + 'static) -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            progress: Some(Arc::new(handler)),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn report(&self, progress: PluginProgress) {
+        if let Some(handler) = &self.progress {
+            handler(progress);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -593,8 +852,10 @@ struct PluginSource {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PluginManifestFile {
+    #[serde(default, rename = "$schema")]
+    _schema: Option<String>,
     api_version: u32,
     id: String,
     name: String,
@@ -625,6 +886,19 @@ enum HostRequest<'a> {
         inputs: &'a BTreeMap<String, Value>,
         context: &'a PluginContext,
     },
+    #[serde(rename = "input.options")]
+    InputOptions {
+        id: u64,
+        #[serde(rename = "pluginId")]
+        plugin_id: &'a str,
+        #[serde(rename = "commandId")]
+        command_id: &'a str,
+        #[serde(rename = "inputId")]
+        input_id: &'a str,
+        revision: &'a str,
+        query: &'a str,
+        context: &'a PluginContext,
+    },
     Event {
         id: u64,
         #[serde(rename = "pluginId")]
@@ -641,6 +915,7 @@ enum HostRequest<'a> {
         #[serde(rename = "viewId")]
         view_id: &'a str,
         revision: &'a str,
+        params: &'a Value,
         context: &'a PluginContext,
     },
     #[serde(rename = "view.action")]
@@ -651,9 +926,15 @@ enum HostRequest<'a> {
         #[serde(rename = "viewId")]
         view_id: &'a str,
         revision: &'a str,
+        params: &'a Value,
         action: &'a PluginViewAction,
         values: &'a BTreeMap<String, PluginViewValue>,
         context: &'a PluginContext,
+    },
+    Cancel {
+        id: u64,
+        #[serde(rename = "requestId")]
+        request_id: u64,
     },
 }
 
@@ -662,9 +943,11 @@ impl HostRequest<'_> {
         match self {
             Self::Load { id, .. }
             | Self::Invoke { id, .. }
+            | Self::InputOptions { id, .. }
             | Self::Event { id, .. }
             | Self::ViewRender { id, .. }
-            | Self::ViewAction { id, .. } => *id,
+            | Self::ViewAction { id, .. }
+            | Self::Cancel { id, .. } => *id,
         }
     }
 }
@@ -672,6 +955,9 @@ impl HostRequest<'_> {
 #[derive(Deserialize)]
 struct HostResponse {
     id: u64,
+    #[serde(default)]
+    progress: Option<PluginProgress>,
+    #[serde(default)]
     ok: bool,
     #[serde(default)]
     result: Option<Value>,
@@ -701,6 +987,20 @@ struct HostLoadedPlugin {
 struct HostInvokeResult {
     #[serde(default)]
     actions: Vec<PluginAction>,
+}
+
+struct ActionRequestContext<'a> {
+    plugin_id: &'a str,
+    revision: &'a str,
+    lifecycle_generation: u64,
+    origin: &'a PluginOriginContext,
+    control: Option<&'a PluginInvocationControl>,
+}
+
+#[derive(Deserialize)]
+struct HostPickResult {
+    #[serde(default)]
+    options: Vec<PluginSelectOption>,
 }
 
 #[derive(Deserialize)]
@@ -1548,7 +1848,7 @@ impl PluginRuntime {
             id: request_id,
             plugins: &discovered.sources,
         };
-        let load_result = match connection.request::<HostLoadResult>(&request, LOAD_TIMEOUT) {
+        let load_result = match connection.request::<HostLoadResult>(&request, LOAD_TIMEOUT, None) {
             Ok(result) => result,
             Err(error) => {
                 if matches!(error, HostRequestError::Transport(_)) {
@@ -1726,7 +2026,45 @@ impl PluginRuntime {
         command_id: &str,
         expected_revision: &str,
         inputs: BTreeMap<String, Value>,
+        context: PluginContext,
+    ) -> Result<Vec<PluginAction>, String> {
+        self.invoke_inner(
+            plugin_id,
+            command_id,
+            expected_revision,
+            inputs,
+            context,
+            None,
+        )
+    }
+
+    pub fn invoke_with_control(
+        &self,
+        plugin_id: &str,
+        command_id: &str,
+        expected_revision: &str,
+        inputs: BTreeMap<String, Value>,
+        context: PluginContext,
+        control: &PluginInvocationControl,
+    ) -> Result<Vec<PluginAction>, String> {
+        self.invoke_inner(
+            plugin_id,
+            command_id,
+            expected_revision,
+            inputs,
+            context,
+            Some(control),
+        )
+    }
+
+    fn invoke_inner(
+        &self,
+        plugin_id: &str,
+        command_id: &str,
+        expected_revision: &str,
+        inputs: BTreeMap<String, Value>,
         mut context: PluginContext,
+        control: Option<&PluginInvocationControl>,
     ) -> Result<Vec<PluginAction>, String> {
         let (command, current_revision) = self
             .command_with_revision(plugin_id, command_id)
@@ -1753,10 +2091,62 @@ impl PluginRuntime {
             &connection,
             &request,
             timeout_ms,
-            plugin_id,
-            expected_revision,
-            lifecycle_generation,
+            ActionRequestContext {
+                plugin_id,
+                revision: expected_revision,
+                lifecycle_generation,
+                origin: &context.origin,
+                control,
+            },
         )
+    }
+
+    pub fn resolve_pick_options(
+        &self,
+        plugin_id: &str,
+        command_id: &str,
+        input_id: &str,
+        expected_revision: &str,
+        query: &str,
+        mut context: PluginContext,
+    ) -> Result<Vec<PluginSelectOption>, String> {
+        let (command, current_revision) = self
+            .command_with_revision(plugin_id, command_id)
+            .ok_or_else(|| format!("Plugin command {plugin_id}.{command_id} is not available"))?;
+        if current_revision != expected_revision {
+            return Err(
+                "Plugin changed while its picker was open; run the command again".to_string(),
+            );
+        }
+        if !command
+            .inputs
+            .iter()
+            .any(|input| matches!(input, PluginInput::Pick { id, .. } if id == input_id))
+        {
+            return Err(format!(
+                "Plugin command {plugin_id}.{command_id} has no async picker `{input_id}`"
+            ));
+        }
+        validate_optional_text(query, 1_024, "picker query")?;
+        context.settings = self.resolved_plugin_settings(plugin_id)?;
+        let timeout_ms = command.timeout_ms.clamp(100, MAX_INVOKE_TIMEOUT_MS);
+        let lifecycle_generation = self.plugin_lifecycle_generation(plugin_id);
+        let (request_id, connection) = self.next_host_request()?;
+        let request = HostRequest::InputOptions {
+            id: request_id,
+            plugin_id,
+            command_id,
+            input_id,
+            revision: expected_revision,
+            query,
+            context: &context,
+        };
+        let result =
+            self.request_host::<HostPickResult>(&connection, &request, timeout_ms, None)?;
+        self.ensure_plugin_lifecycle(plugin_id, lifecycle_generation)?;
+        self.ensure_command_revision(plugin_id, command_id, expected_revision)?;
+        validate_select_options(&result.options, "picker")?;
+        Ok(result.options)
     }
 
     pub fn render_view(
@@ -1764,6 +2154,7 @@ impl PluginRuntime {
         plugin_id: &str,
         view_id: &str,
         expected_revision: &str,
+        params: Value,
         mut context: PluginContext,
     ) -> Result<PluginViewRender, String> {
         let (view, current_revision) = self
@@ -1773,6 +2164,7 @@ impl PluginRuntime {
             return Err("Plugin changed while its view was open; reopen the view".to_string());
         }
         context.settings = self.resolved_plugin_settings(plugin_id)?;
+        validate_view_params(&params)?;
         let timeout_ms = view.timeout_ms.clamp(100, MAX_INVOKE_TIMEOUT_MS);
         let lifecycle_generation = self.plugin_lifecycle_generation(plugin_id);
         let (request_id, connection) = self.next_host_request()?;
@@ -1781,13 +2173,20 @@ impl PluginRuntime {
             plugin_id,
             view_id,
             revision: expected_revision,
+            params: &params,
             context: &context,
         };
         let result =
-            self.request_host::<HostViewRenderResult>(&connection, &request, timeout_ms)?;
+            self.request_host::<HostViewRenderResult>(&connection, &request, timeout_ms, None)?;
         self.ensure_plugin_lifecycle(plugin_id, lifecycle_generation)?;
         self.ensure_view_revision(plugin_id, view_id, expected_revision)?;
-        self.prepare_view_render(result, plugin_id, expected_revision)
+        self.prepare_view_render(
+            result,
+            plugin_id,
+            expected_revision,
+            params,
+            &context.origin,
+        )
     }
 
     pub fn invoke_view_action(
@@ -1795,6 +2194,7 @@ impl PluginRuntime {
         plugin_id: &str,
         view_id: &str,
         expected_revision: &str,
+        params: Value,
         action: PluginViewAction,
         values: BTreeMap<String, PluginViewValue>,
         mut context: PluginContext,
@@ -1806,6 +2206,7 @@ impl PluginRuntime {
             return Err("Plugin changed while its view was open; reopen the view".to_string());
         }
         validate_view_action(&action, &values)?;
+        validate_view_params(&params)?;
         context.settings = self.resolved_plugin_settings(plugin_id)?;
         let timeout_ms = view.timeout_ms.clamp(100, MAX_INVOKE_TIMEOUT_MS);
         let lifecycle_generation = self.plugin_lifecycle_generation(plugin_id);
@@ -1815,15 +2216,22 @@ impl PluginRuntime {
             plugin_id,
             view_id,
             revision: expected_revision,
+            params: &params,
             action: &action,
             values: &values,
             context: &context,
         };
         let result =
-            self.request_host::<HostViewRenderResult>(&connection, &request, timeout_ms)?;
+            self.request_host::<HostViewRenderResult>(&connection, &request, timeout_ms, None)?;
         self.ensure_plugin_lifecycle(plugin_id, lifecycle_generation)?;
         self.ensure_view_revision(plugin_id, view_id, expected_revision)?;
-        self.prepare_view_render(result, plugin_id, expected_revision)
+        self.prepare_view_render(
+            result,
+            plugin_id,
+            expected_revision,
+            params,
+            &context.origin,
+        )
     }
 
     pub fn has_event_subscribers(&self, event: PluginEventKind) -> bool {
@@ -1905,9 +2313,13 @@ impl PluginRuntime {
             &connection,
             &request,
             subscription.timeout_ms,
-            &subscription.plugin_id,
-            &subscription.revision,
-            lifecycle_generation,
+            ActionRequestContext {
+                plugin_id: &subscription.plugin_id,
+                revision: &subscription.revision,
+                lifecycle_generation,
+                origin: &context.origin,
+                control: None,
+            },
         )
     }
 
@@ -1948,14 +2360,21 @@ impl PluginRuntime {
         connection: &Arc<HostConnection>,
         request: &HostRequest<'_>,
         timeout_ms: u64,
-        plugin_id: &str,
-        revision: &str,
-        lifecycle_generation: u64,
+        context: ActionRequestContext<'_>,
     ) -> Result<Vec<PluginAction>, String> {
-        let invoke_result =
-            self.request_host::<HostInvokeResult>(connection, request, timeout_ms)?;
-        self.ensure_plugin_lifecycle(plugin_id, lifecycle_generation)?;
-        self.prepare_actions(invoke_result.actions, plugin_id, revision)
+        let invoke_result = self.request_host::<HostInvokeResult>(
+            connection,
+            request,
+            timeout_ms,
+            context.control,
+        )?;
+        self.ensure_plugin_lifecycle(context.plugin_id, context.lifecycle_generation)?;
+        self.prepare_actions(
+            invoke_result.actions,
+            context.plugin_id,
+            context.revision,
+            context.origin,
+        )
     }
 
     fn request_host<T: DeserializeOwned>(
@@ -1963,13 +2382,14 @@ impl PluginRuntime {
         connection: &Arc<HostConnection>,
         request: &HostRequest<'_>,
         timeout_ms: u64,
+        control: Option<&PluginInvocationControl>,
     ) -> Result<T, String> {
         let timeout = Duration::from_millis(
             timeout_ms
                 .saturating_add(MAX_INVOKE_QUEUE_WAIT_MS)
                 .saturating_add(1_000),
         );
-        let result = match connection.request::<T>(request, timeout) {
+        let result = match connection.request::<T>(request, timeout, control) {
             Ok(result) => result,
             Err(error) => {
                 if matches!(error, HostRequestError::Transport(_)) {
@@ -2004,12 +2424,15 @@ impl PluginRuntime {
         result: HostViewRenderResult,
         plugin_id: &str,
         revision: &str,
+        params: Value,
+        origin: &PluginOriginContext,
     ) -> Result<PluginViewRender, String> {
         validate_view_nodes(&result.nodes)?;
-        let actions = self.prepare_actions(result.actions, plugin_id, revision)?;
+        let actions = self.prepare_actions(result.actions, plugin_id, revision, origin)?;
         Ok(PluginViewRender {
             plugin_id: plugin_id.to_string(),
             revision: revision.to_string(),
+            params,
             nodes: result.nodes,
             actions,
         })
@@ -2032,31 +2455,82 @@ impl PluginRuntime {
         Ok(())
     }
 
+    fn ensure_command_revision(
+        &self,
+        plugin_id: &str,
+        command_id: &str,
+        expected_revision: &str,
+    ) -> Result<(), String> {
+        let (_, current_revision) = self
+            .command_with_revision(plugin_id, command_id)
+            .ok_or_else(|| {
+                format!("Plugin command {plugin_id}.{command_id} is no longer available")
+            })?;
+        if current_revision != expected_revision {
+            return Err(
+                "Plugin changed while its picker request was running; run the command again"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     fn prepare_actions(
         &self,
         mut actions: Vec<PluginAction>,
         plugin_id: &str,
         revision: &str,
+        origin: &PluginOriginContext,
     ) -> Result<Vec<PluginAction>, String> {
         validate_actions(&actions)?;
         for action in &mut actions {
-            let PluginAction::ViewOpen {
-                view,
-                plugin_id: origin_plugin_id,
-                revision: origin_revision,
-                ..
-            } = action
-            else {
-                continue;
-            };
-            let Some((_, current_revision)) = self.view_with_revision(plugin_id, view) else {
-                return Err(format!("Plugin returned unknown view `{view}`"));
-            };
-            if current_revision != revision {
-                return Err("Plugin changed while returning a view action; try again".to_string());
+            match action {
+                PluginAction::TerminalSendText { target, .. }
+                | PluginAction::TerminalOpen { target, .. } => {
+                    if matches!(
+                        target,
+                        PluginTerminalTarget::Named(PluginTerminalTargetKind::Origin)
+                    ) {
+                        *target = PluginTerminalTarget::Exact {
+                            window_id: origin.window_id.clone(),
+                            tab_id: origin.tab_id.clone(),
+                            pane_id: origin.pane_id.clone(),
+                        };
+                    }
+                }
+                PluginAction::ViewOpen {
+                    view,
+                    plugin_id: origin_plugin_id,
+                    revision: origin_revision,
+                    ..
+                }
+                | PluginAction::ViewReplace {
+                    view,
+                    plugin_id: origin_plugin_id,
+                    revision: origin_revision,
+                    ..
+                } => {
+                    let Some((_, current_revision)) = self.view_with_revision(plugin_id, view)
+                    else {
+                        return Err(format!("Plugin returned unknown view `{view}`"));
+                    };
+                    if current_revision != revision {
+                        return Err(
+                            "Plugin changed while returning a view action; try again".to_string()
+                        );
+                    }
+                    *origin_plugin_id = plugin_id.to_string();
+                    *origin_revision = revision.to_string();
+                }
+                PluginAction::ViewClose {
+                    plugin_id: origin_plugin_id,
+                    revision: origin_revision,
+                } => {
+                    *origin_plugin_id = plugin_id.to_string();
+                    *origin_revision = revision.to_string();
+                }
+                _ => {}
             }
-            *origin_plugin_id = plugin_id.to_string();
-            *origin_revision = revision.to_string();
         }
         Ok(actions)
     }
@@ -2084,7 +2558,12 @@ enum HostRequestError {
     Transport(String),
 }
 
-type HostResponseSender = mpsc::Sender<Result<Value, HostRequestError>>;
+enum HostFrame {
+    Progress(PluginProgress),
+    Result(Result<Value, HostRequestError>),
+}
+
+type HostResponseSender = mpsc::Sender<HostFrame>;
 type PendingHostRequests = Arc<Mutex<HashMap<u64, HostResponseSender>>>;
 
 impl HostRequestError {
@@ -2300,6 +2779,7 @@ impl HostConnection {
         &self,
         request: &HostRequest<'_>,
         timeout: Duration,
+        control: Option<&PluginInvocationControl>,
     ) -> Result<T, HostRequestError> {
         let deadline = Instant::now() + timeout;
         let mut encoded = serde_json::to_vec(request).map_err(|error| {
@@ -2381,17 +2861,29 @@ impl HostConnection {
             );
             return Err(HostRequestError::Transport(message));
         }
-        let response_timeout = deadline.saturating_duration_since(Instant::now());
-        if response_timeout.is_zero() {
-            return Err(timeout_error());
-        }
-        let value = match response_rx.recv_timeout(response_timeout) {
-            Ok(result) => result?,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+        let value = loop {
+            if control.is_some_and(PluginInvocationControl::is_cancelled) {
+                self.send_cancel(request.id());
+                return Err(HostRequestError::Remote(
+                    "Plugin invocation cancelled".to_string(),
+                ));
+            }
+            let response_timeout = deadline.saturating_duration_since(Instant::now());
+            if response_timeout.is_zero() {
                 return Err(timeout_error());
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(HostRequestError::Transport(self.failure_message()));
+            match response_rx.recv_timeout(response_timeout.min(Duration::from_millis(50))) {
+                Ok(HostFrame::Progress(progress)) => {
+                    validate_progress(&progress).map_err(HostRequestError::Remote)?;
+                    if let Some(control) = control {
+                        control.report(progress);
+                    }
+                }
+                Ok(HostFrame::Result(result)) => break result?,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(HostRequestError::Transport(self.failure_message()));
+                }
             }
         };
         serde_json::from_value(value).map_err(|error| {
@@ -2399,6 +2891,27 @@ impl HostConnection {
                 "Plugin runtime returned an invalid result: {error}"
             ))
         })
+    }
+
+    fn send_cancel(&self, request_id: u64) {
+        let request = HostRequest::Cancel { id: 0, request_id };
+        let Ok(mut encoded) = serde_json::to_vec(&request) else {
+            return;
+        };
+        encoded.push(b'\n');
+        if encoded.len() > MAX_PROTOCOL_BYTES {
+            return;
+        }
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = write_protocol_frame(
+            &mut writer,
+            &encoded,
+            Instant::now() + Duration::from_secs(1),
+        );
+        let _ = writer.set_write_timeout(None);
     }
 
     fn failure_message(&self) -> String {
@@ -2469,6 +2982,18 @@ fn spawn_host_reader(
                     return;
                 }
             };
+            if let Some(progress) = response.progress {
+                let response_tx = pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&response.id)
+                    .cloned();
+                let Some(response_tx) = response_tx else {
+                    continue;
+                };
+                let _ = response_tx.send(HostFrame::Progress(progress));
+                continue;
+            }
             let Some(response_tx) = pending
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2497,7 +3022,7 @@ fn spawn_host_reader(
                         .unwrap_or_else(|| "Plugin command failed".to_string()),
                 ))
             };
-            let _ = response_tx.send(result);
+            let _ = response_tx.send(HostFrame::Result(result));
         }
     });
 }
@@ -2522,7 +3047,9 @@ fn fail_host_connection(
         .map(|(_, sender)| sender)
         .collect::<Vec<_>>();
     for sender in requests {
-        let _ = sender.send(Err(HostRequestError::Transport(message.to_string())));
+        let _ = sender.send(HostFrame::Result(Err(HostRequestError::Transport(
+            message.to_string(),
+        ))));
     }
     if let Ok(mut child) = child.lock() {
         let _ = child.kill();
@@ -3225,6 +3752,42 @@ fn validate_commands(commands: &[PluginCommand]) -> Result<(), String> {
         }
         validate_text(&command.plugin_name, 200, "plugin name")?;
         validate_text(&command.title, 300, "command title")?;
+        for keyword in &command.keywords {
+            validate_text(keyword, 100, "command keyword")?;
+        }
+        if let Some(status) = &command.status {
+            validate_text(status, 100, "command status")?;
+        }
+        if let Some(reason) = &command.disabled_reason {
+            validate_text(reason, 500, "command disabled reason")?;
+        }
+        let mut runtimes = HashSet::new();
+        if command
+            .when
+            .runtimes
+            .iter()
+            .any(|runtime| !runtimes.insert(*runtime))
+        {
+            return Err(format!(
+                "Plugin command `{}` has duplicate runtime conditions",
+                command.qualified_id()
+            ));
+        }
+        let mut platforms = HashSet::new();
+        for platform in &command.when.platforms {
+            if !matches!(platform.as_str(), "macos" | "linux" | "windows") {
+                return Err(format!(
+                    "Plugin command `{}` has unsupported platform condition `{platform}`",
+                    command.qualified_id()
+                ));
+            }
+            if !platforms.insert(platform) {
+                return Err(format!(
+                    "Plugin command `{}` has duplicate platform conditions",
+                    command.qualified_id()
+                ));
+            }
+        }
         let mut placements = HashSet::new();
         if command
             .placements
@@ -3261,27 +3824,41 @@ fn validate_commands(commands: &[PluginCommand]) -> Result<(), String> {
                         command.qualified_id()
                     ));
                 }
-                PluginInput::Select { options, .. } => {
-                    if options.is_empty() || options.len() > MAX_SELECT_OPTIONS {
+                PluginInput::Select { options, .. } => validate_select_options(
+                    options,
+                    &format!("command `{}` select", command.qualified_id()),
+                )?,
+                PluginInput::Text {
+                    placeholder,
+                    default_value,
+                    max_length,
+                    ..
+                } => {
+                    if let Some(placeholder) = placeholder {
+                        validate_optional_text(placeholder, 300, "input placeholder")?;
+                    }
+                    if let Some(default_value) = default_value
+                        && default_value.chars().count() > *max_length
+                    {
                         return Err(format!(
-                            "Plugin command `{}` has an invalid select option count",
+                            "Plugin command `{}` has a text defaultValue longer than maxLength",
                             command.qualified_id()
                         ));
                     }
-                    let mut option_values = HashSet::new();
-                    for option in options {
-                        validate_text(&option.value, 1_024, "select option value")?;
-                        validate_text(&option.label, 200, "select option label")?;
-                        if !option_values.insert(option.value.clone()) {
-                            return Err(format!(
-                                "Plugin command `{}` has duplicate select value `{}`",
-                                command.qualified_id(),
-                                option.value
-                            ));
-                        }
+                }
+                PluginInput::Pick {
+                    placeholder,
+                    default_value,
+                    ..
+                } => {
+                    if let Some(placeholder) = placeholder {
+                        validate_optional_text(placeholder, 300, "picker placeholder")?;
+                    }
+                    if let Some(default_value) = default_value {
+                        validate_optional_text(default_value, 1_024, "picker default value")?;
                     }
                 }
-                PluginInput::Text { .. } | PluginInput::Confirm { .. } => {}
+                PluginInput::Confirm { .. } => {}
             }
         }
     }
@@ -3685,6 +4262,21 @@ fn validate_inputs(
                     ));
                 }
             }
+            PluginInput::Pick { id, required, .. } => {
+                let Some(value) = inputs.get(id) else {
+                    if *required {
+                        return Err(format!("Plugin input `{id}` is required"));
+                    }
+                    continue;
+                };
+                let Some(selected) = value.as_str() else {
+                    return Err(format!("Plugin input `{id}` must be a picker value"));
+                };
+                if *required && selected.trim().is_empty() {
+                    return Err(format!("Plugin input `{id}` is required"));
+                }
+                validate_optional_text(selected, 1_024, "picker value")?;
+            }
             PluginInput::Confirm { id, .. } => {
                 if inputs.get(id).and_then(Value::as_bool).is_none() {
                     return Err(format!("Plugin input `{id}` must be true or false"));
@@ -3713,6 +4305,24 @@ fn validate_actions(actions: &[PluginAction]) -> Result<(), String> {
                     validate_text(directory, 4_096, "working directory")?;
                 }
             }
+            PluginAction::TerminalSendText { text, target, .. } => {
+                validate_optional_text(text, 262_144, "terminal text")?;
+                validate_terminal_target(target)?;
+            }
+            PluginAction::TerminalOpen {
+                working_directory,
+                launch,
+                target,
+                ..
+            } => {
+                if let Some(directory) = working_directory {
+                    validate_text(directory, 4_096, "working directory")?;
+                }
+                validate_terminal_target(target)?;
+                if let Some(launch) = launch {
+                    validate_terminal_launch(launch)?;
+                }
+            }
             PluginAction::TermyCommand { command } => {
                 validate_text(command, 128, "Termy command")?;
             }
@@ -3730,11 +4340,99 @@ fn validate_actions(actions: &[PluginAction]) -> Result<(), String> {
             PluginAction::Toast { message, .. } => {
                 validate_text(message, 4_096, "toast message")?;
             }
-            PluginAction::ViewOpen { view, .. } => {
+            PluginAction::ViewOpen { view, params, .. }
+            | PluginAction::ViewReplace { view, params, .. } => {
                 if !valid_id(view) {
                     return Err(format!("Plugin returned invalid view ID `{view}`"));
                 }
+                validate_view_params(params)?;
             }
+            PluginAction::ViewClose { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_terminal_target(target: &PluginTerminalTarget) -> Result<(), String> {
+    let PluginTerminalTarget::Exact {
+        window_id,
+        tab_id,
+        pane_id,
+    } = target
+    else {
+        return Ok(());
+    };
+    validate_text(window_id, 128, "terminal target windowId")?;
+    if let Some(tab_id) = tab_id {
+        validate_text(tab_id, 128, "terminal target tabId")?;
+    }
+    if let Some(pane_id) = pane_id {
+        validate_text(pane_id, 128, "terminal target paneId")?;
+    }
+    if pane_id.is_some() && tab_id.is_none() {
+        return Err("Plugin terminal targets with paneId must include tabId".to_string());
+    }
+    Ok(())
+}
+
+fn validate_terminal_launch(launch: &PluginTerminalLaunch) -> Result<(), String> {
+    match launch {
+        PluginTerminalLaunch::Shell { command } => {
+            validate_text(command, 65_536, "terminal launch command")
+        }
+        PluginTerminalLaunch::Program { program, args } => {
+            validate_text(program, MAX_LAUNCH_TEXT_LENGTH, "terminal launch program")?;
+            if args.len() > MAX_LAUNCH_ARGS {
+                return Err(format!(
+                    "Plugin terminal launch has {} arguments; maximum is {MAX_LAUNCH_ARGS}",
+                    args.len()
+                ));
+            }
+            for argument in args {
+                validate_optional_text(
+                    argument,
+                    MAX_LAUNCH_TEXT_LENGTH,
+                    "terminal launch argument",
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_view_params(params: &Value) -> Result<(), String> {
+    if !params.is_object() {
+        return Err("Plugin view params must be an object".to_string());
+    }
+    let encoded = serde_json::to_vec(params)
+        .map_err(|error| format!("Failed to encode plugin view params: {error}"))?;
+    if encoded.len() > MAX_VIEW_PARAMS_BYTES {
+        return Err(format!(
+            "Plugin view params exceed the {MAX_VIEW_PARAMS_BYTES} byte limit"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_select_options(options: &[PluginSelectOption], label: &str) -> Result<(), String> {
+    if options.is_empty() || options.len() > MAX_SELECT_OPTIONS {
+        return Err(format!("Plugin {label} has an invalid option count"));
+    }
+    let mut option_values = HashSet::new();
+    for option in options {
+        validate_text(&option.value, 1_024, "select option value")?;
+        validate_text(&option.label, 200, "select option label")?;
+        for keyword in &option.keywords {
+            validate_text(keyword, 100, "select option keyword")?;
+        }
+        if let Some(status) = &option.status {
+            validate_text(status, 100, "select option status")?;
+        }
+        if !option_values.insert(&option.value) {
+            return Err(format!(
+                "Plugin {label} has duplicate option value `{}`",
+                option.value
+            ));
         }
     }
     Ok(())
@@ -3869,6 +4567,177 @@ fn validate_view_node(
                 ));
             }
         }
+        PluginUiNode::TextArea {
+            id,
+            label,
+            placeholder,
+            value,
+            max_length,
+            rows,
+            submit,
+            ..
+        } => {
+            validate_control_id(id, control_ids)?;
+            *value_count += 1;
+            if *value_count > MAX_VIEW_VALUES {
+                return Err(format!(
+                    "Plugin view has more than {MAX_VIEW_VALUES} value controls"
+                ));
+            }
+            if let Some(label) = label {
+                validate_text(label, 200, "view text area label")?;
+            }
+            if let Some(placeholder) = placeholder {
+                validate_optional_text(placeholder, 300, "view text area placeholder")?;
+            }
+            if !(1..=4_096).contains(max_length) {
+                return Err(format!(
+                    "Plugin view text area `{id}` maxLength must be between 1 and 4096"
+                ));
+            }
+            if !(2..=24).contains(rows) {
+                return Err(format!(
+                    "Plugin view text area `{id}` rows must be between 2 and 24"
+                ));
+            }
+            if value.chars().count() > *max_length {
+                return Err(format!(
+                    "Plugin view text area `{id}` value exceeds maxLength"
+                ));
+            }
+            if let Some(submit) = submit
+                && !valid_id(submit)
+            {
+                return Err(format!(
+                    "Plugin view text area `{id}` has invalid submit action `{submit}`"
+                ));
+            }
+        }
+        PluginUiNode::Select {
+            id,
+            label,
+            placeholder,
+            value,
+            options,
+            action,
+            ..
+        } => {
+            validate_control_id(id, control_ids)?;
+            *value_count += 1;
+            if *value_count > MAX_VIEW_VALUES {
+                return Err(format!(
+                    "Plugin view has more than {MAX_VIEW_VALUES} value controls"
+                ));
+            }
+            if let Some(label) = label {
+                validate_text(label, 200, "view select label")?;
+            }
+            if let Some(placeholder) = placeholder {
+                validate_optional_text(placeholder, 300, "view select placeholder")?;
+            }
+            validate_select_options(options, &format!("view select `{id}`"))?;
+            if !value.is_empty() && !options.iter().any(|option| option.value == *value) {
+                return Err(format!(
+                    "Plugin view select `{id}` has an unknown selected value"
+                ));
+            }
+            if let Some(action) = action
+                && !valid_id(action)
+            {
+                return Err(format!(
+                    "Plugin view select `{id}` has invalid action `{action}`"
+                ));
+            }
+        }
+        PluginUiNode::List {
+            id,
+            action,
+            selected_id,
+            search_placeholder,
+            children,
+            ..
+        } => {
+            validate_control_id(id, control_ids)?;
+            *value_count += 1;
+            if *value_count > MAX_VIEW_VALUES {
+                return Err(format!(
+                    "Plugin view has more than {MAX_VIEW_VALUES} value controls"
+                ));
+            }
+            if let Some(action) = action
+                && !valid_id(action)
+            {
+                return Err(format!(
+                    "Plugin view list `{id}` has invalid action `{action}`"
+                ));
+            }
+            if let Some(placeholder) = search_placeholder {
+                validate_optional_text(placeholder, 300, "view list search placeholder")?;
+            }
+            if children
+                .iter()
+                .any(|child| !matches!(child, PluginUiNode::ListItem { .. }))
+            {
+                return Err(format!(
+                    "Plugin view list `{id}` may only contain ListItem children"
+                ));
+            }
+            if let Some(selected_id) = selected_id
+                && !children.iter().any(
+                    |child| matches!(child, PluginUiNode::ListItem { id, .. } if id == selected_id),
+                )
+            {
+                return Err(format!(
+                    "Plugin view list `{id}` has an unknown selectedId `{selected_id}`"
+                ));
+            }
+        }
+        PluginUiNode::ListItem {
+            id,
+            title,
+            subtitle,
+            keywords,
+            status,
+            payload,
+            action,
+            ..
+        } => {
+            validate_control_id(id, control_ids)?;
+            validate_text(title, 300, "view list item title")?;
+            if let Some(subtitle) = subtitle {
+                validate_text(subtitle, 500, "view list item subtitle")?;
+            }
+            for keyword in keywords {
+                validate_text(keyword, 100, "view list item keyword")?;
+            }
+            if let Some(status) = status {
+                validate_text(status, 100, "view list item status")?;
+            }
+            if let Some(payload) = payload {
+                validate_optional_text(payload, 1_024, "view list item payload")?;
+            }
+            if let Some(action) = action
+                && !valid_id(action)
+            {
+                return Err(format!(
+                    "Plugin view list item `{id}` has invalid action `{action}`"
+                ));
+            }
+        }
+        PluginUiNode::EmptyState { title, description } => {
+            validate_text(title, 300, "view empty state title")?;
+            if let Some(description) = description {
+                validate_text(description, 1_000, "view empty state description")?;
+            }
+        }
+        PluginUiNode::Progress { label, value } => {
+            if let Some(label) = label {
+                validate_text(label, 300, "view progress label")?;
+            }
+            if value.is_some_and(|value| value > 100) {
+                return Err("Plugin view progress value must be between 0 and 100".to_string());
+            }
+        }
         PluginUiNode::Button {
             id,
             action,
@@ -3919,6 +4788,26 @@ fn validate_control_id(id: &str, control_ids: &mut HashSet<String>) -> Result<()
     Ok(())
 }
 
+fn validate_progress(progress: &PluginProgress) -> Result<(), String> {
+    if let Some(message) = &progress.message {
+        validate_text(message, 500, "progress message")?;
+    }
+    if progress
+        .percentage
+        .is_some_and(|percentage| percentage > 100)
+    {
+        return Err("Plugin progress percentage must be between 0 and 100".to_string());
+    }
+    Ok(())
+}
+
+fn validate_optional_text(value: &str, max_chars: usize, label: &str) -> Result<(), String> {
+    if value.chars().count() > max_chars {
+        return Err(format!("Plugin {label} exceeds {max_chars} characters"));
+    }
+    Ok(())
+}
+
 fn validate_text(value: &str, max_chars: usize, label: &str) -> Result<(), String> {
     let length = value.chars().count();
     if value.trim().is_empty() {
@@ -3954,6 +4843,18 @@ fn default_invoke_timeout_ms() -> u64 {
 
 fn default_text_max_length() -> usize {
     1_024
+}
+
+fn default_text_area_rows() -> usize {
+    4
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_view_params() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
 fn default_setting_max_length() -> usize {

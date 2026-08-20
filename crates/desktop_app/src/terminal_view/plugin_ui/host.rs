@@ -1,5 +1,11 @@
 use super::*;
 
+impl PluginUiView {
+    pub(in crate::terminal_view) fn belongs_to(&self, plugin_id: &str, revision: &str) -> bool {
+        self.descriptor.plugin_id == plugin_id && self.revision == revision
+    }
+}
+
 impl TerminalView {
     pub(in crate::terminal_view) fn open_plugin_ui(
         &mut self,
@@ -7,6 +13,7 @@ impl TerminalView {
         view_id: &str,
         revision: &str,
         target: PluginViewTarget,
+        params: serde_json::Value,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
@@ -42,6 +49,7 @@ impl TerminalView {
                 runtime,
                 descriptor,
                 revision,
+                params,
                 target,
                 cx,
             )
@@ -54,10 +62,40 @@ impl TerminalView {
             view.load(context, cx);
         });
         if target == PluginViewTarget::CommandPalette {
-            self.focus_handle.focus(window, cx);
+            self.focus_handle.focus(window);
         }
         cx.notify();
         self.notify_overlay(cx);
+        Ok(())
+    }
+
+    pub(in crate::terminal_view) fn replace_plugin_ui(
+        &mut self,
+        plugin_id: &str,
+        view_id: &str,
+        revision: &str,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let plugin_ui = self
+            .plugin_ui
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "Plugin returned view.replace without an open view".to_string())?;
+        if plugin_ui.read(cx).descriptor.plugin_id != plugin_id {
+            return Err("Plugin cannot replace another plugin's view".to_string());
+        }
+        let (descriptor, current_revision) = self
+            .plugin_runtime
+            .view_with_revision(plugin_id, view_id)
+            .ok_or_else(|| format!("Plugin view {plugin_id}.{view_id} is unavailable"))?;
+        if current_revision != revision {
+            return Err("Plugin changed before its view could be replaced".to_string());
+        }
+        let context = self.plugin_context(cx);
+        plugin_ui.update(cx, |view, cx| {
+            view.replace(descriptor, revision.to_string(), params, context, cx);
+        });
         Ok(())
     }
 
@@ -95,12 +133,16 @@ impl TerminalView {
         true
     }
 
-    pub(super) fn close_plugin_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::terminal_view) fn close_plugin_ui(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.plugin_ui.take().is_none() {
             return;
         }
         self.plugin_runtime.suspend_if_eventless();
-        self.focus_handle.focus(window, cx);
+        self.focus_handle.focus(window);
         cx.notify();
         self.notify_overlay(cx);
     }

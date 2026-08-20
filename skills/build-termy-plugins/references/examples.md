@@ -32,7 +32,7 @@ export default definePlugin({
 } satisfies TermyPlugin);
 ```
 
-## Command inputs and fixed shell mapping
+## Async pick and fixed shell mapping
 
 ```ts
 const gitCommands: Record<string, string> = {
@@ -50,14 +50,19 @@ export default definePlugin({
       inputs: [
         {
           id: "view",
-          type: "select",
+          type: "pick",
           label: "What do you want to inspect?",
           required: true,
-          options: [
-            { value: "status", label: "Working tree status" },
-            { value: "branches", label: "Local and remote branches" },
-            { value: "commits", label: "Recent commits" },
-          ],
+          loadOptions({ query }) {
+            const options = [
+              { value: "status", label: "Working tree status" },
+              { value: "branches", label: "Local and remote branches" },
+              { value: "commits", label: "Recent commits" },
+            ];
+            return options.filter((option) =>
+              option.label.toLowerCase().includes(query.toLowerCase()),
+            );
+          },
         },
       ],
       run({ inputs, context }) {
@@ -68,9 +73,10 @@ export default definePlugin({
           return;
         }
         return {
-          type: "terminal.run",
-          command,
+          type: "terminal.open",
           workingDirectory: context.workingDirectory,
+          launch: { type: "shell", command },
+          target: "origin",
         };
       },
     },
@@ -79,6 +85,7 @@ export default definePlugin({
 ```
 
 Do not replace the fixed mapping with string interpolation.
+Async pick loaders should only resolve options; they cannot return actions.
 
 ## Event-only plugin
 
@@ -88,6 +95,12 @@ export default definePlugin({
   events: {
     "terminal.ready"({ context }) {
       context.toasts.info("Terminal ready");
+    },
+    "tab.created"({ event }) {
+      console.log("created", event.tabId);
+    },
+    "command.started"({ event }) {
+      console.log("started", event.command);
     },
     "workingDirectory.changed"({ event }) {
       console.log(event.previousWorkingDirectory, event.workingDirectory);
@@ -176,9 +189,10 @@ export default definePlugin({
         return (
           <TermyUI.Column gap="medium">
             <TermyUI.Text variant="heading">Quick note</TermyUI.Text>
-            <TermyUI.TextInput
+            <TermyUI.TextArea
               id="note"
               value={note}
+              rows={5}
               maxLength={4096}
               submit="save"
             />
@@ -198,7 +212,9 @@ export default definePlugin({
 } satisfies TermyPlugin);
 ```
 
-Termy rerenders after `onAction`. Keep render cheap and all control IDs unique.
+`render` and `onAction` also receive immutable view `params`. Termy rerenders after
+`onAction`; return `view.replace` to navigate in place or `view.close` to dismiss.
+Keep render cheap and all control IDs unique.
 
 ## Keybinding
 
@@ -213,10 +229,10 @@ priority on conflicts.
 
 ## Template map
 
-- `assets/command-plugin/`: official Git inspection example with safe fixed command
-  mapping and native inputs.
-- `assets/native-ui-plugin/`: official paginated todos example using storage,
-  named native actions, and bounded rendering.
+- `assets/command-plugin/`: official Git inspection example with contextual
+  availability, async pick, progress/cancellation, and safe terminal opening.
+- `assets/native-ui-plugin/`: official bounded todos example using view params,
+  TextArea, Select, List, EmptyState, Progress, replace, and close.
 
 Copy a template into the user's requested destination, then change identity, command
 IDs, titles, types, and behavior. Do not blindly retain capabilities or example

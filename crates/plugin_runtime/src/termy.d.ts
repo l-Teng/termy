@@ -36,6 +36,28 @@ type TermyPluginSelectInput = {
   }>;
 };
 
+type TermyPluginSelectOption = {
+  value: string;
+  label: string;
+  keywords?: string[];
+  status?: string;
+};
+
+type TermyPluginPickInput<
+  T extends Record<string, TermyPluginSetting> = Record<string, TermyPluginSetting>,
+> = {
+  id: string;
+  type: "pick";
+  label: string;
+  placeholder?: string;
+  defaultValue?: string;
+  required?: boolean;
+  loadOptions(request: {
+    query: string;
+    context: TermyPluginContext<T>;
+  }): TermyPluginSelectOption[] | Promise<TermyPluginSelectOption[]>;
+};
+
 type TermyPluginConfirmInput = {
   id: string;
   type: "confirm";
@@ -43,9 +65,12 @@ type TermyPluginConfirmInput = {
   defaultValue?: boolean;
 };
 
-type TermyPluginInput =
+type TermyPluginInput<
+  T extends Record<string, TermyPluginSetting> = Record<string, TermyPluginSetting>,
+> =
   | TermyPluginTextInput
   | TermyPluginSelectInput
+  | TermyPluginPickInput<T>
   | TermyPluginConfirmInput;
 
 type TermyPluginToasts = {
@@ -120,6 +145,11 @@ type TermyPluginSettings<
 type TermyPluginContext<
   T extends Record<string, TermyPluginSetting> = Record<string, TermyPluginSetting>,
 > = {
+  readonly origin: {
+    readonly windowId: string;
+    readonly tabId?: string;
+    readonly paneId?: string;
+  };
   readonly workingDirectory?: string;
   readonly activeCommand?: string;
   readonly selectedText?: string;
@@ -127,11 +157,13 @@ type TermyPluginContext<
   readonly shell: string;
   readonly runtime: "native" | "tmux";
   readonly activeTab?: {
+    readonly id: string;
     readonly index: number;
     readonly title: string;
     readonly paneCount: number;
   };
   readonly activePane?: {
+    readonly id: string;
     readonly index: number;
     readonly kind: "terminal";
   };
@@ -139,6 +171,10 @@ type TermyPluginContext<
   readonly appVersion: string;
   readonly settings: TermyPluginSettings<T>;
   readonly toasts: TermyPluginToasts;
+  readonly signal: AbortSignal;
+  readonly progress: {
+    report(update: { message?: string; percentage?: number }): void;
+  };
   /** Requires `"storage"` in plugin.json capabilities. */
   readonly storage: TermyPluginStorage;
   /** Requires `"storage"` in plugin.json capabilities. */
@@ -203,6 +239,51 @@ declare const TermyUI: {
     submit?: string;
     disabled?: boolean;
   }>;
+  readonly TextArea: TermyUiLeafComponent<{
+    id: string;
+    label?: string;
+    placeholder?: string;
+    value?: string;
+    maxLength?: number;
+    rows?: number;
+    submit?: string;
+    disabled?: boolean;
+  }>;
+  readonly Select: TermyUiLeafComponent<{
+    id: string;
+    label?: string;
+    placeholder?: string;
+    value?: string;
+    options: TermyPluginSelectOption[];
+    action?: string;
+    disabled?: boolean;
+  }>;
+  readonly List: TermyUiContainerComponent<{
+    id: string;
+    action?: string;
+    selectedId?: string;
+    searchPlaceholder?: string;
+    filtering?: boolean;
+    isLoading?: boolean;
+  }>;
+  readonly ListItem: TermyUiLeafComponent<{
+    id: string;
+    title: string;
+    subtitle?: string;
+    keywords?: string[];
+    status?: string;
+    payload?: string;
+    action?: string;
+    disabled?: boolean;
+  }>;
+  readonly EmptyState: TermyUiLeafComponent<{
+    title: string;
+    description?: string;
+  }>;
+  readonly Progress: TermyUiLeafComponent<{
+    label?: string;
+    value?: number;
+  }>;
   readonly Button: TermyUiTextComponent<{
     id: string;
     action: string;
@@ -242,17 +323,45 @@ type TermyPluginView<
   title: string;
   timeoutMs?: number;
   render(request: {
+    params: Readonly<Record<string, TermyPluginJsonValue>>;
     context: TermyPluginContext<T>;
   }): TermyUiChild | Promise<TermyUiChild>;
   onAction?(request: {
     action: TermyPluginViewAction;
     values: Readonly<Record<string, TermyPluginViewValue>>;
+    params: Readonly<Record<string, TermyPluginJsonValue>>;
     context: TermyPluginContext<T>;
   }): TermyPluginResult | Promise<TermyPluginResult>;
 };
 
+type TermyPluginTerminalTarget =
+  | "origin"
+  | "active"
+  /** Exact IDs are scoped to the Termy window that delivered the invocation. */
+  | { windowId: string; tabId?: string; paneId?: string };
+
+type TermyPluginTerminalLaunch =
+  | { type: "shell"; command: string }
+  | { type: "program"; program: string; args?: string[] };
+
 type TermyPluginAction =
+  /** @deprecated Use terminal.sendText or terminal.open for explicit behavior. */
   | { type: "terminal.run"; command: string; workingDirectory?: string }
+  | {
+      type: "terminal.sendText";
+      text: string;
+      submit?: boolean;
+      target?: TermyPluginTerminalTarget;
+    }
+  | {
+      type: "terminal.open";
+      location?: "tab" | "splitRight" | "splitDown" | "window";
+      workingDirectory?: string;
+      launch?: TermyPluginTerminalLaunch;
+      target?: TermyPluginTerminalTarget;
+      /** Restores prior focus for tabs/splits. New OS windows receive focus. */
+      focus?: boolean;
+    }
   | { type: "termy.command"; command: string }
   | { type: "clipboard.write"; text: string }
   | { type: "url.open"; url: string }
@@ -261,7 +370,14 @@ type TermyPluginAction =
       type: "view.open";
       view: string;
       target?: "modal" | "commandPalette";
+      params?: Record<string, TermyPluginJsonValue>;
     }
+  | {
+      type: "view.replace";
+      view: string;
+      params?: Record<string, TermyPluginJsonValue>;
+    }
+  | { type: "view.close" }
   | {
       type: "toast";
       level: "info" | "success" | "warning" | "error";
@@ -276,11 +392,23 @@ type TermyPluginResult =
 
 type TermyPluginEvent =
   | { readonly type: "terminal.ready" }
-  | { readonly type: "tab.activated"; readonly previousTabIndex?: number }
+  | {
+      readonly type: "tab.activated";
+      readonly previousTabIndex?: number;
+      readonly previousTabId?: string;
+    }
+  | { readonly type: "pane.activated"; readonly previousPaneId?: string }
+  | { readonly type: "tab.created"; readonly tabId: string }
+  | { readonly type: "tab.closed"; readonly tabId: string }
+  | { readonly type: "terminal.bell" }
   | {
       readonly type: "workingDirectory.changed";
       readonly previousWorkingDirectory?: string;
       readonly workingDirectory?: string;
+    }
+  | {
+      readonly type: "command.started";
+      readonly command?: string;
     }
   | {
       readonly type: "command.finished";
@@ -317,7 +445,13 @@ type TermyPluginCommand<
   enabled?: boolean;
   disabledReason?: string;
   icon?: TermyPluginIcon;
-  inputs?: TermyPluginInput[];
+  inputs?: TermyPluginInput<T>[];
+  when?: {
+    hasSelection?: boolean;
+    hasWorkingDirectory?: boolean;
+    runtimes?: ("native" | "tmux")[];
+    platforms?: ("macos" | "linux" | "windows")[];
+  };
   timeoutMs?: number;
   run(request: {
     inputs: Record<string, TermyPluginInputValue>;

@@ -1,15 +1,18 @@
 use crate::text_editing;
 use gpui::{
     Bounds, ElementInputHandler, Entity, EntityInputHandler, Font, Hsla, IntoElement, PaintQuad,
-    Pixels, ShapedLine, Styled, TextAlign, TextRun, UTF16Selection, UnderlineStyle, canvas, fill,
-    point, px, size,
+    Pixels, ShapedLine, Styled, TextRun, UTF16Selection, UnderlineStyle, canvas, fill, point, px,
+    size,
 };
 use std::ops::Range;
 
+mod multiline;
+
+pub use multiline::MultilineTextInputElement;
+
 const INLINE_INPUT_LINE_HEIGHT_MULTIPLIER: f32 = 1.35;
 
-/// Shared text input state for single-line text fields.
-/// Used by command palette, search, tab rename, and settings inputs.
+/// Shared text input state for single-line and multiline text fields.
 #[derive(Clone, Debug)]
 pub struct TextInputState {
     text: String,
@@ -19,6 +22,8 @@ pub struct TextInputState {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     last_line_offset_x: Pixels,
+    last_line_metas: Vec<(usize, Bounds<Pixels>, Pixels)>,
+    last_line_layouts: Vec<Option<ShapedLine>>,
 }
 
 #[allow(dead_code)]
@@ -32,6 +37,8 @@ impl TextInputState {
             last_layout: None,
             last_bounds: None,
             last_line_offset_x: px(0.0),
+            last_line_metas: Vec::new(),
+            last_line_layouts: Vec::new(),
         };
         state.move_to_end();
         state
@@ -177,6 +184,68 @@ impl TextInputState {
         self.set_cursor_utf8(self.next_char_boundary(cursor));
     }
 
+    fn vertical_offset(&self, direction: isize) -> Option<usize> {
+        let cursor = self.cursor_offset();
+        let line_start = self.text[..cursor].rfind('\n').map_or(0, |index| index + 1);
+        let column = self.text[line_start..cursor].chars().count();
+        if direction < 0 {
+            let previous_end = line_start.checked_sub(1)?;
+            let previous_start = self.text[..previous_end]
+                .rfind('\n')
+                .map_or(0, |index| index + 1);
+            Some(
+                previous_start
+                    + self.text[previous_start..previous_end]
+                        .chars()
+                        .take(column)
+                        .map(char::len_utf8)
+                        .sum::<usize>(),
+            )
+        } else {
+            let current_end = self.text[cursor..].find('\n').map(|index| cursor + index)?;
+            let next_start = current_end + 1;
+            let next_end = self.text[next_start..]
+                .find('\n')
+                .map_or(self.text.len(), |index| next_start + index);
+            Some(
+                next_start
+                    + self.text[next_start..next_end]
+                        .chars()
+                        .take(column)
+                        .map(char::len_utf8)
+                        .sum::<usize>(),
+            )
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if !self.selected_range.is_empty() {
+            self.set_cursor_utf8(self.selected_range.start);
+        } else if let Some(offset) = self.vertical_offset(-1) {
+            self.set_cursor_utf8(offset);
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if !self.selected_range.is_empty() {
+            self.set_cursor_utf8(self.selected_range.end);
+        } else if let Some(offset) = self.vertical_offset(1) {
+            self.set_cursor_utf8(offset);
+        }
+    }
+
+    pub fn select_up(&mut self) {
+        if let Some(offset) = self.vertical_offset(-1) {
+            self.select_to_utf8(offset);
+        }
+    }
+
+    pub fn select_down(&mut self) {
+        if let Some(offset) = self.vertical_offset(1) {
+            self.select_to_utf8(offset);
+        }
+    }
+
     pub fn select_left(&mut self) {
         let cursor = self.cursor_offset();
         self.select_to_utf8(self.previous_char_boundary(cursor));
@@ -227,6 +296,8 @@ impl TextInputState {
 
     fn invalidate_layout(&mut self) {
         self.last_layout = None;
+        self.last_line_metas.clear();
+        self.last_line_layouts.clear();
     }
 
     pub fn update_layout_cache(
@@ -238,6 +309,21 @@ impl TextInputState {
         self.last_bounds = Some(bounds);
         self.last_layout = layout;
         self.last_line_offset_x = line_offset_x;
+        self.last_line_metas.clear();
+        self.last_line_layouts.clear();
+    }
+
+    fn update_multiline_layout_cache(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        line_metas: Vec<(usize, Bounds<Pixels>, Pixels)>,
+        line_layouts: Vec<Option<ShapedLine>>,
+    ) {
+        self.last_bounds = Some(bounds);
+        self.last_layout = None;
+        self.last_line_offset_x = px(0.0);
+        self.last_line_metas = line_metas;
+        self.last_line_layouts = line_layouts;
     }
 
     pub fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
@@ -275,8 +361,26 @@ impl TextInputState {
         range_utf16: Range<usize>,
         fallback_bounds: Bounds<Pixels>,
     ) -> Bounds<Pixels> {
-        let bounds = self.last_bounds.unwrap_or(fallback_bounds);
         let range = self.range_from_utf16(&range_utf16);
+        if let Some(index) = self
+            .last_line_metas
+            .iter()
+            .rposition(|(start, _, _)| *start <= range.start)
+        {
+            let (line_start, bounds, offset_x) = self.last_line_metas[index];
+            let layout = self.last_line_layouts.get(index).and_then(Option::as_ref);
+            let line_len = layout.map_or(0, |line| line.len);
+            let start = range.start.saturating_sub(line_start).min(line_len);
+            let end = range.end.saturating_sub(line_start).min(line_len);
+            let start_x = layout.map_or(px(0.0), |line| line.x_for_index(start));
+            let end_x = layout.map_or(start_x, |line| line.x_for_index(end));
+            return Bounds::from_corners(
+                point(bounds.left() + offset_x + start_x, bounds.top()),
+                point(bounds.left() + offset_x + end_x, bounds.bottom()),
+            );
+        }
+
+        let bounds = self.last_bounds.unwrap_or(fallback_bounds);
         let (start_x, end_x) = if let Some(layout) = self.last_layout.as_ref() {
             (
                 layout.x_for_index(range.start),
@@ -314,6 +418,20 @@ impl TextInputState {
     pub fn character_index_for_point(&self, point: gpui::Point<Pixels>) -> usize {
         if self.text.is_empty() {
             return 0;
+        }
+
+        if !self.last_line_metas.is_empty() {
+            let index = self
+                .last_line_metas
+                .iter()
+                .position(|(_, bounds, _)| point.y <= bounds.bottom())
+                .unwrap_or(self.last_line_metas.len() - 1);
+            let (line_start, bounds, offset_x) = self.last_line_metas[index];
+            let local_x = (point.x - bounds.left() - offset_x).max(px(0.0));
+            let local_index = self.last_line_layouts[index]
+                .as_ref()
+                .map_or(0, |line| line.closest_index_for_x(local_x));
+            return self.utf8_to_utf16(line_start + local_index);
         }
 
         let Some(bounds) = self.last_bounds else {
@@ -639,8 +757,6 @@ impl<V: TextInputProvider + gpui::Render + EntityInputHandler> IntoElement for T
                             prepaint.line_bounds.top(),
                         ),
                         prepaint.line_bounds.size.height,
-                        TextAlign::Left,
-                        None,
                         window,
                         cx,
                     )
@@ -840,6 +956,18 @@ mod tests {
         state.set_cursor_utf16(1);
         state.select_to_utf16(4);
         assert_eq!(state.selected_range(), 1..6);
+    }
+
+    #[test]
+    fn vertical_movement_preserves_unicode_character_column() {
+        let mut state = TextInputState::new("ab\n😀x\nqwerty".to_string());
+        state.set_cursor_utf8("ab\n😀x\nqwe".len());
+        state.move_up();
+        assert_eq!(state.cursor_offset(), "ab\n😀x".len());
+        state.move_up();
+        assert_eq!(state.cursor_offset(), 2);
+        state.move_down();
+        assert_eq!(state.cursor_offset(), "ab\n😀x".len());
     }
 
     #[test]

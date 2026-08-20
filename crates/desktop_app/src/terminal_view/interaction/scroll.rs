@@ -136,7 +136,10 @@ impl TerminalView {
                 self.terminal_scroll_accumulator_y = 0.0;
                 0
             }
-            TouchPhase::Ended => 0,
+            TouchPhase::Ended => {
+                self.terminal_scroll_accumulator_y = 0.0;
+                0
+            }
             TouchPhase::Moved => {
                 let Some(terminal) = self.active_terminal() else {
                     return 0;

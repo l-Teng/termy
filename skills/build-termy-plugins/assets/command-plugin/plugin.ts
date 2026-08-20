@@ -1,3 +1,24 @@
+const gitViews = [
+  {
+    value: "status",
+    label: "Working tree status",
+    status: "git status",
+    keywords: ["changes", "branch"],
+  },
+  {
+    value: "branches",
+    label: "Local and remote branches",
+    status: "git branch",
+    keywords: ["refs", "remote"],
+  },
+  {
+    value: "commits",
+    label: "Recent commits",
+    status: "git log",
+    keywords: ["history", "log"],
+  },
+] satisfies TermyPluginSelectOption[];
+
 const gitCommands: Record<string, string> = {
   status: "git status --short --branch",
   branches: "git branch --all",
@@ -12,26 +33,32 @@ export default definePlugin({
       keywords: ["git", "status", "branches", "commits"],
       status: "Plugin",
       icon: "terminal",
+      when: { hasWorkingDirectory: true },
       inputs: [
         {
           id: "view",
-          type: "select",
+          type: "pick",
           label: "What do you want to inspect?",
+          placeholder: "Search Git views",
           required: true,
-          options: [
-            { value: "status", label: "Working tree status" },
-            { value: "branches", label: "Local and remote branches" },
-            { value: "commits", label: "Recent commits" },
-          ],
+          loadOptions({ query }) {
+            const normalized = query.trim().toLowerCase();
+            if (!normalized) return gitViews;
+            return gitViews.filter((option) =>
+              [option.label, option.status, ...option.keywords].some((value) =>
+                value.toLowerCase().includes(normalized),
+              ),
+            );
+          },
         },
         {
           id: "confirmed",
           type: "confirm",
-          label: "Run in the active working directory?",
+          label: "Open the result in a new tab?",
           defaultValue: true,
         },
       ],
-      run({ inputs, context }) {
+      async run({ inputs, context }) {
         if (inputs.confirmed !== true) {
           context.toasts.info("Git inspection cancelled");
           return;
@@ -45,10 +72,15 @@ export default definePlugin({
           return;
         }
 
+        context.progress.report({ message: "Opening Git inspection", percentage: 50 });
+        if (context.signal.aborted) return;
+
         return {
-          type: "terminal.run",
-          command,
+          type: "terminal.open",
+          location: "tab",
           workingDirectory: context.workingDirectory,
+          launch: { type: "shell", command },
+          target: "origin",
         };
       },
     },

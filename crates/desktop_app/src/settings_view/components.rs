@@ -32,9 +32,6 @@ impl SettingsWindow {
         section: SettingsSection,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let hover_bg = self.bg_hover();
-        let text_primary = self.text_primary();
-        let text_muted = self.text_muted();
         let subtitle = Self::settings_section_subtitle(section);
         // Quiet ghost button, rendered only while the section actually has
         // something to reset — native settings keep destructive affordances
@@ -42,60 +39,17 @@ impl SettingsWindow {
         let can_reset = self.section_has_non_default_values(section);
 
         let reset_button = can_reset.then(|| {
-            let is_section_hovered = self.hovered_reset_section == Some(section);
-            let tooltip_bg = self.bg_elevated();
-            let tooltip_border = self.border_color();
-            let tooltip_fg = self.text_primary();
-            div()
-                .id(SharedString::from(format!("reset-section-{section:?}")))
-                .relative()
-                .px_2()
-                .py(px(5.0))
-                .rounded(px(SETTINGS_BUTTON_RADIUS))
-                .text_xs()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(text_muted)
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover_bg).text_color(text_primary))
-                .on_hover(cx.listener(move |view, hovering: &bool, _window, cx| {
-                    if *hovering {
-                        view.hovered_reset_section = Some(section);
-                    } else if view.hovered_reset_section == Some(section) {
-                        view.hovered_reset_section = None;
-                    }
-                    cx.notify();
-                }))
-                .child("Reset section")
+            termy_ui::Button::new(format!("reset-section-{section:?}"), "Reset section")
+                .variant(termy_ui::ButtonVariant::Ghost)
+                .size(termy_ui::ButtonSize::Small)
+                .tooltip(termy_ui::Tooltip::new("Reset all settings in this section"))
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.confirm_reset_section_to_defaults(section, cx);
                 }))
-                .when(is_section_hovered, move |s| {
-                    s.child(
-                        deferred(
-                            div()
-                                .absolute()
-                                .top_full()
-                                .right_0()
-                                .mt(px(6.0))
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(px(6.0))
-                                .bg(tooltip_bg)
-                                .border_1()
-                                .border_color(tooltip_border)
-                                .text_size(px(11.0))
-                                .text_color(tooltip_fg)
-                                .whitespace_nowrap()
-                                .child("Reset all settings in this section"),
-                        )
-                        .with_priority(20),
-                    )
-                })
         });
 
-        // Title and subtitle come from the design system; the reset affordance
-        // keeps its hover, tooltip, and confirmation flow here because that is
-        // app behavior, not presentation.
+        // Title and subtitle come from Termy's layout kit; Glassy owns the
+        // reset control's presentation while the app keeps the confirmation.
         let mut header = termy_ui::SectionHeader::new(title).subtitle(subtitle);
         if let Some(reset_button) = reset_button {
             header = header.action(reset_button);
@@ -291,45 +245,16 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
         on_toggle: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
-        let accent = self.accent_with_alpha(0.95);
-        let mut bg_off = self.colors.foreground;
-        bg_off.a = 0.28;
-        let track_color = if checked { accent } else { bg_off };
-        let knob_color = self.contrasting_text_for_fill(track_color, self.bg_card());
-        let knob_top = (SETTINGS_SWITCH_HEIGHT - SETTINGS_SWITCH_KNOB_SIZE) * 0.5;
-        let knob_left = if checked {
-            SETTINGS_SWITCH_WIDTH - SETTINGS_SWITCH_KNOB_SIZE - knob_top
-        } else {
-            knob_top
-        };
-
-        div()
-            .id(id.into())
-            .w(px(SETTINGS_SWITCH_WIDTH))
-            .h(px(SETTINGS_SWITCH_HEIGHT))
-            .rounded(px(SETTINGS_SWITCH_RADIUS))
-            .bg(track_color)
-            .cursor_pointer()
-            .relative()
-            .child(
-                div()
-                    .absolute()
-                    .top(px(knob_top))
-                    .left(px(knob_left))
-                    .w(px(SETTINGS_SWITCH_KNOB_SIZE))
-                    .h(px(SETTINGS_SWITCH_KNOB_SIZE))
-                    .rounded_full()
-                    .bg(knob_color)
-                    .shadow_sm(),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+        let view = cx.entity();
+        termy_ui::ThemeSwitch::new(id.into())
+            .on(checked)
+            .on_change(move |_next, window, cx| {
+                view.update(cx, |view, cx| {
                     cx.stop_propagation();
                     on_toggle(view, window, cx);
                     cx.notify();
-                }),
-            )
+                });
+            })
     }
 
     pub(super) fn active_dropdown_options(
@@ -547,7 +472,7 @@ impl SettingsWindow {
 
                 let font = Font {
                     family: self.config.ui_font_family.clone().into(),
-                    ..Font::default()
+                    ..gpui::font("")
                 };
 
                 return div()
@@ -578,7 +503,7 @@ impl SettingsWindow {
             }
             let font = Font {
                 family: self.config.ui_font_family.clone().into(),
-                ..Font::default()
+                ..gpui::font("")
             };
             return TextInputElement::new(
                 cx.entity(),
@@ -680,7 +605,7 @@ impl SettingsWindow {
                 input.selecting = false;
             }
         }
-        self.focus_handle.focus(window, cx);
+        self.focus_handle.focus(window);
         cx.notify();
     }
 

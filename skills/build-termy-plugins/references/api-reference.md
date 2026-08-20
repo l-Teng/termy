@@ -1,7 +1,6 @@
 # Termy plugin v1 API reference
 
-Snapshot: official Termy repository commit
-`e04bb5ce49177f054f3e1bd63bb308130cf6ffe9`, reviewed 2026-07-25.
+Snapshot: Termy v1 plugin contract reviewed 2026-08-18.
 Prefer the plugin's current managed `termy.d.ts` and current official documentation
 when they differ.
 
@@ -64,8 +63,13 @@ SDK or repeat manifest identity inside the TypeScript definition.
 
 ## Commands and inputs
 
-A command requires `id`, `title`, and `run`. Optional fields are `keywords`,
-`status`, `enabled`, `disabledReason`, `icon`, `inputs`, and `timeoutMs`.
+A command requires `id`, `title`, and `run`. Optional fields are `placements`,
+`keywords`, `status`, `enabled`, `disabledReason`, `icon`, `inputs`, `when`, and
+`timeoutMs`.
+
+`placements` supports `commandPalette`, `terminalContextMenu`, and
+`tabContextMenu`. `when` can filter by `hasSelection`, `hasWorkingDirectory`,
+`runtimes`, and `platforms`; Termy checks it again immediately before invocation.
 
 Icons:
 
@@ -77,10 +81,13 @@ Inputs:
 | --- | --- | --- |
 | `text` | `id`, `type`, `label` | `placeholder`, `defaultValue`, `required`, `maxLength` |
 | `select` | `id`, `type`, `label`, `options` | `placeholder`, `defaultValue`, `required` |
+| `pick` | `id`, `type`, `label`, `loadOptions` | `placeholder`, `defaultValue`, `required` |
 | `confirm` | `id`, `type`, `label` | `defaultValue` |
 
-Select options require `value` and `label`; they may add `keywords` and `status`.
-Handler values are available under `inputs.<id>` as `string | boolean`.
+Select and pick options require `value` and `label`; they may add `keywords` and
+`status`. A pick loader receives `{ query, context }`, may be async, returns at
+most 128 options, and cannot emit actions. Handler values are available under
+`inputs.<id>` as `string | boolean`.
 
 ## Context
 
@@ -88,23 +95,26 @@ Always present:
 
 - `platform`: `macos | linux | windows`
 - `appVersion`: string
+- `origin`: stable `{ windowId, tabId?, paneId? }`
 - `shell`: resolved session launch shell
 - `runtime`: `native | tmux`
 - `selectedTextTruncated`: boolean
-- `settings`, `toasts`
+- `settings`, `toasts`, `signal`, `progress`
 
 Optional:
 
 - `workingDirectory`
 - `activeCommand`
 - `selectedText`
-- `activeTab`: `{ index, title, paneCount }`
-- `activePane`: `{ index, kind: "terminal" }`
+- `activeTab`: `{ id, index, title, paneCount }`
+- `activePane`: `{ id, index, kind: "terminal" }`
 
 Indexes are zero-based. Selection is capped at 64 KiB at a UTF-8 boundary. Use
 `selectedTextTruncated` when completeness matters.
 
 Toast methods are `info`, `success`, `warning`, and `error`.
+`context.signal` aborts when the user cancels the invocation. Report an optional
+message and percentage from 0 through 100 with `context.progress.report(...)`.
 
 ## Settings and storage
 
@@ -138,20 +148,38 @@ Handlers may return nothing, one action, an action array, or `{ actions: [...] }
 
 | Action | Shape |
 | --- | --- |
-| Run shell | `{ type: "terminal.run", command, workingDirectory? }` |
+| Run shell (legacy) | `{ type: "terminal.run", command, workingDirectory? }` |
+| Send text | `{ type: "terminal.sendText", text, submit?, target? }` |
+| Open terminal | `{ type: "terminal.open", location?, workingDirectory?, launch?, target?, focus? }` |
 | Invoke Termy | `{ type: "termy.command", command }` |
 | Copy | `{ type: "clipboard.write", text }` |
 | Open URL | `{ type: "url.open", url }` with `http` or `https` |
-| Open view | `{ type: "view.open", view }`; requires `native-ui` |
+| Open view | `{ type: "view.open", view, target?, params? }`; requires `native-ui` |
+| Replace view | `{ type: "view.replace", view, params? }` |
+| Close view | `{ type: "view.close" }` |
 | Toast | `{ type: "toast", level, message }` |
+
+Terminal targets are `origin`, `active`, or exact stable IDs. Terminal locations
+are `tab`, `splitRight`, `splitDown`, or `window`. A launch is either
+`{ type: "shell", command }` or `{ type: "program", program, args? }`. Structured
+program launches are available in native terminals; tmux rejects them because it
+cannot preserve argv boundaries without introducing shell parsing.
+Exact targets must belong to the Termy window that delivered the invocation.
+`focus: false` restores the previous pane for tabs and splits; new OS windows
+necessarily receive focus.
 
 ## Lifecycle events
 
 Supported event keys:
 
 - `terminal.ready`: runs once after the plugin catalog is ready.
-- `tab.activated`: optional `previousTabIndex`.
+- `tab.activated`: optional `previousTabIndex` and `previousTabId`.
+- `pane.activated`: optional `previousPaneId`.
+- `tab.created`: created `tabId`.
+- `tab.closed`: closed `tabId`.
+- `terminal.bell`: active native terminal bell.
 - `workingDirectory.changed`: optional previous/current directories.
+- `command.started`: optional `command`.
 - `command.finished`: optional `command`, `exitCode`, and `durationMs`.
 
 All handlers receive the same context snapshot as commands. Native shell integration
@@ -176,6 +204,12 @@ Supported components:
 | `Column`, `Row` | `gap`, `align`, children |
 | `Text` | `variant`, `tone`, text children |
 | `TextInput` | `id`, `label`, `placeholder`, `value`, `maxLength`, `submit`, `disabled` |
+| `TextArea` | TextInput props plus `rows` |
+| `Select` | `id`, `label`, `placeholder`, `value`, `options`, `action`, `disabled` |
+| `List` | `id`, `action`, `selectedId`, `searchPlaceholder`, `filtering`, `isLoading`, children |
+| `ListItem` | `id`, `title`, `subtitle`, `keywords`, `status`, `payload`, `action`, `disabled` |
+| `EmptyState` | `title`, `description` |
+| `Progress` | `label`, `value` |
 | `Button` | `id`, `action`, `payload`, `variant`, `disabled`, text children |
 | `Checkbox` | `id`, `action`, `payload`, `checked`, `disabled`, text children |
 | `Divider` | none |
@@ -189,9 +223,9 @@ Semantic values:
 - tone: `default`, `muted`, `success`, `danger`
 - button variant: `secondary`, `primary`, `danger`
 
-Interactive controls use named strings, not callbacks. `Button` and `Checkbox`
-require `id` and `action`; `TextInput` requires `id` and may submit a named action.
-All control IDs in one document must be unique.
+Interactive controls use named strings, not callbacks. Buttons, checkboxes,
+selects, lists, and list items emit named actions; text controls may submit one.
+All control IDs in one document must be unique and are keyboard accessible.
 
 `onAction` receives:
 
@@ -199,11 +233,14 @@ All control IDs in one document must be unique.
 {
   action: { id, controlId, payload?, value? },
   values: Readonly<Record<string, string | boolean>>,
+  params,
   context
 }
 ```
 
-Termy reruns `render` after `onAction` completes.
+`view.open` and `view.replace` accept a JSON object up to 64 KiB. Termy passes the
+same frozen `params` object to `render` and `onAction`, then reruns `render` after
+`onAction` completes.
 
 ## CLI and managed locations
 

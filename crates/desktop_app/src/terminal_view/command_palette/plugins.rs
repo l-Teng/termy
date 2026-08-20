@@ -1,14 +1,19 @@
 use super::*;
 use serde_json::Value;
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::atomic::{AtomicU64, Ordering},
+};
 use termy_plugin_runtime::{
     PluginAction, PluginCommand, PluginCommandPlacement, PluginContext, PluginEvent,
-    PluginEventDispatch, PluginIcon, PluginInput, PluginPaneContext, PluginPaneKind,
-    PluginRuntimeKind, PluginTabContext, PluginToastLevel,
+    PluginEventDispatch, PluginIcon, PluginInput, PluginOriginContext, PluginPaneContext,
+    PluginPaneKind, PluginRuntimeKind, PluginSelectOption, PluginTabContext, PluginTerminalLaunch,
+    PluginTerminalOpenLocation, PluginTerminalTarget, PluginTerminalTargetKind, PluginToastLevel,
 };
 
 const PLUGIN_SELECTED_TEXT_MAX_BYTES: usize = 64 * 1024;
 const MAX_PENDING_PLUGIN_EVENTS: usize = 64;
+static NEXT_PLUGIN_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
 struct PendingPluginEvent {
     event: PluginEvent,
@@ -17,8 +22,10 @@ struct PendingPluginEvent {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PluginLifecycleSnapshot {
-    active_tab_id: Option<TabId>,
+    active_tab_id: Option<String>,
     active_tab_index: Option<usize>,
+    active_pane_id: Option<String>,
+    tab_ids: BTreeSet<String>,
     working_directory: Option<String>,
     active_command: Option<String>,
 }
@@ -41,14 +48,28 @@ impl PluginLifecycleTracker {
         infer_command_finished: bool,
         now: Instant,
     ) -> Vec<PluginEvent> {
-        if next.active_tab_id != self.snapshot.active_tab_id {
-            let previous_tab_index = self.snapshot.active_tab_index;
-            self.command_started_at = next.active_command.as_ref().map(|_| now);
-            self.snapshot = next;
-            return vec![PluginEvent::TabActivated { previous_tab_index }];
-        }
-
         let mut events = Vec::new();
+        for tab_id in next.tab_ids.difference(&self.snapshot.tab_ids) {
+            events.push(PluginEvent::TabCreated {
+                tab_id: tab_id.clone(),
+            });
+        }
+        for tab_id in self.snapshot.tab_ids.difference(&next.tab_ids) {
+            events.push(PluginEvent::TabClosed {
+                tab_id: tab_id.clone(),
+            });
+        }
+        if next.active_tab_id != self.snapshot.active_tab_id {
+            events.push(PluginEvent::TabActivated {
+                previous_tab_index: self.snapshot.active_tab_index,
+                previous_tab_id: self.snapshot.active_tab_id.clone(),
+            });
+        }
+        if next.active_pane_id != self.snapshot.active_pane_id {
+            events.push(PluginEvent::PaneActivated {
+                previous_pane_id: self.snapshot.active_pane_id.clone(),
+            });
+        }
         if next.working_directory != self.snapshot.working_directory {
             events.push(PluginEvent::WorkingDirectoryChanged {
                 previous_working_directory: self.snapshot.working_directory.clone(),
@@ -68,6 +89,11 @@ impl PluginLifecycleTracker {
             });
         }
         if next.active_command != self.snapshot.active_command {
+            if let Some(command) = next.active_command.clone() {
+                events.push(PluginEvent::CommandStarted {
+                    command: Some(command),
+                });
+            }
             self.command_started_at = next.active_command.as_ref().map(|_| now);
         }
         self.snapshot = next;
@@ -77,6 +103,7 @@ impl PluginLifecycleTracker {
 
 pub(in crate::terminal_view) struct PluginLifecycleState {
     window_handle: gpui::AnyWindowHandle,
+    window_id: String,
     terminal_ready_emitted: bool,
     tracker: PluginLifecycleTracker,
     pending: VecDeque<PendingPluginEvent>,
@@ -88,6 +115,10 @@ impl PluginLifecycleState {
     pub(in crate::terminal_view) fn new(window_handle: gpui::AnyWindowHandle) -> Self {
         Self {
             window_handle,
+            window_id: format!(
+                "window-{}",
+                NEXT_PLUGIN_WINDOW_ID.fetch_add(1, Ordering::Relaxed)
+            ),
             terminal_ready_emitted: false,
             tracker: PluginLifecycleTracker::default(),
             pending: VecDeque::new(),
@@ -103,6 +134,12 @@ pub(super) struct PluginInputSession {
     pub(super) revision: String,
     pub(super) input_index: usize,
     pub(super) values: BTreeMap<String, Value>,
+    pick_input_id: Option<String>,
+    pick_query: String,
+    pick_options: Vec<PluginSelectOption>,
+    pick_loading: bool,
+    pick_error: Option<String>,
+    pick_generation: u64,
 }
 
 impl PluginInputSession {
@@ -112,6 +149,12 @@ impl PluginInputSession {
             revision,
             input_index: 0,
             values: BTreeMap::new(),
+            pick_input_id: None,
+            pick_query: String::new(),
+            pick_options: Vec::new(),
+            pick_loading: false,
+            pick_error: None,
+            pick_generation: 0,
         }
     }
 
@@ -141,6 +184,7 @@ impl PluginInputSession {
         match input {
             PluginInput::Text { label, .. } => label.clone(),
             PluginInput::Select { label, .. } => label.clone(),
+            PluginInput::Pick { label, .. } => label.clone(),
             PluginInput::Confirm { .. } => "Choose Yes or No".to_string(),
         }
     }
@@ -154,7 +198,10 @@ impl PluginInputSession {
                 .get(id)
                 .and_then(Value::as_str)
                 .map_or_else(|| default_value.clone().unwrap_or_default(), str::to_string),
-            Some(PluginInput::Select { .. } | PluginInput::Confirm { .. }) | None => String::new(),
+            Some(
+                PluginInput::Select { .. } | PluginInput::Pick { .. } | PluginInput::Confirm { .. },
+            )
+            | None => String::new(),
         }
     }
 
@@ -163,8 +210,18 @@ impl PluginInputSession {
             return None;
         }
         self.input_index -= 1;
+        self.reset_pick();
         self.current_input()?;
         Some(self.input_prefill())
+    }
+
+    fn reset_pick(&mut self) {
+        self.pick_input_id = None;
+        self.pick_query.clear();
+        self.pick_options.clear();
+        self.pick_loading = false;
+        self.pick_error = None;
+        self.pick_generation = self.pick_generation.wrapping_add(1);
     }
 }
 
@@ -185,6 +242,12 @@ fn promote_stored_plugin_input_value(
     };
     let stored_item = items.remove(index);
     items.insert(0, stored_item);
+}
+
+fn preferred_pick_value(stored: Option<&Value>, default_value: Option<&str>) -> Option<Value> {
+    stored
+        .cloned()
+        .or_else(|| default_value.map(|value| Value::String(value.to_string())))
 }
 
 fn plugin_selected_text(mut text: Option<String>) -> (Option<String>, bool) {
@@ -234,6 +297,7 @@ impl TerminalView {
                 .tabs
                 .get(self.session.active_tab)
                 .map(|tab| PluginTabContext {
+                    id: tab.id.to_string(),
                     index: self.session.active_tab,
                     title: tab.title.clone(),
                     pane_count: tab.panes.len(),
@@ -244,13 +308,19 @@ impl TerminalView {
             .get(self.session.active_tab)
             .and_then(|tab| {
                 let index = tab.active_pane_index()?;
-                tab.panes.get(index)?;
+                let pane = tab.panes.get(index)?;
                 Some(PluginPaneContext {
+                    id: pane.id.clone(),
                     index,
                     kind: PluginPaneKind::Terminal,
                 })
             });
         PluginContext {
+            origin: PluginOriginContext {
+                window_id: self.plugin_lifecycle.window_id.clone(),
+                tab_id: active_tab.as_ref().map(|tab| tab.id.clone()),
+                pane_id: active_pane.as_ref().map(|pane| pane.id.clone()),
+            },
             working_directory,
             active_command: self.active_current_command().map(str::to_string),
             selected_text,
@@ -271,8 +341,17 @@ impl TerminalView {
     fn plugin_lifecycle_snapshot(&self) -> PluginLifecycleSnapshot {
         let active_tab = self.session.tabs.get(self.session.active_tab);
         PluginLifecycleSnapshot {
-            active_tab_id: active_tab.map(|tab| tab.id),
+            active_tab_id: active_tab.map(|tab| tab.id.to_string()),
             active_tab_index: active_tab.map(|_| self.session.active_tab),
+            active_pane_id: active_tab
+                .and_then(TerminalTab::active_pane_id)
+                .map(str::to_string),
+            tab_ids: self
+                .session
+                .tabs
+                .iter()
+                .map(|tab| tab.id.to_string())
+                .collect(),
             working_directory: active_tab.and_then(|tab| tab.last_prompt_cwd.clone()),
             active_command: self.active_current_command().map(str::to_string),
         }
@@ -350,7 +429,7 @@ impl TerminalView {
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let dispatch =
                 smol::unblock(move || runtime.dispatch_event(pending.event, pending.context)).await;
-            cx.update(|cx| {
+            let _ = cx.update(|cx| {
                 let Some(window_handle) = window_handle.downcast::<Self>() else {
                     return;
                 };
@@ -458,8 +537,11 @@ impl TerminalView {
         .detach();
     }
 
-    pub(super) fn command_palette_plugin_items(&self) -> Vec<CommandPaletteItem> {
-        self.plugin_commands_for_placement(PluginCommandPlacement::CommandPalette)
+    pub(super) fn command_palette_plugin_items(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<CommandPaletteItem> {
+        self.plugin_commands_for_placement(PluginCommandPlacement::CommandPalette, cx)
             .into_iter()
             .map(|command| {
                 let enabled = command.disabled_reason.is_none();
@@ -487,10 +569,14 @@ impl TerminalView {
     }
 
     pub(in crate::terminal_view) fn plugin_commands_for_placement(
-        &self,
+        &mut self,
         placement: PluginCommandPlacement,
+        cx: &mut Context<Self>,
     ) -> Vec<PluginCommand> {
-        placed_plugin_commands(self.plugin_runtime.commands(), placement)
+        let context = self.plugin_context(cx);
+        let mut commands = placed_plugin_commands(self.plugin_runtime.commands(), placement);
+        commands.retain(|command| command.when.matches(&context));
+        commands
     }
 
     pub(super) fn plugin_input_uses_free_text(&self) -> bool {
@@ -499,7 +585,7 @@ impl TerminalView {
                 .plugin_input_session
                 .as_ref()
                 .and_then(PluginInputSession::current_input),
-            Some(PluginInput::Text { .. })
+            Some(PluginInput::Text { .. } | PluginInput::Pick { .. })
         )
     }
 
@@ -588,6 +674,86 @@ impl TerminalView {
                 promote_stored_plugin_input_value(&mut items, session.values.get(input.id()));
                 items
             }
+            PluginInput::Pick {
+                required,
+                default_value,
+                ..
+            } => {
+                if session.pick_loading {
+                    return vec![CommandPaletteItem {
+                        title: "Loading options…".to_string(),
+                        keywords: String::new(),
+                        enabled: false,
+                        status_hint: None,
+                        tmux_status_hint: None,
+                        kind: CommandPaletteItemKind::PluginInputOption {
+                            value: Value::Null,
+                            icon: session.command.icon,
+                        },
+                    }];
+                }
+                if let Some(error) = session.pick_error.as_ref() {
+                    return vec![CommandPaletteItem {
+                        title: "Couldn’t load options".to_string(),
+                        keywords: String::new(),
+                        enabled: false,
+                        status_hint: Some(error.clone()),
+                        tmux_status_hint: None,
+                        kind: CommandPaletteItemKind::PluginInputOption {
+                            value: Value::Null,
+                            icon: session.command.icon,
+                        },
+                    }];
+                }
+                let mut items = session
+                    .pick_options
+                    .iter()
+                    .map(|option| CommandPaletteItem {
+                        title: option.label.clone(),
+                        keywords: std::iter::once(option.value.clone())
+                            .chain(option.keywords.iter().cloned())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        enabled: true,
+                        status_hint: option.status.clone(),
+                        tmux_status_hint: None,
+                        kind: CommandPaletteItemKind::PluginInputOption {
+                            value: Value::String(option.value.clone()),
+                            icon: session.command.icon,
+                        },
+                    })
+                    .collect::<Vec<_>>();
+                if !required {
+                    items.push(CommandPaletteItem {
+                        title: "Skip".to_string(),
+                        keywords: "none skip optional".to_string(),
+                        enabled: true,
+                        status_hint: Some("Optional".to_string()),
+                        tmux_status_hint: None,
+                        kind: CommandPaletteItemKind::PluginInputOption {
+                            value: Value::Null,
+                            icon: session.command.icon,
+                        },
+                    });
+                }
+                if items.is_empty() {
+                    items.push(CommandPaletteItem {
+                        title: "No matching options".to_string(),
+                        keywords: String::new(),
+                        enabled: false,
+                        status_hint: None,
+                        tmux_status_hint: None,
+                        kind: CommandPaletteItemKind::PluginInputOption {
+                            value: Value::Null,
+                            icon: session.command.icon,
+                        },
+                    });
+                }
+                let selected_value =
+                    preferred_pick_value(session.values.get(input.id()), default_value.as_deref());
+                promote_stored_plugin_input_value(&mut items, selected_value.as_ref());
+                items
+            }
             PluginInput::Confirm { default_value, .. } => {
                 let values = if *default_value {
                     [("Yes", true), ("No", false)]
@@ -612,6 +778,83 @@ impl TerminalView {
                 items
             }
         }
+    }
+
+    pub(super) fn schedule_plugin_pick_options(&mut self, cx: &mut Context<Self>) {
+        let query = self.command_palette.input().text().to_string();
+        let request = {
+            let Some(session) = self.command_palette.plugin_input_session.as_mut() else {
+                return;
+            };
+            let Some(PluginInput::Pick { id, .. }) = session.current_input().cloned() else {
+                return;
+            };
+            if session.pick_input_id.as_deref() == Some(id.as_str()) && session.pick_query == query
+            {
+                return;
+            }
+            session.pick_generation = session.pick_generation.wrapping_add(1);
+            session.pick_input_id = Some(id.clone());
+            session.pick_query = query.clone();
+            session.pick_options.clear();
+            session.pick_loading = true;
+            session.pick_error = None;
+            (
+                session.command.plugin_id.clone(),
+                session.command.id.clone(),
+                id,
+                session.revision.clone(),
+                session.pick_generation,
+            )
+        };
+        let context = self.plugin_context(cx);
+        let runtime = self.plugin_runtime.clone();
+        let window_handle = self.plugin_lifecycle.window_handle;
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            smol::Timer::after(Duration::from_millis(150)).await;
+            let (plugin_id, command_id, input_id, revision, generation) = request;
+            let completed_input_id = input_id.clone();
+            let result = smol::unblock(move || {
+                runtime.resolve_pick_options(
+                    &plugin_id,
+                    &command_id,
+                    &input_id,
+                    &revision,
+                    &query,
+                    context,
+                )
+            })
+            .await;
+            let _ = cx.update(|cx| {
+                let Some(window_handle) = window_handle.downcast::<Self>() else {
+                    return;
+                };
+                let _ = window_handle.update(cx, |view, _window, cx| {
+                    let Some(session) = view.command_palette.plugin_input_session.as_mut() else {
+                        return;
+                    };
+                    if session.pick_generation != generation
+                        || session.pick_input_id.as_deref() != Some(completed_input_id.as_str())
+                    {
+                        return;
+                    }
+                    session.pick_loading = false;
+                    match result {
+                        Ok(options) => {
+                            session.pick_options = options;
+                            session.pick_error = None;
+                        }
+                        Err(error) => {
+                            session.pick_options.clear();
+                            session.pick_error = Some(error);
+                        }
+                    }
+                    view.refresh_command_palette_matches(false, cx);
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
     }
 
     pub(super) fn plugin_input_mode_title(&self) -> String {
@@ -674,6 +917,12 @@ impl TerminalView {
             self.notify_overlay(cx);
             return;
         }
+        let context = self.plugin_context(cx);
+        if !command.when.matches(&context) {
+            crate::ui::toast::info("That plugin command is not available in this terminal context");
+            self.notify_overlay(cx);
+            return;
+        }
         if command.inputs.is_empty() {
             self.invoke_plugin_command(command, revision, BTreeMap::new(), window, cx);
             return;
@@ -713,7 +962,7 @@ impl TerminalView {
         let command_id = command_id.to_string();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let refresh = smol::unblock(move || runtime.refresh_if_changed()).await;
-            cx.update(|cx| {
+            let _ = cx.update(|cx| {
                 let _ = window_handle.update(cx, |view, window, cx| {
                     view.update_plugin_refresh_error(&refresh.errors, cx);
                     view.start_plugin_command(&plugin_id, &command_id, window, cx);
@@ -764,6 +1013,14 @@ impl TerminalView {
                     return;
                 }
             }
+            if let PluginInput::Pick { required, .. } = &input
+                && *required
+                && value.as_str().is_none_or(|value| value.trim().is_empty())
+            {
+                crate::ui::toast::info(format!("{} is required", input.label()));
+                self.notify_overlay(cx);
+                return;
+            }
             if value.is_null() {
                 session.values.remove(input.id());
             } else {
@@ -777,6 +1034,7 @@ impl TerminalView {
                 ));
             } else {
                 session.input_index += 1;
+                session.reset_pick();
                 next_prefill = Some(session.input_prefill());
             }
         }
@@ -835,13 +1093,56 @@ impl TerminalView {
             self.notify_overlay(cx);
             return;
         };
-        let loading_id = crate::ui::toast::loading(format!("Running {title}…"));
+        let loading_id = crate::ui::toast::enqueue_actionable_toast_with_id(
+            crate::ui::toast::ToastKind::Loading,
+            format!("Running {title}…"),
+            Some(Duration::from_secs(60 * 60)),
+            Some("Cancel".to_string()),
+        );
+        let (progress_tx, progress_rx) = flume::bounded(32);
+        let control =
+            termy_plugin_runtime::PluginInvocationControl::with_progress_handler(move |progress| {
+                let _ = progress_tx.try_send(progress);
+            });
+        self.plugin_invocations.insert(loading_id, control.clone());
+        let progress_window_handle = window_handle;
+        let progress_title = title;
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            while let Ok(progress) = progress_rx.recv_async().await {
+                let detail = match (progress.message, progress.percentage) {
+                    (Some(message), Some(percentage)) => {
+                        format!("{progress_title}: {message} ({percentage}%)")
+                    }
+                    (Some(message), None) => format!("{progress_title}: {message}"),
+                    (None, Some(percentage)) => format!("{progress_title} ({percentage}%)"),
+                    (None, None) => format!("Running {progress_title}…"),
+                };
+                let _ = cx.update(|cx| {
+                    crate::ui::toast::update_toast(
+                        loading_id,
+                        crate::ui::toast::ToastKind::Loading,
+                        detail,
+                    );
+                    let _ = progress_window_handle.update(cx, |view, _window, cx| {
+                        view.notify_overlay(cx);
+                    });
+                });
+            }
+        })
+        .detach();
         self.close_command_palette(cx);
         self.notify_overlay(cx);
 
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = smol::unblock(move || {
-                let result = runtime.invoke(&plugin_id, &command_id, &revision, inputs, context);
+                let result = runtime.invoke_with_control(
+                    &plugin_id,
+                    &command_id,
+                    &revision,
+                    inputs,
+                    context,
+                    &control,
+                );
                 let opens_view = result.as_ref().is_ok_and(|actions| {
                     actions
                         .iter()
@@ -853,9 +1154,10 @@ impl TerminalView {
                 result
             })
             .await;
-            cx.update(|cx| {
+            let _ = cx.update(|cx| {
                 crate::ui::toast::dismiss_toast(loading_id);
                 let _ = window_handle.update(cx, |view, window, cx| {
+                    view.plugin_invocations.remove(&loading_id);
                     match result {
                         Ok(actions) => {
                             if let Err(error) = view.apply_plugin_actions(actions, window, cx) {
@@ -875,6 +1177,24 @@ impl TerminalView {
         .detach();
     }
 
+    pub(in crate::terminal_view) fn cancel_plugin_invocation(
+        &mut self,
+        toast_id: u64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(control) = self.plugin_invocations.get(&toast_id) else {
+            return false;
+        };
+        control.cancel();
+        crate::ui::toast::update_toast(
+            toast_id,
+            crate::ui::toast::ToastKind::Loading,
+            "Cancelling plugin command…",
+        );
+        self.notify_overlay(cx);
+        true
+    }
+
     pub(in crate::terminal_view) fn apply_plugin_actions(
         &mut self,
         actions: Vec<PluginAction>,
@@ -892,29 +1212,115 @@ impl TerminalView {
         for action in actions {
             match action {
                 PluginAction::TerminalRun {
-                    mut command,
+                    command,
                     working_directory,
                 } => {
-                    if !command.ends_with('\n') {
-                        command.push('\n');
-                    }
-                    if !self.add_tab_with_working_dir(working_directory.as_deref(), cx) {
+                    let launch = TerminalLaunch::ShellCommand(command);
+                    if !self.add_tab_with_launch(working_directory.as_deref(), Some(&launch), cx) {
                         return Err(
                             "Plugin command stopped because its terminal could not be created"
                                 .to_string(),
                         );
                     }
-                    let terminal = self
+                    cx.notify();
+                }
+                PluginAction::TerminalSendText {
+                    text,
+                    submit,
+                    target,
+                } => {
+                    let (_, pane_id) = self.resolve_plugin_terminal_target(&target)?;
+                    let mut input = text.into_bytes();
+                    if submit {
+                        input.push(b'\n');
+                    }
+                    if !self.send_input_to_pane(&pane_id, &input) {
+                        return Err("Plugin terminal target stopped accepting input".to_string());
+                    }
+                }
+                PluginAction::TerminalOpen {
+                    location,
+                    working_directory,
+                    launch,
+                    target,
+                    focus,
+                } => {
+                    let previous_tab_id = self
                         .session
                         .tabs
                         .get(self.session.active_tab)
-                        .and_then(TerminalTab::active_terminal)
-                        .ok_or_else(|| {
-                            "Plugin command stopped because the new terminal is unavailable"
-                                .to_string()
-                        })?;
-                    terminal.write_input(command.as_bytes());
-                    cx.notify();
+                        .map(|tab| tab.id);
+                    let previous_pane_id = self.active_pane_id().map(str::to_string);
+                    let launch = launch.map(Self::terminal_launch);
+                    if self.runtime_kind().uses_tmux()
+                        && matches!(launch, Some(TerminalLaunch::Program { .. }))
+                    {
+                        return Err(
+                            "Plugin structured program launches require the native runtime"
+                                .to_string(),
+                        );
+                    }
+                    let _ = self.focus_plugin_terminal_target(&target, cx)?;
+                    let opened = match location {
+                        PluginTerminalOpenLocation::Tab => self.add_tab_with_launch(
+                            working_directory.as_deref(),
+                            launch.as_ref(),
+                            cx,
+                        ),
+                        PluginTerminalOpenLocation::SplitRight => self
+                            .split_active_pane_vertical_with_launch(
+                                working_directory.as_deref(),
+                                launch.as_ref(),
+                                cx,
+                            ),
+                        PluginTerminalOpenLocation::SplitDown => self
+                            .split_active_pane_horizontal_with_launch(
+                                working_directory.as_deref(),
+                                launch.as_ref(),
+                                cx,
+                            ),
+                        PluginTerminalOpenLocation::Window => {
+                            let window_handle =
+                                crate::open_main_window_with_runtime_config_overrides(
+                                    cx,
+                                    working_directory.clone(),
+                                )?;
+                            if let Some(launch) = launch.clone() {
+                                window_handle
+                                    .update(cx, |view, _window, cx| match launch {
+                                        TerminalLaunch::ShellCommand(command) => {
+                                            let mut input = command.into_bytes();
+                                            input.push(b'\n');
+                                            view.send_input_to_active_pane(&input)
+                                        }
+                                        program @ TerminalLaunch::Program { .. } => {
+                                            if !view.add_tab_with_launch(
+                                                working_directory.as_deref(),
+                                                Some(&program),
+                                                cx,
+                                            ) {
+                                                return false;
+                                            }
+                                            view.close_tab(0, cx);
+                                            true
+                                        }
+                                    })
+                                    .map_err(|error| {
+                                        format!(
+                                            "Plugin terminal window became unavailable: {error}"
+                                        )
+                                    })?
+                            } else {
+                                true
+                            }
+                        }
+                    };
+                    if !opened {
+                        return Err("Plugin terminal could not be opened".to_string());
+                    }
+                    if !focus && location != PluginTerminalOpenLocation::Window {
+                        self.restore_plugin_terminal_focus(previous_tab_id, previous_pane_id, cx);
+                    }
                 }
                 PluginAction::TermyCommand { command } => {
                     let action = CommandAction::from_config_name(&command)
@@ -937,14 +1343,119 @@ impl TerminalView {
                 PluginAction::ViewOpen {
                     view,
                     target,
+                    params,
                     plugin_id,
                     revision,
                 } => {
-                    self.open_plugin_ui(&plugin_id, &view, &revision, target, window, cx)?;
+                    self.open_plugin_ui(&plugin_id, &view, &revision, target, params, window, cx)?;
+                }
+                PluginAction::ViewReplace {
+                    view,
+                    params,
+                    plugin_id,
+                    revision,
+                } => {
+                    self.replace_plugin_ui(&plugin_id, &view, &revision, params, cx)?;
+                }
+                PluginAction::ViewClose {
+                    plugin_id,
+                    revision,
+                } => {
+                    let plugin_ui = self.plugin_ui.as_ref().ok_or_else(|| {
+                        "Plugin returned view.close without an open view".to_string()
+                    })?;
+                    if !plugin_ui.read(cx).belongs_to(&plugin_id, &revision) {
+                        return Err("Plugin cannot close another plugin's view".to_string());
+                    }
+                    self.close_plugin_ui(window, cx);
                 }
             }
         }
         Ok(())
+    }
+
+    fn resolve_plugin_terminal_target(
+        &self,
+        target: &PluginTerminalTarget,
+    ) -> Result<(usize, String), String> {
+        let (tab_id, pane_id) = match target {
+            PluginTerminalTarget::Named(PluginTerminalTargetKind::Active) => (None, None),
+            PluginTerminalTarget::Named(PluginTerminalTargetKind::Origin) => {
+                return Err("Plugin terminal origin was not resolved by the runtime".to_string());
+            }
+            PluginTerminalTarget::Exact {
+                window_id,
+                tab_id,
+                pane_id,
+            } => {
+                if window_id != &self.plugin_lifecycle.window_id {
+                    return Err("Plugin terminal target belongs to another window".to_string());
+                }
+                (tab_id.as_deref(), pane_id.as_deref())
+            }
+        };
+        let tab_index = if let Some(tab_id) = tab_id {
+            self.session
+                .tabs
+                .iter()
+                .position(|tab| tab.id.to_string() == tab_id)
+                .ok_or_else(|| "Plugin terminal target tab is no longer available".to_string())?
+        } else {
+            self.session.active_tab
+        };
+        let tab = self
+            .session
+            .tabs
+            .get(tab_index)
+            .ok_or_else(|| "Plugin terminal target tab is unavailable".to_string())?;
+        let pane_id = pane_id
+            .map(str::to_string)
+            .or_else(|| tab.active_pane_id().map(str::to_string))
+            .ok_or_else(|| "Plugin terminal target pane is unavailable".to_string())?;
+        if !tab.panes.iter().any(|pane| pane.id == pane_id) {
+            return Err("Plugin terminal target pane is no longer available".to_string());
+        }
+        Ok((tab_index, pane_id))
+    }
+
+    fn focus_plugin_terminal_target(
+        &mut self,
+        target: &PluginTerminalTarget,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let (tab_index, pane_id) = self.resolve_plugin_terminal_target(target)?;
+        if tab_index != self.session.active_tab {
+            self.switch_tab(tab_index, cx);
+        }
+        if self.active_pane_id() != Some(pane_id.as_str()) {
+            self.focus_pane_target(&pane_id, cx);
+        }
+        Ok(pane_id)
+    }
+
+    fn terminal_launch(launch: PluginTerminalLaunch) -> TerminalLaunch {
+        match launch {
+            PluginTerminalLaunch::Shell { command } => TerminalLaunch::ShellCommand(command),
+            PluginTerminalLaunch::Program { program, args } => {
+                TerminalLaunch::Program { program, args }
+            }
+        }
+    }
+
+    fn restore_plugin_terminal_focus(
+        &mut self,
+        tab_id: Option<TabId>,
+        pane_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab_id) = tab_id
+            && let Some(index) = self.session.tabs.iter().position(|tab| tab.id == tab_id)
+        {
+            self.switch_tab(index, cx);
+        }
+        if let Some(pane_id) = pane_id {
+            self.focus_pane_target(&pane_id, cx);
+        }
     }
 }
 
@@ -962,346 +1473,5 @@ pub(super) fn plugin_icon_path(icon: PluginIcon) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use termy_plugin_runtime::PluginSelectOption;
-
-    fn lifecycle_snapshot(
-        tab_id: u64,
-        tab_index: usize,
-        working_directory: &str,
-        active_command: Option<&str>,
-    ) -> PluginLifecycleSnapshot {
-        PluginLifecycleSnapshot {
-            active_tab_id: Some(tab_id),
-            active_tab_index: Some(tab_index),
-            working_directory: Some(working_directory.to_string()),
-            active_command: active_command.map(str::to_string),
-        }
-    }
-
-    fn command(inputs: Vec<PluginInput>) -> PluginCommand {
-        PluginCommand {
-            plugin_id: "test".to_string(),
-            plugin_name: "Test".to_string(),
-            id: "run".to_string(),
-            title: "Test: Run".to_string(),
-            placements: vec![PluginCommandPlacement::CommandPalette],
-            keywords: Vec::new(),
-            status: None,
-            disabled_reason: None,
-            icon: PluginIcon::Command,
-            inputs,
-            timeout_ms: 10_000,
-        }
-    }
-
-    #[test]
-    fn plugin_placements_filter_and_sort_context_menu_commands() {
-        let placed = |plugin_name: &str,
-                      id: &str,
-                      title: &str,
-                      placements: Vec<PluginCommandPlacement>,
-                      disabled_reason: Option<&str>| {
-            let mut command = command(Vec::new());
-            command.plugin_id = plugin_name.to_lowercase();
-            command.plugin_name = plugin_name.to_string();
-            command.id = id.to_string();
-            command.title = title.to_string();
-            command.placements = placements;
-            command.disabled_reason = disabled_reason.map(str::to_string);
-            command
-        };
-        let commands = vec![
-            placed(
-                "Zulu",
-                "palette",
-                "Palette only",
-                vec![PluginCommandPlacement::CommandPalette],
-                None,
-            ),
-            placed(
-                "Beta",
-                "later",
-                "Later",
-                vec![PluginCommandPlacement::TerminalContextMenu],
-                None,
-            ),
-            placed(
-                "alpha",
-                "disabled",
-                "Disabled but visible",
-                vec![PluginCommandPlacement::TerminalContextMenu],
-                Some("Unavailable"),
-            ),
-            placed("Hidden", "hidden", "Hidden", Vec::new(), None),
-        ];
-
-        let visible = placed_plugin_commands(commands, PluginCommandPlacement::TerminalContextMenu);
-
-        assert_eq!(
-            visible
-                .iter()
-                .map(|command| command.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["disabled", "later"]
-        );
-        assert_eq!(
-            visible[0].disabled_reason.as_deref(),
-            Some("Unavailable"),
-            "disabled commands remain visible so the menu can explain their state"
-        );
-    }
-
-    #[test]
-    fn input_session_uses_defaults_and_tracks_progress() {
-        let session = PluginInputSession::new(
-            command(vec![
-                PluginInput::Text {
-                    id: "name".to_string(),
-                    label: "Name".to_string(),
-                    placeholder: None,
-                    default_value: Some("Termy".to_string()),
-                    required: true,
-                    max_length: 80,
-                },
-                PluginInput::Confirm {
-                    id: "confirm".to_string(),
-                    label: "Continue?".to_string(),
-                    default_value: true,
-                },
-            ]),
-            "test-revision".to_string(),
-        );
-        assert_eq!(session.input_prefill(), "Termy");
-        assert_eq!(session.progress_label(), "1 of 2");
-        assert!(!session.is_last_input());
-        assert!(!session.can_go_back());
-    }
-
-    #[test]
-    fn next_plugin_input_resets_selection_to_the_default_row() {
-        let mut state = CommandPaletteState::new(false);
-        let option = |label: &str, value: bool| CommandPaletteItem {
-            title: label.to_string(),
-            keywords: String::new(),
-            enabled: true,
-            status_hint: None,
-            tmux_status_hint: None,
-            kind: CommandPaletteItemKind::PluginInputOption {
-                value: Value::Bool(value),
-                icon: PluginIcon::Command,
-            },
-        };
-        state.set_items(vec![option("Yes", true), option("No", false)]);
-        assert!(state.set_selected_filtered_index(1));
-
-        state.reset_for_next_plugin_input();
-
-        assert_eq!(state.selected_filtered_index(), Some(0));
-    }
-
-    #[test]
-    fn moving_back_preserves_select_and_confirm_values() {
-        let mut session = PluginInputSession::new(
-            command(vec![
-                PluginInput::Select {
-                    id: "target".to_string(),
-                    label: "Target".to_string(),
-                    placeholder: None,
-                    default_value: Some("debug".to_string()),
-                    required: true,
-                    options: vec![
-                        PluginSelectOption {
-                            value: "debug".to_string(),
-                            label: "Debug".to_string(),
-                            keywords: Vec::new(),
-                            status: None,
-                        },
-                        PluginSelectOption {
-                            value: "release".to_string(),
-                            label: "Release".to_string(),
-                            keywords: Vec::new(),
-                            status: None,
-                        },
-                    ],
-                },
-                PluginInput::Confirm {
-                    id: "confirmed".to_string(),
-                    label: "Continue?".to_string(),
-                    default_value: true,
-                },
-                PluginInput::Text {
-                    id: "name".to_string(),
-                    label: "Name".to_string(),
-                    placeholder: None,
-                    default_value: None,
-                    required: false,
-                    max_length: 80,
-                },
-            ]),
-            "test-revision".to_string(),
-        );
-        assert_eq!(session.placeholder(), "Target");
-        assert_eq!(session.progress_label(), "1 of 3");
-        session
-            .values
-            .insert("target".to_string(), Value::String("release".to_string()));
-        session
-            .values
-            .insert("confirmed".to_string(), Value::Bool(false));
-        session.input_index = 2;
-
-        assert_eq!(session.move_back().as_deref(), Some(""));
-        assert_eq!(
-            session.current_input().map(PluginInput::id),
-            Some("confirmed")
-        );
-        assert_eq!(
-            session.values.get("confirmed").and_then(Value::as_bool),
-            Some(false)
-        );
-        assert_eq!(session.move_back().as_deref(), Some(""));
-        assert_eq!(session.current_input().map(PluginInput::id), Some("target"));
-        assert_eq!(
-            session.values.get("target").and_then(Value::as_str),
-            Some("release")
-        );
-    }
-
-    #[test]
-    fn stored_plugin_input_value_is_promoted_ahead_of_the_default() {
-        let option = |label: &str, value: Value| CommandPaletteItem {
-            title: label.to_string(),
-            keywords: String::new(),
-            enabled: true,
-            status_hint: None,
-            tmux_status_hint: None,
-            kind: CommandPaletteItemKind::PluginInputOption {
-                value,
-                icon: PluginIcon::Command,
-            },
-        };
-        let cases = [
-            (
-                vec![
-                    option("Debug", Value::String("debug".to_string())),
-                    option("Release", Value::String("release".to_string())),
-                ],
-                Value::String("release".to_string()),
-            ),
-            (
-                vec![
-                    option("Yes", Value::Bool(true)),
-                    option("No", Value::Bool(false)),
-                ],
-                Value::Bool(false),
-            ),
-        ];
-
-        for (mut items, stored_value) in cases {
-            promote_stored_plugin_input_value(&mut items, Some(&stored_value));
-
-            let CommandPaletteItemKind::PluginInputOption { value, .. } = &items[0].kind else {
-                panic!("stored plugin input was not promoted")
-            };
-            assert_eq!(value, &stored_value);
-        }
-    }
-
-    #[test]
-    fn beginning_plugin_inputs_opens_the_palette_for_keybinding_invocation() {
-        let mut palette = CommandPaletteState::new(false);
-        assert!(!palette.is_open());
-
-        palette.begin_plugin_inputs(PluginInputSession::new(
-            command(vec![PluginInput::Confirm {
-                id: "confirm".to_string(),
-                label: "Continue?".to_string(),
-                default_value: false,
-            }]),
-            "revision".to_string(),
-        ));
-
-        assert!(palette.is_open());
-        assert_eq!(palette.mode(), CommandPaletteMode::PluginInputs);
-    }
-
-    #[test]
-    fn plugin_selected_text_is_utf8_safe_and_bounded() {
-        let text = format!("{}😀", "a".repeat(PLUGIN_SELECTED_TEXT_MAX_BYTES - 1));
-        let (selected_text, truncated) = plugin_selected_text(Some(text));
-
-        assert!(truncated);
-        let selected_text = selected_text.expect("selected text");
-        assert!(selected_text.len() <= PLUGIN_SELECTED_TEXT_MAX_BYTES);
-        assert_eq!(
-            selected_text,
-            "a".repeat(PLUGIN_SELECTED_TEXT_MAX_BYTES - 1)
-        );
-    }
-
-    #[test]
-    fn lifecycle_tracker_emits_working_directory_changes_once() {
-        let now = Instant::now();
-        let initial = lifecycle_snapshot(7, 0, "/old", None);
-        let changed = lifecycle_snapshot(7, 0, "/new", None);
-        let mut tracker = PluginLifecycleTracker {
-            snapshot: initial,
-            command_started_at: None,
-        };
-
-        assert_eq!(
-            tracker.update(changed.clone(), false, now),
-            vec![PluginEvent::WorkingDirectoryChanged {
-                previous_working_directory: Some("/old".to_string()),
-                working_directory: Some("/new".to_string()),
-            }]
-        );
-        assert!(tracker.update(changed, false, now).is_empty());
-    }
-
-    #[test]
-    fn lifecycle_tracker_infers_tmux_command_completion() {
-        let started = Instant::now();
-        let mut tracker = PluginLifecycleTracker {
-            snapshot: lifecycle_snapshot(7, 0, "/tmp", Some("cargo test")),
-            command_started_at: Some(started),
-        };
-
-        assert_eq!(
-            tracker.update(
-                lifecycle_snapshot(7, 0, "/tmp", None),
-                true,
-                started + Duration::from_millis(150),
-            ),
-            vec![PluginEvent::CommandFinished {
-                command: Some("cargo test".to_string()),
-                exit_code: None,
-                duration_ms: Some(150),
-            }]
-        );
-    }
-
-    #[test]
-    fn lifecycle_tracker_treats_tab_activation_as_a_new_baseline() {
-        let now = Instant::now();
-        let mut tracker = PluginLifecycleTracker {
-            snapshot: lifecycle_snapshot(7, 2, "/old", Some("cargo test")),
-            command_started_at: Some(now - Duration::from_secs(1)),
-        };
-
-        assert_eq!(
-            tracker.update(
-                lifecycle_snapshot(9, 4, "/new", Some("bun test")),
-                true,
-                now,
-            ),
-            vec![PluginEvent::TabActivated {
-                previous_tab_index: Some(2),
-            }]
-        );
-        assert_eq!(tracker.snapshot.active_tab_id, Some(9));
-        assert_eq!(tracker.command_started_at, Some(now));
-    }
-}
+#[path = "plugins_tests.rs"]
+mod tests;

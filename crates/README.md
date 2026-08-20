@@ -5,7 +5,6 @@ Termy is a Rust workspace split by ownership boundary, not by implementation con
 ## Product Surface
 
 - `desktop_app/` (`termy`): GPUI desktop app, windows, app chrome, settings, onboarding, command execution, and user-visible desktop workflows.
-- `api/` (`termy_api`): hosted cloud API backend (`termy-api`) — auth via better-auth, axum, sqlx/Postgres.
 - `cli/` (`termy_cli`): `termy-cli` command-line companion.
 - `ffi/` (`termy_ffi`): C-compatible libtermy surface.
 
@@ -16,7 +15,7 @@ Termy is a Rust workspace split by ownership boundary, not by implementation con
 - `plugin_runtime/` (`termy_plugin_runtime`): plugin discovery, typed protocol validation, and the on-demand Bun/Worker runtime.
 - `terminal_ui/` (`termy_terminal_ui`): GPUI grid and keystroke adapters plus tmux pane display/client support; shared terminal types come directly from `termy_core`.
 - `tmux_control_core/` (`termy_tmux_control_core`): UI-agnostic tmux control-mode protocol, session, and transport logic shared by terminal UI and FFI.
-- `ui/` (`termy_ui`): Termy's design system in GPUI — theme-derived color tokens, layout metrics, and the stateless chrome components (sidebar, section headers, grouped cards, setting rows, controls, status surfaces).
+- `ui/` (`termy_ui`): Termy's design system in GPUI — theme-derived tokens, stateless chrome, and the pinned `glassy-ui` component integration.
 - `native_sdk/` (`termy_native_sdk`): narrow platform-native helpers.
 
 ## Pure Domain Crates
@@ -43,7 +42,6 @@ Each crate has its own `README.md` with `Owner`, `Validation`, and `Forbidden De
 - `termy_ffi` should wrap `termy_core`, not copy desktop app behavior.
 - `termy_command_core` must stay independent of config parsing and UI presentation.
 - `termy_plugin_runtime` must stay independent of GPUI, desktop command execution, and terminal presentation.
-- `termy_api` is a headless server crate: no GPUI, no desktop UI crates.
 - `termy_ui` owns presentation only: it must not depend on config, command, plugin, or SSH crates, and must not reach back into `desktop_app/`.
 - App-only behavior belongs in `desktop_app/` until another product surface needs it.
 

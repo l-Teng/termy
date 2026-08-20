@@ -1,6 +1,6 @@
 use gpui::{
     App, Bounds, Element, Font, FontFeatures, FontStyle, FontWeight, Hsla, IntoElement,
-    PathBuilder, Pixels, ShapedLine, SharedString, Size, StrikethroughStyle, TextAlign, TextRun,
+    PathBuilder, Pixels, ShapedLine, SharedString, Size, StrikethroughStyle, TextRun,
     UnderlineStyle as GpuiUnderlineStyle, Window, point, px, quad,
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
@@ -2328,14 +2328,7 @@ impl TerminalGrid {
                     }
                     // Keep custom decorations below glyphs, matching GPUI's
                     // built-in underline paint order.
-                    let _ = line.paint(
-                        point(x, origin.y),
-                        self.cell_size.height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
+                    let _ = line.paint(point(x, origin.y), self.cell_size.height, window, cx);
                 }
                 TextDrawOp::Block(block) => {
                     let x = origin.x + self.cell_size.width * block.col as f32;
@@ -2630,28 +2623,30 @@ impl TerminalGrid {
             cache.cached_font_normal = Some(Font {
                 family: self.font_family.clone(),
                 features: terminal_font_features.clone(),
+                fallbacks: None,
                 weight: FontWeight::NORMAL,
-                ..Default::default()
+                style: FontStyle::Normal,
             });
             cache.cached_font_bold = Some(Font {
                 family: self.font_family.clone(),
                 features: terminal_font_features.clone(),
+                fallbacks: None,
                 weight: FontWeight::BOLD,
-                ..Default::default()
+                style: FontStyle::Normal,
             });
             cache.cached_font_italic = Some(Font {
                 family: self.font_family.clone(),
                 features: terminal_font_features.clone(),
+                fallbacks: None,
                 weight: FontWeight::NORMAL,
                 style: FontStyle::Italic,
-                ..Default::default()
             });
             cache.cached_font_bold_italic = Some(Font {
                 family: self.font_family.clone(),
                 features: terminal_font_features,
+                fallbacks: None,
                 weight: FontWeight::BOLD,
                 style: FontStyle::Italic,
-                ..Default::default()
             });
         }
         let font_normal = cache.cached_font_normal.clone().unwrap();

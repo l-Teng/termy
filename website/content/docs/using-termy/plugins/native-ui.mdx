@@ -42,7 +42,7 @@ export default definePlugin({
   views: {
     todos: {
       title: "Todos",
-      async render({ context }) {
+      async render({ params, context }) {
         const todos = await context.storage.get<Array<{
           id: string;
           title: string;
@@ -82,6 +82,10 @@ export default definePlugin({
 The view key (`todos`) must match the `view` in the `view.open` action. The managed
 `termy.d.ts` file supplies `TermyUI`, JSX, view, and action types globally.
 
+`view.open` accepts a bounded JSON `params` object. Termy freezes it and passes the
+same values to `render` and `onAction`. Return `view.replace` to navigate to another
+declared view in place, or `view.close` to dismiss the current view.
+
 Views use a centered modal by default. Add `target: "commandPalette"` to render
 the same bounded native document inside the palette results area while keeping
 the palette search and footer:
@@ -96,9 +100,13 @@ Interactive controls use named actions instead of JavaScript callbacks. Any view
 that renders an interactive control must define `onAction`; passive views may omit
 it.
 
-- `Button` and `Checkbox` require an `id` and `action`; `payload` carries optional item data.
-- `TextInput` requires an `id`; `submit` names the action emitted when the user submits it.
+- `Button`, `Checkbox`, `Select`, `List`, and `ListItem` use named actions; `payload` carries optional item data.
+- `TextInput` and `TextArea` require an `id`; `submit` names an optional submit action.
 - Every control ID in one rendered document must be unique.
+
+Termy supplies Tab/Shift-Tab focus traversal, arrow-key selection for selects and
+lists, and Enter/Space activation for controls. A filtering list also accepts text
+while focused and filters its items locally.
 
 `onAction` receives `action.id`, `action.controlId`, optional `action.payload` and
 `action.value`, plus a `values` snapshot keyed by control ID. It can update storage,
@@ -132,6 +140,12 @@ async onAction({ action, values, context }) {
 | `Column`, `Row` | `gap`, `align`, and children |
 | `Text` | `variant`, `tone`, and text children |
 | `TextInput` | `id`, `label`, `placeholder`, `value`, `maxLength`, `submit`, `disabled` |
+| `TextArea` | TextInput props plus `rows` |
+| `Select` | `id`, `label`, `placeholder`, `value`, `options`, `action`, `disabled` |
+| `List` | `id`, `action`, `selectedId`, `searchPlaceholder`, `filtering`, `isLoading`, and `ListItem` children |
+| `ListItem` | `id`, `title`, `subtitle`, `keywords`, `status`, `payload`, `action`, `disabled` |
+| `EmptyState` | `title`, `description` |
+| `Progress` | `label`, `value` from 0 through 100 |
 | `Button` | `id`, `action`, `payload`, `variant`, `disabled`, and text children |
 | `Checkbox` | `id`, `action`, `payload`, `checked`, `disabled`, and text children |
 | `Divider` | No props |

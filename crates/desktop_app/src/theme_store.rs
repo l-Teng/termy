@@ -1,33 +1,15 @@
 use crate::config;
 use std::collections::HashMap;
 use std::path::PathBuf;
+pub(crate) use termy_themes::ThemeStoreTheme;
 use termy_themes::{
-    ThemeColors, ThemeRegistryIndex, normalize_theme_id, parse_theme_colors_json, registry_file_url,
+    THEME_REGISTRY_CACHE_VERSION, ThemeColors, ThemeRegistryCache, ThemeRegistryIndex,
+    normalize_theme_id, parse_theme_colors_json, registry_file_url,
 };
 
 const DEFAULT_THEME_STORE_API_URL: &str = "https://api.termy.sh";
 const DEFAULT_THEME_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/termy-org/themes/main/index.json";
-
-const CACHE_FORMAT_VERSION: u32 = 1;
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ThemeStoreTheme {
-    pub(crate) name: String,
-    pub(crate) slug: String,
-    pub(crate) description: String,
-    pub(crate) latest_version: Option<String>,
-    pub(crate) file_url: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ThemeRegistryCache {
-    version: u32,
-    fetched_at: u64,
-    registry_url: String,
-    etag: Option<String>,
-    themes: Vec<ThemeStoreTheme>,
-}
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,7 +188,7 @@ fn save_theme_store_cache(themes: &[ThemeStoreTheme], registry_url: &str, etag: 
     }
 
     let cache = ThemeRegistryCache {
-        version: CACHE_FORMAT_VERSION,
+        version: THEME_REGISTRY_CACHE_VERSION,
         fetched_at: current_unix_timestamp(),
         registry_url: registry_url.to_string(),
         etag,
@@ -245,7 +227,7 @@ fn load_theme_store_cache() -> Option<ThemeRegistryCache> {
     let bytes = std::fs::read(path).ok()?;
     let cache: ThemeRegistryCache = bincode::deserialize(&bytes).ok()?;
 
-    if cache.version != CACHE_FORMAT_VERSION {
+    if cache.version != THEME_REGISTRY_CACHE_VERSION {
         return None;
     }
 
@@ -515,7 +497,28 @@ fn parse_theme_store_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::{ThemeRegistryCache, ThemeStoreTheme, cached_themes_for_registry};
+    use super::{
+        THEME_REGISTRY_CACHE_VERSION, ThemeRegistryCache, ThemeStoreTheme,
+        cached_themes_for_registry,
+    };
+
+    #[derive(serde::Serialize)]
+    struct LegacyThemeStoreTheme {
+        name: String,
+        slug: String,
+        description: String,
+        latest_version: Option<String>,
+        file_url: Option<String>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct LegacyThemeRegistryCache {
+        version: u32,
+        fetched_at: u64,
+        registry_url: String,
+        etag: Option<String>,
+        themes: Vec<LegacyThemeStoreTheme>,
+    }
 
     fn theme(slug: &str) -> ThemeStoreTheme {
         ThemeStoreTheme {
@@ -554,6 +557,40 @@ mod tests {
         assert_eq!(
             cached_themes_for_registry(cache, "https://other.example.com/index.json"),
             None
+        );
+    }
+
+    #[test]
+    fn shared_registry_cache_preserves_v1_bincode_layout_and_round_trips() {
+        let cache = ThemeRegistryCache {
+            version: THEME_REGISTRY_CACHE_VERSION,
+            fetched_at: 1_700_000_000,
+            registry_url: "https://example.com/index.json".to_string(),
+            etag: Some("etag-v1".to_string()),
+            themes: vec![theme("tokyo-night")],
+        };
+        let legacy = LegacyThemeRegistryCache {
+            version: 1,
+            fetched_at: 1_700_000_000,
+            registry_url: "https://example.com/index.json".to_string(),
+            etag: Some("etag-v1".to_string()),
+            themes: vec![LegacyThemeStoreTheme {
+                name: "tokyo-night".to_string(),
+                slug: "tokyo-night".to_string(),
+                description: String::new(),
+                latest_version: Some("1.0.0".to_string()),
+                file_url: Some("https://example.com/tokyo-night.json".to_string()),
+            }],
+        };
+
+        let encoded = bincode::serialize(&cache).expect("serialize shared cache");
+        assert_eq!(
+            encoded,
+            bincode::serialize(&legacy).expect("serialize legacy cache layout")
+        );
+        assert_eq!(
+            bincode::deserialize::<ThemeRegistryCache>(&encoded).expect("deserialize shared cache"),
+            cache
         );
     }
 }

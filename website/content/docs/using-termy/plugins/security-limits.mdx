@@ -40,6 +40,9 @@ its own child processes when cancellation matters. If the shared host transport
 exits, Termy rebuilds it and reloads Workers on the next refresh without taking down
 the app.
 
+User cancellation aborts `context.signal`; long-running handlers should observe it
+and can report a bounded status message and percentage through `context.progress`.
+
 Persist durable state through `context.storage` or managed files. Module globals
 may reset when an eventless host sleeps.
 
@@ -53,8 +56,10 @@ from 100 to 30,000 milliseconds.
 | Installed plugins | 32 |
 | Source tree | 4,096 files and 16 MiB total |
 | Definitions | 512 commands, 64 settings, and 32 views per plugin |
-| Command input | 16 inputs per command and 128 options per select input |
+| Command input | 16 inputs per command and 128 options per select or pick result |
 | Returned actions | 32 per invocation |
+| View params | 64 KiB JSON object |
+| Structured launch | 128 args and 4,096 characters per program/arg |
 
 Small persistent storage has separate limits documented under
 [Lifecycle and storage](/docs/using-termy/plugins/lifecycle-storage#store-json-values).
@@ -68,7 +73,8 @@ props before GPUI renders anything.
 
 A plugin may declare at most 32 views. Each rendered document is limited to 256
 nodes, 16 levels of nesting, 64 children per node, and 64 value-bearing controls.
-Text input values are limited to 4,096 characters.
+Text input values are limited to 4,096 characters. View params must be a JSON object
+and are limited to 64 KiB.
 
 ## Bundles and reloads
 

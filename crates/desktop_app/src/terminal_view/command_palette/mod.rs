@@ -241,7 +241,6 @@ impl TerminalView {
         mode: CommandPaletteMode,
         cx: &mut Context<Self>,
     ) -> Vec<CommandPaletteItem> {
-        let _ = cx;
         match mode {
             CommandPaletteMode::Commands => {
                 let mut items =
@@ -253,7 +252,7 @@ impl TerminalView {
                         .iter()
                         .map(|host| CommandPaletteItem::ssh_host(host, ssh_enabled)),
                 );
-                items.extend(self.command_palette_plugin_items());
+                items.extend(self.command_palette_plugin_items(cx));
                 items
             }
             CommandPaletteMode::Themes => self.command_palette_theme_items(),
@@ -271,7 +270,10 @@ impl TerminalView {
                 items
             }
             CommandPaletteMode::Tasks => self.command_palette_task_items(),
-            CommandPaletteMode::PluginInputs => self.command_palette_plugin_input_items(),
+            CommandPaletteMode::PluginInputs => {
+                self.schedule_plugin_pick_options(cx);
+                self.command_palette_plugin_input_items()
+            }
             CommandPaletteMode::AppInfo => self.command_palette_app_info_items(),
         }
     }
@@ -733,6 +735,7 @@ impl TerminalView {
             let items = self.command_palette_task_items();
             self.command_palette.set_items(items);
         } else if self.command_palette.mode() == CommandPaletteMode::PluginInputs {
+            self.schedule_plugin_pick_options(cx);
             let items = self.command_palette_plugin_input_items();
             if self.plugin_input_uses_free_text() {
                 self.command_palette.set_items_unfiltered(items);
@@ -816,7 +819,7 @@ impl TerminalView {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             loop {
                 smol::Timer::after(Duration::from_millis(16)).await;
-                let Ok(keep_animating) = cx.update(|cx| {
+                let Ok(Ok(keep_animating)) = cx.update(|cx| {
                     this.update(cx, |view, cx| {
                         let changed = view.tick_command_palette_scroll_animation();
                         if changed {

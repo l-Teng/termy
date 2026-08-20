@@ -374,7 +374,7 @@ impl TerminalView {
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let confirmed = matches!(prompt.await, Ok(0));
-            cx.update(|cx| {
+            let _ = cx.update(|cx| {
                 let mut follow_through = false;
                 if this
                     .update(cx, |view, _| {

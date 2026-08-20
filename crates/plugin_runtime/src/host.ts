@@ -18,6 +18,16 @@ type HostRequest =
     }
   | {
       id: number;
+      type: "input.options";
+      pluginId: string;
+      commandId: string;
+      inputId: string;
+      revision: string;
+      query: string;
+      context: Record<string, unknown>;
+    }
+  | {
+      id: number;
       type: "event";
       pluginId: string;
       revision: string;
@@ -30,6 +40,7 @@ type HostRequest =
       pluginId: string;
       viewId: string;
       revision: string;
+      params: Record<string, unknown>;
       context: Record<string, unknown>;
     }
   | {
@@ -38,10 +49,12 @@ type HostRequest =
       pluginId: string;
       viewId: string;
       revision: string;
+      params: Record<string, unknown>;
       action: Record<string, unknown>;
       values: Record<string, unknown>;
       context: Record<string, unknown>;
-    };
+    }
+  | { id: number; type: "cancel"; requestId: number };
 
 type InvocationCommand = { id: string; timeoutMs: number };
 type InvocationEvent = { event: string; timeoutMs: number };
@@ -58,6 +71,8 @@ type WorkerRecord = {
       resolve: (value: unknown) => void;
       reject: (error: Error) => void;
       timer: ReturnType<typeof setTimeout>;
+      hostRequestId?: number;
+      onProgress?: (progress: Record<string, unknown>) => void;
     }
   >;
   commands: unknown[];
@@ -96,6 +111,11 @@ delete process.env.TERMY_PLUGIN_PROTOCOL_PORT;
 delete process.env.TERMY_PLUGIN_PROTOCOL_SECRET;
 
 const records = new Map<string, WorkerRecord>();
+const activeWorkerRequests = new Map<
+  number,
+  { record: WorkerRecord; workerRequestId: number }
+>();
+const cancelledHostRequests = new Set<number>();
 let nextWorkerRequestId = 1;
 let loadQueue = Promise.resolve<unknown>(undefined);
 const MAX_PROTOCOL_BYTES = 1024 * 1024;
@@ -123,6 +143,9 @@ function terminateRecord(record: WorkerRecord): void {
   record.worker.terminate();
   for (const pending of record.pending.values()) {
     clearTimeout(pending.timer);
+    if (pending.hostRequestId !== undefined) {
+      activeWorkerRequests.delete(pending.hostRequestId);
+    }
     pending.reject(new Error("Plugin Worker stopped"));
   }
   record.pending.clear();
@@ -187,11 +210,19 @@ function createRecord(source: PluginSource): WorkerRecord {
       ok?: boolean;
       result?: unknown;
       error?: string;
+      progress?: Record<string, unknown>;
     };
     if (typeof message.id !== "number") return;
     const pending = record.pending.get(message.id);
     if (!pending) return;
+    if (message.progress) {
+      pending.onProgress?.(message.progress);
+      return;
+    }
     record.pending.delete(message.id);
+    if (pending.hostRequestId !== undefined) {
+      activeWorkerRequests.delete(pending.hostRequestId);
+    }
     clearTimeout(pending.timer);
     if (message.ok) pending.resolve(message.result);
     else pending.reject(new Error(message.error || "Plugin Worker failed"));
@@ -203,6 +234,9 @@ function createRecord(source: PluginSource): WorkerRecord {
     process.stderr.write(`[termy plugin ${source.id}] Worker crashed: ${error.message}\n`);
     for (const pending of record.pending.values()) {
       clearTimeout(pending.timer);
+      if (pending.hostRequestId !== undefined) {
+        activeWorkerRequests.delete(pending.hostRequestId);
+      }
       pending.reject(error);
     }
     record.pending.clear();
@@ -214,16 +248,22 @@ function requestWorker(
   record: WorkerRecord,
   message: Record<string, unknown>,
   timeoutMs: number,
+  hostRequestId?: number,
+  onProgress?: (progress: Record<string, unknown>) => void,
 ): Promise<unknown> {
   const id = nextWorkerRequestId++;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       record.pending.delete(id);
+      if (hostRequestId !== undefined) activeWorkerRequests.delete(hostRequestId);
       record.healthy = false;
       record.worker.terminate();
       reject(new WorkerExecutionTimeoutError(`Plugin timed out after ${timeoutMs} ms`));
     }, timeoutMs);
-    record.pending.set(id, { resolve, reject, timer });
+    record.pending.set(id, { resolve, reject, timer, hostRequestId, onProgress });
+    if (hostRequestId !== undefined) {
+      activeWorkerRequests.set(hostRequestId, { record, workerRequestId: id });
+    }
     record.worker.postMessage({ ...message, id });
   });
 }
@@ -232,6 +272,8 @@ function enqueueWorkerInvocation(
   record: WorkerRecord,
   message: Record<string, unknown>,
   timeoutMs: number,
+  hostRequestId: number,
+  onProgress: (progress: Record<string, unknown>) => void,
 ): Promise<unknown> {
   if (!record.healthy) {
     return Promise.reject(new Error("Plugin Worker is unavailable"));
@@ -256,8 +298,9 @@ function enqueueWorkerInvocation(
     }, MAX_INVOKE_QUEUE_WAIT_MS);
 
     const run = async () => {
-      if (expired) {
+      if (expired || cancelledHostRequests.has(hostRequestId)) {
         record.invocationCount -= 1;
+        if (!expired) reject(new Error("Plugin invocation cancelled"));
         return;
       }
       started = true;
@@ -268,7 +311,7 @@ function enqueueWorkerInvocation(
         return;
       }
       try {
-        resolve(await requestWorker(record, message, timeoutMs));
+        resolve(await requestWorker(record, message, timeoutMs, hostRequestId, onProgress));
       } catch (error) {
         reject(error);
       } finally {
@@ -530,21 +573,25 @@ async function handleLoad(plugins: PluginSource[]): Promise<unknown> {
   return { plugins: pluginsResult, errors };
 }
 
-async function handle(request: HostRequest): Promise<unknown> {
+async function handle(
+  request: HostRequest,
+  reportProgress: (progress: Record<string, unknown>) => void = () => {},
+): Promise<unknown> {
   if (request.type === "load") return handleLoad(request.plugins);
+  if (request.type === "cancel") throw new Error("Cancel requests are not invocations");
 
   const record = records.get(request.pluginId);
   if (!record) throw new Error(`Plugin ${request.pluginId} is not loaded`);
   if (record.source.cacheKey !== request.revision) {
     throw new Error("Plugin changed while its input form was open; run the command again");
   }
-  const invocation = request.type === "invoke"
+  const invocation = request.type === "invoke" || request.type === "input.options"
     ? record.invocationCommands.find((entry) => entry.id === request.commandId)
     : request.type === "event"
       ? record.invocationEvents.find((entry) => entry.event === request.event.type)
       : record.invocationViews.find((entry) => entry.id === request.viewId);
   if (!invocation) {
-    const target = request.type === "invoke"
+    const target = request.type === "invoke" || request.type === "input.options"
       ? request.commandId
       : request.type === "event"
         ? String(request.event.type || "")
@@ -565,6 +612,14 @@ async function handle(request: HostRequest): Promise<unknown> {
             inputs: request.inputs,
             context: request.context,
           }
+        : request.type === "input.options"
+          ? {
+              type: "input.options",
+              commandId: request.commandId,
+              inputId: request.inputId,
+              query: request.query,
+              context: request.context,
+            }
         : request.type === "event"
           ? {
               type: "event",
@@ -575,16 +630,20 @@ async function handle(request: HostRequest): Promise<unknown> {
             ? {
                 type: "view.render",
                 viewId: request.viewId,
+                params: request.params,
                 context: request.context,
               }
             : {
                 type: "view.action",
                 viewId: request.viewId,
+                params: request.params,
                 action: request.action,
                 values: request.values,
                 context: request.context,
               },
       timeoutMs,
+      request.id,
+      reportProgress,
     );
   } catch (error) {
     if (error instanceof WorkerExecutionTimeoutError) {
@@ -635,18 +694,37 @@ async function processLine(line: string): Promise<void> {
   try {
     request = JSON.parse(line) as HostRequest;
     if (!Number.isSafeInteger(request.id)) throw new Error("Invalid request ID");
+    if (request.type === "cancel") {
+      if (!Number.isSafeInteger(request.requestId) || request.requestId <= 0) {
+        throw new Error("Invalid cancellation request ID");
+      }
+      cancelledHostRequests.add(request.requestId);
+      const active = activeWorkerRequests.get(request.requestId);
+      active?.record.worker.postMessage({
+        type: "cancel",
+        requestId: active.workerRequestId,
+      });
+      return;
+    }
     const operation =
       request.type === "load"
         ? (loadQueue = loadQueue.then(
             () => handle(request),
             () => handle(request),
           ))
-        : handle(request);
+        : handle(request, (progress) => writeResponse({ id: request.id, progress }));
     const result = await operation;
+    if (cancelledHostRequests.has(request.id)) {
+      throw new Error("Plugin invocation cancelled");
+    }
     writeResponse({ id: request.id, ok: true, result });
   } catch (error) {
     const id = typeof request! === "object" ? request!.id : 0;
     writeResponse({ id, ok: false, error: errorMessage(error) });
+  } finally {
+    if (typeof request! === "object" && request!.type !== "cancel") {
+      cancelledHostRequests.delete(request!.id);
+    }
   }
 }
 

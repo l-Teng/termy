@@ -12,6 +12,16 @@ pub enum PluginEventKind {
     WorkingDirectoryChanged,
     #[serde(rename = "command.finished")]
     CommandFinished,
+    #[serde(rename = "command.started")]
+    CommandStarted,
+    #[serde(rename = "pane.activated")]
+    PaneActivated,
+    #[serde(rename = "tab.created")]
+    TabCreated,
+    #[serde(rename = "tab.closed")]
+    TabClosed,
+    #[serde(rename = "terminal.bell")]
+    TerminalBell,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -23,6 +33,8 @@ pub enum PluginEvent {
     TabActivated {
         #[serde(rename = "previousTabIndex", skip_serializing_if = "Option::is_none")]
         previous_tab_index: Option<usize>,
+        #[serde(rename = "previousTabId", skip_serializing_if = "Option::is_none")]
+        previous_tab_id: Option<String>,
     },
     #[serde(rename = "workingDirectory.changed")]
     WorkingDirectoryChanged {
@@ -43,6 +55,28 @@ pub enum PluginEvent {
         #[serde(rename = "durationMs", skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
     },
+    #[serde(rename = "command.started")]
+    CommandStarted {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+    },
+    #[serde(rename = "pane.activated")]
+    PaneActivated {
+        #[serde(rename = "previousPaneId", skip_serializing_if = "Option::is_none")]
+        previous_pane_id: Option<String>,
+    },
+    #[serde(rename = "tab.created")]
+    TabCreated {
+        #[serde(rename = "tabId")]
+        tab_id: String,
+    },
+    #[serde(rename = "tab.closed")]
+    TabClosed {
+        #[serde(rename = "tabId")]
+        tab_id: String,
+    },
+    #[serde(rename = "terminal.bell")]
+    TerminalBell,
 }
 
 impl PluginEvent {
@@ -52,6 +86,11 @@ impl PluginEvent {
             Self::TabActivated { .. } => PluginEventKind::TabActivated,
             Self::WorkingDirectoryChanged { .. } => PluginEventKind::WorkingDirectoryChanged,
             Self::CommandFinished { .. } => PluginEventKind::CommandFinished,
+            Self::CommandStarted { .. } => PluginEventKind::CommandStarted,
+            Self::PaneActivated { .. } => PluginEventKind::PaneActivated,
+            Self::TabCreated { .. } => PluginEventKind::TabCreated,
+            Self::TabClosed { .. } => PluginEventKind::TabClosed,
+            Self::TerminalBell => PluginEventKind::TerminalBell,
         }
     }
 }
@@ -94,8 +133,41 @@ mod tests {
             (
                 PluginEvent::TabActivated {
                     previous_tab_index: Some(2),
+                    previous_tab_id: Some("tab-2".to_string()),
                 },
-                json!({ "type": "tab.activated", "previousTabIndex": 2 }),
+                json!({
+                    "type": "tab.activated",
+                    "previousTabIndex": 2,
+                    "previousTabId": "tab-2",
+                }),
+            ),
+            (
+                PluginEvent::CommandStarted {
+                    command: Some("cargo test".to_string()),
+                },
+                json!({ "type": "command.started", "command": "cargo test" }),
+            ),
+            (
+                PluginEvent::PaneActivated {
+                    previous_pane_id: Some("pane-1".to_string()),
+                },
+                json!({ "type": "pane.activated", "previousPaneId": "pane-1" }),
+            ),
+            (
+                PluginEvent::TabCreated {
+                    tab_id: "tab-3".to_string(),
+                },
+                json!({ "type": "tab.created", "tabId": "tab-3" }),
+            ),
+            (
+                PluginEvent::TabClosed {
+                    tab_id: "tab-4".to_string(),
+                },
+                json!({ "type": "tab.closed", "tabId": "tab-4" }),
+            ),
+            (
+                PluginEvent::TerminalBell,
+                json!({ "type": "terminal.bell" }),
             ),
             (
                 PluginEvent::WorkingDirectoryChanged {

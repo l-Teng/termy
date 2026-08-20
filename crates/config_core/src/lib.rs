@@ -11,8 +11,7 @@ mod types;
 pub use color_keys::{ColorEntryError, apply_color_entry, canonical_color_key};
 pub use constants::{
     DEFAULT_FONT_FAMILY, DEFAULT_LINE_HEIGHT, DEFAULT_SIDEBAR_WIDTH, MAX_LINE_HEIGHT,
-    MAX_SIDEBAR_WIDTH, MIN_LINE_HEIGHT, MIN_SIDEBAR_WIDTH, SHELL_DECIDE_THEME_ID, VALID_ROOT_KEYS,
-    VALID_SECTIONS,
+    MAX_SIDEBAR_WIDTH, MIN_LINE_HEIGHT, MIN_SIDEBAR_WIDTH, SHELL_DECIDE_THEME_ID, VALID_SECTIONS,
 };
 pub use diagnostics::{ConfigDiagnostic, ConfigDiagnosticKind, ConfigParseReport};
 pub use document::{
@@ -22,6 +21,7 @@ pub use document::{
 pub use parser::parse_theme_id;
 pub use path::config_path;
 pub use render::{DEFAULT_CONFIG_TEMPLATE, prettify_config_contents};
+pub use schema::ROOT_SETTING_ALL_KEYS as VALID_ROOT_KEYS;
 pub use schema::{
     COLOR_SETTING_KEYS, COLOR_SETTING_SPECS, ColorSettingId, ColorSettingSpec, EnumChoice,
     ROOT_SETTING_ALL_KEYS, ROOT_SETTING_KEYS, ROOT_SETTING_SPECS, RootSettingId, RootSettingSpec,

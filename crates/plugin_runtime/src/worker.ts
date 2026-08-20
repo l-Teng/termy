@@ -33,6 +33,7 @@ type PreparedPluginSource = PluginSource & {
   capabilities: PluginCapability[];
 };
 type PluginManifest = {
+  $schema?: string;
   apiVersion: number;
   id: string;
   name: string;
@@ -81,6 +82,7 @@ type PluginCommand = {
   disabledReason?: string;
   icon?: string;
   inputs?: unknown[];
+  when?: unknown;
   timeoutMs?: number;
   run: (request: {
     inputs: Record<string, unknown>;
@@ -90,6 +92,11 @@ type PluginCommand = {
 type PluginEventName =
   | "terminal.ready"
   | "tab.activated"
+  | "pane.activated"
+  | "tab.created"
+  | "tab.closed"
+  | "terminal.bell"
+  | "command.started"
   | "workingDirectory.changed"
   | "command.finished";
 type PluginEventHandler = (request: {
@@ -115,10 +122,14 @@ type PluginViewAction = {
 type PluginViewDefinition = {
   title: string;
   timeoutMs?: number;
-  render: (request: { context: PluginContext }) => unknown;
+  render: (request: {
+    params: Readonly<Record<string, PluginJsonValue>>;
+    context: PluginContext;
+  }) => unknown;
   onAction?: (request: {
     action: PluginViewAction;
     values: Record<string, PluginViewValue>;
+    params: Readonly<Record<string, PluginJsonValue>>;
     context: PluginContext;
   }) => unknown;
 };
@@ -141,6 +152,12 @@ type TermyUiRuntime = {
   Row: TermyUiComponent;
   Text: TermyUiComponent;
   TextInput: TermyUiComponent;
+  TextArea: TermyUiComponent;
+  Select: TermyUiComponent;
+  List: TermyUiComponent;
+  ListItem: TermyUiComponent;
+  EmptyState: TermyUiComponent;
+  Progress: TermyUiComponent;
   Button: TermyUiComponent;
   Checkbox: TermyUiComponent;
   Divider: TermyUiComponent;
@@ -165,10 +182,15 @@ globalThis.definePlugin = (plugin) => plugin;
 let plugin: PluginDefinition | undefined;
 let pluginServices: PluginServices | undefined;
 let commandHandlers = new Map<string, PluginCommand["run"]>();
+let pickOptionHandlers = new Map<string, (request: {
+  query: string;
+  context: PluginContext;
+}) => unknown>();
 let eventHandlers = new Map<PluginEventName, PluginEventHandler>();
 let viewHandlers = new Map<string, PluginViewDefinition>();
 let pluginCapabilities = new Set<PluginCapability>();
 let queue = Promise.resolve();
+const activeControllers = new Map<number, AbortController>();
 
 // Keep ordinary plugin output on Termy's diagnostic stream.
 process.stdout.write = process.stderr.write.bind(process.stderr) as typeof process.stdout.write;
@@ -343,6 +365,68 @@ const TermyUiRuntime: TermyUiRuntime = Object.freeze({
     ], false);
     return { type: "textInput", ...props, children: undefined, key: undefined };
   },
+  TextArea: (props) => {
+    componentProps("TextArea", props, [
+      "id",
+      "label",
+      "placeholder",
+      "value",
+      "maxLength",
+      "rows",
+      "submit",
+      "disabled",
+    ], false);
+    return { type: "textArea", ...props, children: undefined, key: undefined };
+  },
+  Select: (props) => {
+    componentProps("Select", props, [
+      "id",
+      "label",
+      "placeholder",
+      "value",
+      "options",
+      "action",
+      "disabled",
+    ], false);
+    return { type: "select", ...props, children: undefined, key: undefined };
+  },
+  List: (props) => {
+    componentProps("List", props, [
+      "id",
+      "action",
+      "selectedId",
+      "searchPlaceholder",
+      "filtering",
+      "isLoading",
+    ]);
+    return {
+      type: "list",
+      ...props,
+      key: undefined,
+      children: flattenUiChildren(props.children),
+    };
+  },
+  ListItem: (props) => {
+    componentProps("ListItem", props, [
+      "id",
+      "title",
+      "subtitle",
+      "keywords",
+      "status",
+      "payload",
+      "action",
+      "disabled",
+    ], false);
+    return { type: "listItem", ...props, children: undefined, key: undefined };
+  },
+  EmptyState: (props) => {
+    componentProps("EmptyState", props, ["title", "description"], false);
+    return { type: "emptyState", ...props, children: undefined, key: undefined };
+  },
+  Progress: (props) => {
+    componentProps("Progress", props, ["label", "value"], false);
+    return { type: "progress", ...props, children: undefined, key: undefined };
+  },
   Button: (props) => {
     componentProps("Button", props, [
       "id",
@@ -409,6 +493,31 @@ function booleanValue(value: unknown, label: string, fallback = false): boolean 
   if (value === undefined) return fallback;
   if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
   return value;
+}
+
+function normalizeSelectOptions(value: unknown, label: string): Record<string, unknown>[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 128) {
+    throw new Error(`${label} must have 1 to 128 options`);
+  }
+  const values = new Set<string>();
+  return value.map((candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error(`${label} contains an invalid option`);
+    }
+    const option = candidate as Record<string, unknown>;
+    assertText(option.value, `${label} option value`, 1_024);
+    assertText(option.label, `${label} option label`, 200);
+    if (values.has(option.value)) {
+      throw new Error(`${label} has duplicate option ${option.value}`);
+    }
+    values.add(option.value);
+    return {
+      value: option.value,
+      label: option.label,
+      keywords: normalizeKeywords(option.keywords, `${label} option keywords`),
+      status: optionalText(option.status, `${label} option status`, 100),
+    };
+  });
 }
 
 function normalizeViewDocument(value: unknown): Record<string, unknown>[] {
@@ -506,6 +615,152 @@ function normalizeViewDocument(value: unknown): Record<string, unknown>[] {
         maxLength,
         submit: node.submit,
         disabled: booleanValue(node.disabled, `TextInput ${id} disabled`),
+      };
+    }
+    if (node.type === "textArea") {
+      nodeKeys(
+        node,
+        ["id", "label", "placeholder", "value", "maxLength", "rows", "submit", "disabled"],
+        "TextArea",
+      );
+      const id = controlId(node.id, "TextArea ID");
+      valueCount += 1;
+      if (valueCount > MAX_VIEW_VALUES) {
+        throw new Error(`Termy UI may contain at most ${MAX_VIEW_VALUES} value controls`);
+      }
+      const maxLength = node.maxLength === undefined ? 1_024 : Number(node.maxLength);
+      if (!Number.isInteger(maxLength) || maxLength < 1 || maxLength > 4_096) {
+        throw new Error(`TextArea ${id} maxLength must be between 1 and 4096`);
+      }
+      const rows = node.rows === undefined ? 4 : Number(node.rows);
+      if (!Number.isInteger(rows) || rows < 2 || rows > 24) {
+        throw new Error(`TextArea ${id} rows must be between 2 and 24`);
+      }
+      const text = optionalString(node.value, `TextArea ${id} value`, maxLength) ?? "";
+      if (node.submit !== undefined) assertId(node.submit, `TextArea ${id} submit action`);
+      return {
+        type: "textArea",
+        id,
+        label: optionalText(node.label, `TextArea ${id} label`, 200),
+        placeholder: optionalText(node.placeholder, `TextArea ${id} placeholder`, 300),
+        value: text,
+        maxLength,
+        rows,
+        submit: node.submit,
+        disabled: booleanValue(node.disabled, `TextArea ${id} disabled`),
+      };
+    }
+    if (node.type === "select") {
+      nodeKeys(
+        node,
+        ["id", "label", "placeholder", "value", "options", "action", "disabled"],
+        "Select",
+      );
+      const id = controlId(node.id, "Select ID");
+      valueCount += 1;
+      if (valueCount > MAX_VIEW_VALUES) {
+        throw new Error(`Termy UI may contain at most ${MAX_VIEW_VALUES} value controls`);
+      }
+      const options = normalizeSelectOptions(node.options, `Select ${id}`);
+      const value = optionalString(node.value, `Select ${id} value`, 1_024) ?? "";
+      if (
+        value !== "" &&
+        !options.some((option) => option.value === value)
+      ) {
+        throw new Error(`Select ${id} value must match an option`);
+      }
+      if (node.action !== undefined) assertId(node.action, `Select ${id} action`);
+      return {
+        type: "select",
+        id,
+        label: optionalText(node.label, `Select ${id} label`, 200),
+        placeholder: optionalText(node.placeholder, `Select ${id} placeholder`, 300),
+        value,
+        options,
+        action: node.action,
+        disabled: booleanValue(node.disabled, `Select ${id} disabled`),
+      };
+    }
+    if (node.type === "list") {
+      nodeKeys(
+        node,
+        ["id", "action", "selectedId", "searchPlaceholder", "filtering", "isLoading", "children"],
+        "List",
+      );
+      const id = controlId(node.id, "List ID");
+      valueCount += 1;
+      if (valueCount > MAX_VIEW_VALUES) {
+        throw new Error(`Termy UI may contain at most ${MAX_VIEW_VALUES} value controls`);
+      }
+      if (node.action !== undefined) assertId(node.action, `List ${id} action`);
+      const children = normalizeChildren(node.children, depth + 1);
+      if (children.some((child) => child.type !== "listItem")) {
+        throw new Error(`List ${id} may only contain ListItem children`);
+      }
+      const selectedId = optionalText(node.selectedId, `List ${id} selectedId`, 64);
+      if (
+        selectedId !== undefined &&
+        !children.some((child) => child.id === selectedId)
+      ) {
+        throw new Error(`List ${id} selectedId must match an item`);
+      }
+      return {
+        type: "list",
+        id,
+        action: node.action,
+        selectedId,
+        searchPlaceholder: optionalText(
+          node.searchPlaceholder,
+          `List ${id} searchPlaceholder`,
+          300,
+        ),
+        filtering: booleanValue(node.filtering, `List ${id} filtering`, true),
+        isLoading: booleanValue(node.isLoading, `List ${id} isLoading`),
+        children,
+      };
+    }
+    if (node.type === "listItem") {
+      nodeKeys(
+        node,
+        ["id", "title", "subtitle", "keywords", "status", "payload", "action", "disabled"],
+        "ListItem",
+      );
+      const id = controlId(node.id, "ListItem ID");
+      assertText(node.title, `ListItem ${id} title`, 300);
+      if (node.action !== undefined) assertId(node.action, `ListItem ${id} action`);
+      return {
+        type: "listItem",
+        id,
+        title: node.title,
+        subtitle: optionalText(node.subtitle, `ListItem ${id} subtitle`, 500),
+        keywords: normalizeKeywords(node.keywords, `ListItem ${id} keywords`),
+        status: optionalText(node.status, `ListItem ${id} status`, 100),
+        payload: optionalString(node.payload, `ListItem ${id} payload`, 1_024),
+        action: node.action,
+        disabled: booleanValue(node.disabled, `ListItem ${id} disabled`),
+      };
+    }
+    if (node.type === "emptyState") {
+      nodeKeys(node, ["title", "description"], "EmptyState");
+      assertText(node.title, "EmptyState title", 300);
+      return {
+        type: "emptyState",
+        title: node.title,
+        description: optionalText(node.description, "EmptyState description", 1_000),
+      };
+    }
+    if (node.type === "progress") {
+      nodeKeys(node, ["label", "value"], "Progress");
+      if (
+        node.value !== undefined &&
+        (!Number.isInteger(node.value) || Number(node.value) < 0 || Number(node.value) > 100)
+      ) {
+        throw new Error("Progress value must be an integer between 0 and 100");
+      }
+      return {
+        type: "progress",
+        label: optionalText(node.label, "Progress label", 300),
+        value: node.value,
       };
     }
     if (node.type === "button" || node.type === "checkbox") {
@@ -644,6 +899,21 @@ function parseManifest(source: PluginSource, files: CapturedFile[]): {
   }
   if (!manifest || typeof manifest !== "object") {
     throw new Error("plugin.json must be an object");
+  }
+  const manifestKeys = new Set([
+    "$schema",
+    "apiVersion",
+    "id",
+    "name",
+    "version",
+    "main",
+    "capabilities",
+  ]);
+  for (const key of Object.keys(manifest)) {
+    if (!manifestKeys.has(key)) throw new Error(`plugin.json does not support ${key}`);
+  }
+  if (manifest.$schema !== undefined) {
+    assertText(manifest.$schema, "plugin.json $schema", 1_024);
   }
   if (manifest.apiVersion !== 1) throw new Error("plugin.json apiVersion must be 1");
   assertId(manifest.id, "plugin.json id");
@@ -879,7 +1149,7 @@ function normalizeInput(input: unknown, commandId: string, seen: Set<string>): u
         value: option.value,
         label: option.label,
         keywords: normalizeKeywords(option.keywords, `Option keywords for ${value.id}`),
-        status: optionalText(option.status, `Option status for ${value.id}`, 200),
+        status: optionalText(option.status, `Option status for ${value.id}`, 100),
       };
     });
     const defaultValue = optionalText(value.defaultValue, `Default value for ${value.id}`, 1_024);
@@ -896,6 +1166,28 @@ function normalizeInput(input: unknown, commandId: string, seen: Set<string>): u
       options,
     };
   }
+  if (value.type === "pick") {
+    if (typeof value.loadOptions !== "function") {
+      throw new Error(`Pick input ${value.id} must define loadOptions()`);
+    }
+    const defaultValue = optionalString(
+      value.defaultValue,
+      `Default value for ${value.id}`,
+      1_024,
+    );
+    pickOptionHandlers.set(
+      `${commandId}\0${value.id}`,
+      value.loadOptions as (request: { query: string; context: PluginContext }) => unknown,
+    );
+    return {
+      type: "pick",
+      id: value.id,
+      label: value.label,
+      placeholder: optionalText(value.placeholder, `Placeholder for ${value.id}`, 300),
+      defaultValue,
+      required: value.required !== false,
+    };
+  }
   if (value.type === "confirm") {
     if (value.defaultValue !== undefined && typeof value.defaultValue !== "boolean") {
       throw new Error(`Confirm input ${value.id} defaultValue must be a boolean`);
@@ -908,6 +1200,53 @@ function normalizeInput(input: unknown, commandId: string, seen: Set<string>): u
     };
   }
   throw new Error(`Input ${value.id} has unsupported type ${String(value.type)}`);
+}
+
+function normalizeCommandWhen(value: unknown, commandId: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Command ${commandId} when must be an object`);
+  }
+  const when = value as Record<string, unknown>;
+  const allowed = new Set([
+    "hasSelection",
+    "hasWorkingDirectory",
+    "runtimes",
+    "platforms",
+  ]);
+  for (const key of Object.keys(when)) {
+    if (!allowed.has(key) && when[key] !== undefined) {
+      throw new Error(`Command ${commandId} when does not support ${key}`);
+    }
+  }
+  for (const key of ["hasSelection", "hasWorkingDirectory"] as const) {
+    if (when[key] !== undefined && typeof when[key] !== "boolean") {
+      throw new Error(`Command ${commandId} when.${key} must be a boolean`);
+    }
+  }
+  const normalizeValues = (
+    candidate: unknown,
+    key: string,
+    supported: readonly string[],
+  ): string[] => {
+    if (candidate === undefined) return [];
+    if (
+      !Array.isArray(candidate) ||
+      candidate.some((entry) => typeof entry !== "string" || !supported.includes(entry)) ||
+      new Set(candidate).size !== candidate.length
+    ) {
+      throw new Error(`Command ${commandId} when.${key} has invalid values`);
+    }
+    return candidate as string[];
+  };
+  return {
+    ...(when.hasSelection === undefined ? {} : { hasSelection: when.hasSelection }),
+    ...(when.hasWorkingDirectory === undefined
+      ? {}
+      : { hasWorkingDirectory: when.hasWorkingDirectory }),
+    runtimes: normalizeValues(when.runtimes, "runtimes", ["native", "tmux"]),
+    platforms: normalizeValues(when.platforms, "platforms", ["macos", "linux", "windows"]),
+  };
 }
 
 function normalizePlugin(
@@ -923,11 +1262,12 @@ function normalizePlugin(
     throw new Error("Default export must be definePlugin({...})");
   }
   const definition = candidate as PluginDefinition;
-  if (!Array.isArray(definition.commands) || definition.commands.length > 256) {
-    throw new Error("Plugin commands must be an array with at most 256 entries");
+  if (!Array.isArray(definition.commands) || definition.commands.length > 512) {
+    throw new Error("Plugin commands must be an array with at most 512 entries");
   }
   const ids = new Set<string>();
   commandHandlers = new Map();
+  pickOptionHandlers = new Map();
   const commands = definition.commands.map((command) => {
     if (!command || typeof command !== "object") throw new Error("Invalid plugin command");
     assertId(command.id, "Command ID");
@@ -1002,6 +1342,7 @@ function normalizePlugin(
       disabledReason,
       icon: command.icon || "command",
       inputs,
+      when: normalizeCommandWhen(command.when, command.id),
       timeoutMs,
     };
   });
@@ -1015,6 +1356,11 @@ function normalizePlugin(
 const PLUGIN_EVENT_NAMES = [
   "terminal.ready",
   "tab.activated",
+  "pane.activated",
+  "tab.created",
+  "tab.closed",
+  "terminal.bell",
+  "command.started",
   "workingDirectory.changed",
   "command.finished",
 ] as const satisfies readonly PluginEventName[];
@@ -1197,7 +1543,201 @@ function normalizeSettings(value: unknown): Record<string, unknown>[] {
   });
 }
 
-function normalizeActions(value: unknown): unknown[] {
+function objectKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const keys = new Set(allowed);
+  for (const key of Object.keys(value)) {
+    if (!keys.has(key) && value[key] !== undefined) {
+      throw new Error(`${label} does not support ${key}`);
+    }
+  }
+}
+
+function actionKeys(
+  action: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  objectKeys(action, ["type", ...allowed], label);
+}
+
+function normalizeTerminalTarget(value: unknown): unknown {
+  if (value === undefined) return "origin";
+  if (value === "origin" || value === "active") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Terminal target must be origin, active, or exact IDs");
+  }
+  const target = value as Record<string, unknown>;
+  objectKeys(target, ["windowId", "tabId", "paneId"], "Terminal target");
+  assertText(target.windowId, "Terminal target windowId", 128);
+  const tabId = optionalText(target.tabId, "Terminal target tabId", 128);
+  const paneId = optionalText(target.paneId, "Terminal target paneId", 128);
+  if (paneId !== undefined && tabId === undefined) {
+    throw new Error("Terminal targets with paneId must include tabId");
+  }
+  return {
+    windowId: target.windowId,
+    ...(tabId === undefined ? {} : { tabId }),
+    ...(paneId === undefined ? {} : { paneId }),
+  };
+}
+
+function normalizeTerminalLaunch(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Terminal launch must be an object");
+  }
+  const launch = value as Record<string, unknown>;
+  if (launch.type === "shell") {
+    actionKeys(launch, ["command"], "Shell launch");
+    assertText(launch.command, "Terminal launch command", 65_536);
+    return { type: "shell", command: launch.command };
+  }
+  if (launch.type === "program") {
+    actionKeys(launch, ["program", "args"], "Program launch");
+    assertText(launch.program, "Terminal launch program", 4_096);
+    const args = launch.args ?? [];
+    if (!Array.isArray(args) || args.length > 128) {
+      throw new Error("Terminal launch args must contain at most 128 strings");
+    }
+    return {
+      type: "program",
+      program: launch.program,
+      args: args.map((argument) => {
+        if (typeof argument !== "string" || textLength(argument) > 4_096) {
+          throw new Error("Terminal launch args must be strings up to 4096 characters");
+        }
+        return argument;
+      }),
+    };
+  }
+  throw new Error(`Unsupported terminal launch type ${String(launch.type)}`);
+}
+
+function normalizeAction(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Plugin actions must be objects");
+  }
+  const action = value as Record<string, unknown>;
+  if (action.type === "terminal.run") {
+    actionKeys(action, ["command", "workingDirectory"], "terminal.run");
+    assertText(action.command, "Terminal command", 65_536);
+    const workingDirectory = optionalText(
+      action.workingDirectory,
+      "Terminal workingDirectory",
+      4_096,
+    );
+    return {
+      type: action.type,
+      command: action.command,
+      ...(workingDirectory === undefined ? {} : { workingDirectory }),
+    };
+  }
+  if (action.type === "terminal.sendText") {
+    actionKeys(action, ["text", "submit", "target"], "terminal.sendText");
+    const text = optionalString(action.text, "Terminal text", 262_144);
+    if (text === undefined) throw new Error("Terminal text is required");
+    return {
+      type: action.type,
+      text,
+      submit: booleanValue(action.submit, "terminal.sendText submit"),
+      target: normalizeTerminalTarget(action.target),
+    };
+  }
+  if (action.type === "terminal.open") {
+    actionKeys(
+      action,
+      ["location", "workingDirectory", "launch", "target", "focus"],
+      "terminal.open",
+    );
+    const location = action.location ?? "tab";
+    if (!["tab", "splitRight", "splitDown", "window"].includes(String(location))) {
+      throw new Error("terminal.open location is invalid");
+    }
+    const workingDirectory = optionalText(
+      action.workingDirectory,
+      "Terminal workingDirectory",
+      4_096,
+    );
+    return {
+      type: action.type,
+      location,
+      ...(workingDirectory === undefined ? {} : { workingDirectory }),
+      ...(action.launch === undefined
+        ? {}
+        : { launch: normalizeTerminalLaunch(action.launch) }),
+      target: normalizeTerminalTarget(action.target),
+      focus: booleanValue(action.focus, "terminal.open focus", true),
+    };
+  }
+  if (action.type === "termy.command") {
+    actionKeys(action, ["command"], "termy.command");
+    assertText(action.command, "Termy command", 128);
+    return { type: action.type, command: action.command };
+  }
+  if (action.type === "clipboard.write") {
+    actionKeys(action, ["text"], "clipboard.write");
+    assertText(action.text, "Clipboard text", 262_144);
+    return { type: action.type, text: action.text };
+  }
+  if (action.type === "url.open") {
+    actionKeys(action, ["url"], "url.open");
+    assertText(action.url, "URL", 8_192);
+    let parsed: URL;
+    try {
+      parsed = new URL(action.url);
+    } catch {
+      throw new Error("Plugin URL is invalid");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("Plugin URLs must use http or https");
+    }
+    return { type: action.type, url: action.url };
+  }
+  if (action.type === "toast") {
+    actionKeys(action, ["level", "message"], "toast");
+    if (!["info", "success", "warning", "error"].includes(String(action.level))) {
+      throw new Error("Toast level is invalid");
+    }
+    assertText(action.message, "Toast message", 4_096);
+    return { type: action.type, level: action.level, message: action.message };
+  }
+  if (action.type === "view.open") {
+    requireCapability("native-ui", "Opening plugin views");
+    actionKeys(action, ["view", "target", "params"], "view.open");
+    assertId(action.view, "View ID");
+    const target = action.target ?? "modal";
+    if (target !== "modal" && target !== "commandPalette") {
+      throw new Error("view.open target is invalid");
+    }
+    return {
+      type: action.type,
+      view: action.view,
+      target,
+      params: normalizeViewParams(action.params ?? {}),
+    };
+  }
+  if (action.type === "view.replace") {
+    requireCapability("native-ui", "Replacing plugin views");
+    actionKeys(action, ["view", "params"], "view.replace");
+    assertId(action.view, "View ID");
+    return {
+      type: action.type,
+      view: action.view,
+      params: normalizeViewParams(action.params ?? {}),
+    };
+  }
+  if (action.type === "view.close") {
+    requireCapability("native-ui", "Closing plugin views");
+    actionKeys(action, [], "view.close");
+    return { type: action.type };
+  }
+  throw new Error(`Unsupported plugin action ${String(action.type)}`);
+}
+
+function normalizeActions(value: unknown): Record<string, unknown>[] {
   let actions: unknown[];
   if (value === undefined || value === null) actions = [];
   else if (Array.isArray(value)) actions = value;
@@ -1205,19 +1745,15 @@ function normalizeActions(value: unknown): unknown[] {
     typeof value === "object" &&
     Array.isArray((value as { actions?: unknown }).actions)
   ) {
-    actions = (value as { actions: unknown[] }).actions;
+    const result = value as Record<string, unknown> & { actions: unknown[] };
+    objectKeys(result, ["actions"], "Plugin result");
+    actions = result.actions;
   } else actions = [value];
 
-  if (
-    actions.some((action) =>
-      action !== null &&
-      typeof action === "object" &&
-      (action as { type?: unknown }).type === "view.open"
-    )
-  ) {
-    requireCapability("native-ui", "Opening plugin views");
+  if (actions.length > 32) {
+    throw new Error("Plugin returned more than 32 actions");
   }
-  return actions;
+  return actions.map(normalizeAction);
 }
 
 function assertStorageKey(value: unknown): asserts value is string {
@@ -1411,6 +1947,8 @@ function createPluginContext(
   value: unknown,
   emittedActions: unknown[],
   services: PluginServices,
+  signal: AbortSignal,
+  requestId: number,
 ): PluginContext {
   const context =
     typeof value === "object" && value !== null && !Array.isArray(value)
@@ -1434,6 +1972,12 @@ function createPluginContext(
     !Array.isArray(context.activePane)
       ? Object.freeze({ ...(context.activePane as Record<string, unknown>) })
       : undefined;
+  const origin =
+    context.origin &&
+    typeof context.origin === "object" &&
+    !Array.isArray(context.origin)
+      ? Object.freeze({ ...(context.origin as Record<string, unknown>) })
+      : Object.freeze({});
   const toast = (level: PluginToastLevel, message: unknown) => {
     assertText(message, "Toast message", 4_096);
     emittedActions.push({ type: "toast", level, message });
@@ -1441,6 +1985,7 @@ function createPluginContext(
 
   return Object.freeze({
     ...context,
+    origin,
     ...(activeTab ? { activeTab } : {}),
     ...(activePane ? { activePane } : {}),
     ...services,
@@ -1457,13 +2002,54 @@ function createPluginContext(
       warning: (message: string) => toast("warning", message),
       error: (message: string) => toast("error", message),
     }),
+    signal,
+    progress: Object.freeze({
+      report: (update: unknown) => {
+        if (!update || typeof update !== "object" || Array.isArray(update)) {
+          throw new Error("Progress update must be an object");
+        }
+        const progress = update as Record<string, unknown>;
+        for (const key of Object.keys(progress)) {
+          if (!new Set(["message", "percentage"]).has(key) && progress[key] !== undefined) {
+            throw new Error(`Progress update does not support ${key}`);
+          }
+        }
+        const message = optionalText(progress.message, "Progress message", 500);
+        if (
+          progress.percentage !== undefined &&
+          (!Number.isInteger(progress.percentage) ||
+            Number(progress.percentage) < 0 ||
+            Number(progress.percentage) > 100)
+        ) {
+          throw new Error("Progress percentage must be an integer between 0 and 100");
+        }
+        postMessage({
+          id: requestId,
+          progress: {
+            ...(message === undefined ? {} : { message }),
+            ...(progress.percentage === undefined
+              ? {}
+              : { percentage: Number(progress.percentage) }),
+          },
+        });
+      },
+    }),
   });
 }
 
 function hasInteractiveViewNode(nodes: Record<string, unknown>[]): boolean {
   return nodes.some((node) => {
-    if (node.type === "button" || node.type === "checkbox") return true;
-    if (node.type === "textInput" && node.submit !== undefined) return true;
+    if (
+      node.type === "button" ||
+      node.type === "checkbox"
+    ) return true;
+    if (node.type === "select" && node.action !== undefined) return true;
+    if (node.type === "list" && node.action !== undefined) return true;
+    if (node.type === "listItem" && node.action !== undefined) return true;
+    if (
+      (node.type === "textInput" || node.type === "textArea") &&
+      node.submit !== undefined
+    ) return true;
     return Array.isArray(node.children)
       && hasInteractiveViewNode(node.children as Record<string, unknown>[]);
   });
@@ -1471,12 +2057,13 @@ function hasInteractiveViewNode(nodes: Record<string, unknown>[]): boolean {
 
 async function renderPluginView(
   viewId: string,
+  params: Readonly<Record<string, PluginJsonValue>>,
   context: PluginContext,
   emittedActions: unknown[],
 ): Promise<Record<string, unknown>[]> {
   const view = viewHandlers.get(viewId);
   if (!view) throw new Error(`View ${viewId} is not registered`);
-  const nodes = normalizeViewDocument(await view.render({ context }));
+  const nodes = normalizeViewDocument(await view.render({ params, context }));
   if (!view.onAction && hasInteractiveViewNode(nodes)) {
     throw new Error(`View ${viewId} renders actions but does not define onAction()`);
   }
@@ -1531,7 +2118,35 @@ function normalizeViewValues(value: unknown): Record<string, PluginViewValue> {
   return normalized;
 }
 
-async function handle(message: Record<string, unknown>): Promise<unknown> {
+function normalizeViewParams(value: unknown): Readonly<Record<string, PluginJsonValue>> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Plugin view params must be an object");
+  }
+  const encoded = JSON.stringify(value);
+  if (Buffer.byteLength(encoded) > 64 * 1024) {
+    throw new Error("Plugin view params exceed the 65536 byte limit");
+  }
+  const freeze = (candidate: PluginJsonValue): PluginJsonValue => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) freeze(entry);
+      return Object.freeze(candidate);
+    }
+    if (candidate && typeof candidate === "object") {
+      for (const entry of Object.values(candidate)) freeze(entry);
+      return Object.freeze(candidate);
+    }
+    return candidate;
+  };
+  return freeze(structuredClone(value) as PluginJsonValue) as Readonly<
+    Record<string, PluginJsonValue>
+  >;
+}
+
+async function handle(
+  message: Record<string, unknown>,
+  signal: AbortSignal,
+  requestId: number,
+): Promise<unknown> {
   if (message.type === "load") {
     const pluginSource = message.source as PluginSource;
     const source = await preparePlugin(
@@ -1563,9 +2178,43 @@ async function handle(message: Record<string, unknown>): Promise<unknown> {
     const emittedActions: unknown[] = [];
     const value = await run({
       inputs: (message.inputs || {}) as Record<string, unknown>,
-      context: createPluginContext(message.context, emittedActions, pluginServices),
+      context: createPluginContext(
+        message.context,
+        emittedActions,
+        pluginServices,
+        signal,
+        requestId,
+      ),
     });
     return { actions: [...emittedActions, ...normalizeActions(value)] };
+  }
+  if (message.type === "input.options") {
+    if (!plugin) throw new Error("Plugin is not loaded");
+    if (!pluginServices) throw new Error("Plugin services are unavailable");
+    const commandId = String(message.commandId || "");
+    const inputId = String(message.inputId || "");
+    const loadOptions = pickOptionHandlers.get(`${commandId}\0${inputId}`);
+    if (!loadOptions) {
+      throw new Error(`Pick input ${commandId}.${inputId} is not registered`);
+    }
+    const emittedActions: unknown[] = [];
+    const context = createPluginContext(
+      message.context,
+      emittedActions,
+      pluginServices,
+      signal,
+      requestId,
+    );
+    const query = String(message.query || "");
+    if (textLength(query) > 1_024) throw new Error("Picker query exceeds 1024 characters");
+    const options = normalizeSelectOptions(
+      await loadOptions({ query, context }),
+      `Pick input ${commandId}.${inputId}`,
+    );
+    if (emittedActions.length > 0) {
+      throw new Error("Picker option loaders cannot emit actions");
+    }
+    return { options };
   }
   if (message.type === "event") {
     if (!plugin) throw new Error("Plugin is not loaded");
@@ -1577,7 +2226,13 @@ async function handle(message: Record<string, unknown>): Promise<unknown> {
     const emittedActions: unknown[] = [];
     const value = await run({
       event,
-      context: createPluginContext(message.context, emittedActions, pluginServices),
+      context: createPluginContext(
+        message.context,
+        emittedActions,
+        pluginServices,
+        signal,
+        requestId,
+      ),
     });
     return { actions: [...emittedActions, ...normalizeActions(value)] };
   }
@@ -1586,8 +2241,15 @@ async function handle(message: Record<string, unknown>): Promise<unknown> {
     if (!pluginServices) throw new Error("Plugin services are unavailable");
     const viewId = String(message.viewId || "");
     const emittedActions: unknown[] = [];
-    const context = createPluginContext(message.context, emittedActions, pluginServices);
-    const nodes = await renderPluginView(viewId, context, emittedActions);
+    const params = normalizeViewParams(message.params);
+    const context = createPluginContext(
+      message.context,
+      emittedActions,
+      pluginServices,
+      signal,
+      requestId,
+    );
+    const nodes = await renderPluginView(viewId, params, context, emittedActions);
     return { nodes, actions: emittedActions };
   }
   if (message.type === "view.action") {
@@ -1598,13 +2260,21 @@ async function handle(message: Record<string, unknown>): Promise<unknown> {
     if (!view) throw new Error(`View ${viewId} is not registered`);
     if (!view.onAction) throw new Error(`View ${viewId} does not handle actions`);
     const emittedActions: unknown[] = [];
-    const context = createPluginContext(message.context, emittedActions, pluginServices);
+    const params = normalizeViewParams(message.params);
+    const context = createPluginContext(
+      message.context,
+      emittedActions,
+      pluginServices,
+      signal,
+      requestId,
+    );
     const value = await view.onAction({
       action: normalizeViewAction(message.action),
       values: normalizeViewValues(message.values),
+      params,
       context,
     });
-    const nodes = await renderPluginView(viewId, context, emittedActions);
+    const nodes = await renderPluginView(viewId, params, context, emittedActions);
     return {
       nodes,
       actions: [...emittedActions, ...normalizeActions(value)],
@@ -1615,15 +2285,26 @@ async function handle(message: Record<string, unknown>): Promise<unknown> {
 
 self.onmessage = (event: MessageEvent<Record<string, unknown>>) => {
   const message = event.data;
+  if (message.type === "cancel") {
+    const requestId = Number(message.requestId);
+    activeControllers.get(requestId)?.abort();
+    return;
+  }
+  const requestId = Number(message.id);
+  const controller = new AbortController();
+  activeControllers.set(requestId, controller);
   queue = queue.then(async () => {
     try {
-      const result = await handle(message);
+      if (controller.signal.aborted) throw new Error("Plugin invocation cancelled");
+      const result = await handle(message, controller.signal, requestId);
       postMessage({ id: message.id, ok: true, result });
     } catch (error) {
       process.stderr.write(
         `[termy plugin ${process.env.TERMY_PLUGIN_ID || "unknown"}] ${errorMessage(error)}\n`,
       );
       postMessage({ id: message.id, ok: false, error: errorMessage(error) });
+    } finally {
+      activeControllers.delete(requestId);
     }
   });
 };

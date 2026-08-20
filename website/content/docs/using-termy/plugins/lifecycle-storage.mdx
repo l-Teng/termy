@@ -14,7 +14,16 @@ export default definePlugin({
       context.toasts.info("Terminal ready");
     },
     "tab.activated"({ event, context }) {
-      console.log(event.previousTabIndex, context.activeTab?.index);
+      console.log(event.previousTabId, context.activeTab?.id);
+    },
+    "pane.activated"({ event, context }) {
+      console.log(event.previousPaneId, context.activePane?.id);
+    },
+    "tab.created"({ event }) {
+      console.log("created", event.tabId);
+    },
+    "terminal.bell"() {
+      console.log("bell");
     },
     "workingDirectory.changed"({ event }) {
       console.log(event.previousWorkingDirectory, event.workingDirectory);
@@ -29,10 +38,12 @@ export default definePlugin({
 Handlers receive the same read-only [context](/docs/using-termy/plugins/commands-context#read-the-active-context)
 as commands. They can emit toasts or return the same actions.
 
-`terminal.ready` runs once after the plugin catalog is ready. The remaining events
-track the active terminal tab, working directory, and completed command. Native
-shell integration provides command exit codes and measured durations; tmux command
-completion is inferred, so unavailable fields are omitted instead of guessed.
+`terminal.ready` runs once after the plugin catalog is ready. Other subscriptions
+are `tab.activated`, `pane.activated`, `tab.created`, `tab.closed`,
+`terminal.bell`, `workingDirectory.changed`, `command.started`, and
+`command.finished`. Native shell integration provides command exit codes, measured
+durations, and bell events. Tmux completion is inferred and its bell state is not
+available, so unavailable fields/events are omitted instead of guessed.
 
 Events remain ordered within one plugin. Separate plugins may handle them
 concurrently under the normal execution timeout.

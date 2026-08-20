@@ -968,7 +968,7 @@ impl TerminalView {
         self.pending_cursor_move_preview = None;
 
         // Focus the terminal on click
-        self.focus_handle.focus(window, cx);
+        self.focus_handle.focus(window);
         self.reset_cursor_blink_phase();
         if event.button != MouseButton::Right {
             let _ = self.close_terminal_context_menu(cx);
