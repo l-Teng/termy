@@ -9,4 +9,3 @@ workspace = true
 
 [dependencies]
 gpui = { workspace = true }
-glassy-ui = { workspace = true }

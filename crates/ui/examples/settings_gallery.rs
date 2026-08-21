@@ -10,9 +10,9 @@ use gpui::{
     TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, px, size,
 };
 use termy_ui::{
-    Badge, Button, ButtonSize, EmptyState, IconButton, IconName, SectionHeader, Select, SelectItem,
-    SettingRow, SettingsContent, SettingsGroup, Sidebar, SidebarGroupLabel, SidebarItem,
-    SidebarSearch, Slider, Stepper, ThemeSwitch, Tokens, metrics, theme,
+    Badge, Button, ButtonSize, EmptyState, IconButton, IconName, Palette, SectionHeader, Select,
+    SelectItem, SelectMenu, SettingRow, SettingsContent, SettingsGroup, Sidebar, SidebarGroupLabel,
+    SidebarItem, SidebarSearch, Slider, Stepper, Switch, Tokens, metrics, theme,
 };
 
 const SECTIONS: &[(&str, &str, IconName)] = &[
@@ -74,40 +74,37 @@ impl Gallery {
     }
 
     fn theme_group(&self, cx: &mut Context<Self>) -> SettingsGroup {
-        let gallery = cx.entity();
-        let theme_mode = Select::new("theme-mode")
-            .value("Manual")
-            .items([
-                SelectItem::new("Manual"),
-                SelectItem::new("Follow system appearance"),
-            ])
+        let theme_mode = Select::new("theme-mode", "Manual")
             .open(self.theme_menu_open)
-            .on_open_change(move |open, _window, cx| {
-                gallery.update(cx, |gallery, cx| {
-                    gallery.theme_menu_open = open;
-                    cx.notify();
-                });
-            });
+            .on_click(cx.listener(|gallery: &mut Self, _event, _window, cx| {
+                gallery.theme_menu_open = !gallery.theme_menu_open;
+                cx.notify();
+            }));
 
+        // The open menu hangs under the closed control, the way the app anchors
+        // its own popup.
         let theme_mode_control = div()
             .flex()
             .flex_col()
             .flex_none()
+            .gap(px(4.0))
             .w(metrics::CONTROL_WIDTH)
-            .child(theme_mode);
+            .child(theme_mode)
+            .children(self.theme_menu_open.then(|| {
+                SelectMenu::new()
+                    .item(SelectItem::new("Manual").selected(true))
+                    .item(SelectItem::new("Follow system appearance"))
+            }));
 
-        let gallery = cx.entity();
         let contrast_row = SettingRow::new("Increase Chrome Contrast")
             .description("Increase contrast of non-terminal UI surfaces")
             .control(
-                ThemeSwitch::new("chrome-contrast")
-                    .on(self.chrome_contrast)
-                    .on_change(move |next, _window, cx| {
-                        gallery.update(cx, |gallery, cx| {
-                            gallery.chrome_contrast = next;
-                            cx.notify();
-                        });
-                    }),
+                Switch::new("chrome-contrast", self.chrome_contrast).on_click(cx.listener(
+                    |gallery: &mut Self, _event, _window, cx| {
+                        gallery.chrome_contrast = !gallery.chrome_contrast;
+                        cx.notify();
+                    },
+                )),
             );
         let contrast_row = if self.chrome_contrast {
             contrast_row.badge(Badge::new("SAVED"))
@@ -125,9 +122,8 @@ impl Gallery {
                 SettingRow::new("Theme")
                     .description("Current color scheme name")
                     .control(
-                        Select::new("theme")
-                            .value("tokyo-night-storm")
-                            .items([SelectItem::new("tokyo-night-storm")]),
+                        Select::new("theme", "tokyo-night-storm")
+                            .swatch(Palette::tokyo_night_storm().cursor),
                     )
                     .reset(IconButton::new("reset-theme", IconName::Reset)),
             )
@@ -176,11 +172,7 @@ impl Gallery {
             .child(
                 SettingRow::new("Font Family")
                     .description("Monospace family used for the terminal grid")
-                    .control(
-                        Select::new("font-family")
-                            .value("JetBrains Mono")
-                            .items([SelectItem::new("JetBrains Mono")]),
-                    )
+                    .control(Select::new("font-family", "JetBrains Mono"))
                     .reset(IconButton::new("reset-font-family", IconName::Reset)),
             )
             .child(
@@ -212,16 +204,12 @@ impl Gallery {
                     EmptyState::new(format!("{label} is not in this gallery"))
                         .icon(icon)
                         .body("The example ships the Appearance screen. Every other section is built from the same components.")
-                        .action(
-                            Button::new("back-to-appearance", "Back to Appearance")
-                                .variant(termy_ui::ButtonVariant::Secondary)
-                                .on_click(cx.listener(
-                                    |gallery: &mut Self, _event, _window, cx| {
-                                        gallery.selected = 0;
-                                        cx.notify();
-                                    },
-                                )),
-                        ),
+                        .action(Button::new("back-to-appearance", "Back to Appearance").on_click(
+                            cx.listener(|gallery: &mut Self, _event, _window, cx| {
+                                gallery.selected = 0;
+                                cx.notify();
+                            }),
+                        )),
                 );
         }
 
@@ -229,11 +217,7 @@ impl Gallery {
             .child(
                 SectionHeader::new("Appearance")
                     .subtitle("Customize the look and feel")
-                    .action(
-                        Button::new("reset-section", "Reset section")
-                            .variant(termy_ui::ButtonVariant::Ghost)
-                            .size(ButtonSize::Small),
-                    ),
+                    .action(Button::new("reset-section", "Reset section").size(ButtonSize::Small)),
             )
             .child(self.theme_group(cx))
             .child(self.window_group(cx))
@@ -285,11 +269,7 @@ fn main() {
     Application::new()
         .with_assets(termy_ui::Assets)
         .run(|cx: &mut App| {
-            termy_ui::init_glassy(cx);
-            termy_ui::load_fonts(cx).expect("register Glassy font");
-            let tokens = Tokens::dark();
-            theme::set_tokens(tokens, cx);
-            termy_ui::sync_glassy_theme(&tokens, cx);
+            theme::set_tokens(Tokens::dark(), cx);
 
             let bounds = Bounds {
                 origin: point(px(120.0), px(120.0)),

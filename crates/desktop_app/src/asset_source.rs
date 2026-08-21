@@ -115,9 +115,9 @@ impl AssetSource for EmbeddedAssets {
                 }
             }
         }
-        // App icons win; the shared UI asset source supplies Glassy assets and
-        // Termy's broader settings icon set.
-        termy_ui::Assets.load(trimmed)
+        // App icons win; the design system supplies whatever it ships that the
+        // app does not already embed.
+        Ok(termy_ui::icon_bytes(trimmed).map(Cow::Borrowed))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
@@ -129,11 +129,6 @@ impl AssetSource for EmbeddedAssets {
                 if prefix.is_empty() || key.starts_with(prefix) {
                     out.push(SharedString::from(*key));
                 }
-            }
-        }
-        for asset in termy_ui::Assets.list(prefix)? {
-            if !out.contains(&asset) {
-                out.push(asset);
             }
         }
         Ok(out)
@@ -150,16 +145,6 @@ mod tests {
             EmbeddedAssets
                 .load("icons/settings/plugins.svg")
                 .expect("load embedded plugin icon")
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn glassy_font_is_embedded() {
-        assert!(
-            EmbeddedAssets
-                .load("fonts/InterVariable.ttf")
-                .expect("load Glassy font")
                 .is_some()
         );
     }

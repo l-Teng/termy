@@ -2478,15 +2478,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glassy-ui"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "574c78b74603b300a4d4e961f866efdf2db307953e87f94c3f531085ca6c3cde"
-dependencies = [
- "gpui",
-]
-
-[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6697,7 +6688,6 @@ dependencies = [
 name = "termy_ui"
 version = "0.1.0"
 dependencies = [
- "glassy-ui",
  "gpui",
 ]
 

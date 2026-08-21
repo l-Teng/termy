@@ -270,14 +270,22 @@ impl SettingsWindow {
         display_name: String,
         cx: &mut Context<Self>,
     ) {
-        self.pending_confirmation = Some(PendingSettingsConfirmation::DeleteSshHost {
-            id: host_id,
-            name: display_name,
-        });
-        cx.notify();
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let title = "Delete SSH Host";
+            let message = format!("Delete “{display_name}” and its saved Keychain credential?");
+            if !termy_native_sdk::confirm(title, &message) {
+                return;
+            }
+            let _ = cx.update(|cx| {
+                this.update(cx, |view, cx| {
+                    view.delete_ssh_host(&host_id, cx);
+                })
+            });
+        })
+        .detach();
     }
 
-    pub(super) fn delete_ssh_host(&mut self, host_id: &str, cx: &mut Context<Self>) {
+    fn delete_ssh_host(&mut self, host_id: &str, cx: &mut Context<Self>) {
         let mut manager = match crate::ssh::manager(self.config_path.as_deref()) {
             Ok(manager) => manager,
             Err(error) => {
@@ -791,30 +799,42 @@ impl SettingsWindow {
             );
         }
 
-        let cancel_view = cx.entity();
-        let cancel_button = termy_ui::Button::new("ssh-form-cancel", "Cancel")
-            .variant(termy_ui::ButtonVariant::Secondary)
-            .size(termy_ui::ButtonSize::Small)
-            .on_click(move |_, _, cx| {
-                cancel_view.update(cx, |view, cx| view.cancel_ssh_host_form(cx));
-            });
-        let save_view = cx.entity();
-        let ui = termy_ui::tokens(cx);
-        let save_button = termy_ui::Button::new(
-            "ssh-form-save",
-            if is_editing {
+        let cancel_button = div()
+            .id("ssh-form-cancel")
+            .h(px(30.0))
+            .px(px(14.0))
+            .flex()
+            .items_center()
+            .rounded(px(SETTINGS_BUTTON_RADIUS))
+            .bg(self.bg_input())
+            .text_size(px(12.0))
+            .text_color(self.text_secondary())
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover_bg))
+            .on_click(cx.listener(|view, _, _, cx| {
+                view.cancel_ssh_host_form(cx);
+            }))
+            .child("Cancel");
+        let save_button = div()
+            .id("ssh-form-save")
+            .h(px(30.0))
+            .px(px(14.0))
+            .flex()
+            .items_center()
+            .rounded(px(SETTINGS_BUTTON_RADIUS))
+            .bg(accent)
+            .text_size(px(12.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(accent_text)
+            .cursor_pointer()
+            .on_click(cx.listener(|view, _, _, cx| {
+                view.save_ssh_host_form(cx);
+            }))
+            .child(if is_editing {
                 "Save changes"
             } else {
                 "Add host"
-            },
-        )
-        .size(termy_ui::ButtonSize::Small)
-        .bg(ui.accent)
-        .border_color(ui.accent)
-        .text_color(ui.text_on_accent)
-        .on_click(move |_, _, cx| {
-            save_view.update(cx, |view, cx| view.save_ssh_host_form(cx));
-        });
+            });
 
         div()
             .w_full()
@@ -868,8 +888,13 @@ impl SettingsWindow {
         let edit_id = host.id.clone();
         let delete_id = host.id.clone();
         let delete_name = host.display_name.clone();
-        let edit_view = cx.entity();
-        let delete_view = cx.entity();
+        let hover_bg = self.bg_hover();
+        let danger = Rgba {
+            r: 0.88,
+            g: 0.25,
+            b: 0.25,
+            a: 0.9,
+        };
 
         div()
             .w_full()
@@ -907,44 +932,67 @@ impl SettingsWindow {
                     .flex()
                     .gap(px(6.0))
                     .child(
-                        termy_ui::Button::new(format!("ssh-edit-{edit_id}"), "Edit")
-                            .variant(termy_ui::ButtonVariant::Secondary)
-                            .size(termy_ui::ButtonSize::Small)
-                            .on_click(move |_, window, cx| {
-                                edit_view.update(cx, |view, cx| {
-                                    view.begin_edit_ssh_host(&edit_id, window, cx);
-                                });
-                            }),
+                        div()
+                            .id(SharedString::from(format!("ssh-edit-{edit_id}")))
+                            .h(px(28.0))
+                            .px(px(10.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(SETTINGS_BUTTON_RADIUS))
+                            .bg(self.bg_input())
+                            .text_size(px(11.0))
+                            .text_color(self.text_secondary())
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hover_bg))
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.begin_edit_ssh_host(&edit_id, window, cx);
+                            }))
+                            .child("Edit"),
                     )
                     .child(
-                        termy_ui::Button::new(format!("ssh-delete-{delete_id}"), "Delete")
-                            .variant(termy_ui::ButtonVariant::OutlineDestructive)
-                            .size(termy_ui::ButtonSize::Small)
-                            .on_click(move |_, _, cx| {
-                                delete_view.update(cx, |view, cx| {
-                                    view.confirm_delete_ssh_host(
-                                        delete_id.clone(),
-                                        delete_name.clone(),
-                                        cx,
-                                    );
-                                });
-                            }),
+                        div()
+                            .id(SharedString::from(format!("ssh-delete-{delete_id}")))
+                            .h(px(28.0))
+                            .px(px(10.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(SETTINGS_BUTTON_RADIUS))
+                            .text_size(px(11.0))
+                            .text_color(danger)
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hover_bg))
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.confirm_delete_ssh_host(
+                                    delete_id.clone(),
+                                    delete_name.clone(),
+                                    cx,
+                                );
+                            }))
+                            .child("Delete"),
                     ),
             )
             .into_any_element()
     }
 
     pub(super) fn render_ssh_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = cx.entity();
-        let ui = termy_ui::tokens(cx);
-        let add_button = termy_ui::Button::new("ssh-add-host", "Add host")
-            .size(termy_ui::ButtonSize::Small)
-            .bg(ui.accent)
-            .border_color(ui.accent)
-            .text_color(ui.text_on_accent)
-            .on_click(move |_, window, cx| {
-                view.update(cx, |view, cx| view.begin_add_ssh_host(window, cx));
-            });
+        let add_button = div()
+            .id("ssh-add-host")
+            .h(px(30.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .rounded(px(SETTINGS_BUTTON_RADIUS))
+            .bg(self.accent_with_alpha(0.95))
+            .text_size(px(12.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(
+                self.contrasting_text_for_fill(self.accent_with_alpha(0.95), self.bg_card()),
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(|view, _, window, cx| {
+                view.begin_add_ssh_host(window, cx);
+            }))
+            .child("Add host");
 
         let mut section = div()
             .flex()

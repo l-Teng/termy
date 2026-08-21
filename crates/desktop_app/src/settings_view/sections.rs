@@ -1219,11 +1219,17 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let bg_elevated = self.bg_elevated();
+        let bg_input = self.bg_input();
+        let hover_bg = self.bg_hover();
         let border_color = self.border_color();
         let text_primary = self.text_primary();
         let text_secondary = self.text_secondary();
         let text_muted = self.text_muted();
         let accent = self.accent();
+        let accent_hover = self.accent_with_alpha(0.85);
+        let bg_card = self.bg_card();
+        let button_text = self.contrasting_text_for_fill(accent, bg_card);
+        let button_hover_text = self.contrasting_text_for_fill(accent_hover, bg_card);
         let active_border = self.accent_with_alpha(0.50);
 
         let version_label = theme
@@ -1250,33 +1256,56 @@ impl SettingsWindow {
         let uninstall_slug = theme.slug.clone();
 
         let action_button: AnyElement = if is_installed {
-            let view = cx.entity();
-            termy_ui::Button::new(format!("theme-store-uninstall-{}", theme.slug), "Uninstall")
-                .variant(termy_ui::ButtonVariant::Secondary)
-                .size(termy_ui::ButtonSize::Small)
+            div()
+                .id(SharedString::from(format!(
+                    "theme-store-uninstall-{}",
+                    theme.slug
+                )))
                 .flex_1()
-                .on_click(move |_, _, cx| {
-                    view.update(cx, |view, cx| {
-                        view.uninstall_theme_store_theme(&uninstall_slug, cx);
-                        cx.notify();
-                    });
-                })
+                .h(px(28.0))
+                .px_3()
+                .rounded(px(SETTINGS_BUTTON_RADIUS))
+                .border_1()
+                .border_color(border_color)
+                .bg(bg_input)
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(text_secondary)
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |s| s.bg(hover_bg).text_color(text_primary))
+                .child("Uninstall")
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.uninstall_theme_store_theme(&uninstall_slug, cx);
+                    cx.notify();
+                }))
                 .into_any_element()
         } else {
             let label = if has_update { "Update" } else { "Install" };
-            let view = cx.entity();
-            let ui = termy_ui::tokens(cx);
-            termy_ui::Button::new(format!("theme-store-install-{}", theme.slug), label)
-                .size(termy_ui::ButtonSize::Small)
-                .bg(ui.accent)
-                .border_color(ui.accent)
-                .text_color(ui.text_on_accent)
+            div()
+                .id(SharedString::from(format!(
+                    "theme-store-install-{}",
+                    theme.slug
+                )))
                 .flex_1()
-                .on_click(move |_, _, cx| {
-                    view.update(cx, |view, cx| {
-                        view.confirm_install_theme_store_theme(install_theme.clone(), cx);
-                    });
-                })
+                .h(px(28.0))
+                .px_3()
+                .rounded(px(SETTINGS_BUTTON_RADIUS))
+                .bg(accent)
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(button_text)
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |s| s.bg(accent_hover).text_color(button_hover_text))
+                .child(label)
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.confirm_install_theme_store_theme(install_theme.clone(), cx);
+                }))
                 .into_any_element()
         };
 

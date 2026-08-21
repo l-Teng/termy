@@ -522,10 +522,6 @@ fn main() {
     });
 
     application.run(move |cx: &mut App| {
-        termy_ui::init_glassy(cx);
-        if let Err(error) = termy_ui::load_fonts(cx) {
-            log::warn!("Failed to load Glassy UI assets: {error}");
-        }
         spawn_deeplink_listener(cx, deeplink_rx);
 
         cx.on_action(|_: &OpenConfig, _cx| {

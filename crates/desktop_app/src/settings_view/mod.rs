@@ -1,7 +1,7 @@
 use crate::colors::TerminalColors;
 use crate::config::{self, AppConfig, SystemAppearance, system_appearance_from_window};
 use crate::text_input::{TextInputAlignment, TextInputElement, TextInputProvider, TextInputState};
-use crate::theme_store::{self, ThemeStoreAuthSession, ThemeStoreAuthUser};
+use crate::theme_store::{self, ThemeStoreAuthSession, ThemeStoreAuthUser, ThemeStoreTheme};
 use crate::ui::scrollbar::{self as ui_scrollbar, ScrollbarPaintStyle, ScrollbarRange};
 use gpui::{
     AnyElement, AsyncApp, Bounds, Context, FocusHandle, Font, InteractiveElement, IntoElement,
@@ -25,7 +25,6 @@ use termy_config_core::{
     root_setting_enum_choices, root_setting_from_key, root_setting_specs, root_setting_value_kind,
 };
 use termy_plugin_runtime::{InstalledPlugin, PluginRuntime, PluginSettingState};
-use termy_themes::ThemeStoreTheme;
 
 mod colors;
 mod components;
@@ -72,6 +71,8 @@ const SETTINGS_SCROLLBAR_TRACK_ALPHA: f32 = 0.10;
 const SETTINGS_SCROLLBAR_THUMB_ALPHA: f32 = 0.42;
 const SETTINGS_SCROLLBAR_THUMB_ACTIVE_ALPHA: f32 = 0.58;
 const SETTINGS_OVERLAY_PANEL_ALPHA_FLOOR_RATIO: f32 = 0.72;
+const SETTINGS_SWITCH_WIDTH: f32 = 38.0;
+const SETTINGS_SWITCH_HEIGHT: f32 = 22.0;
 const SETTINGS_SWITCH_KNOB_SIZE: f32 = 18.0;
 const SETTINGS_SEARCH_PREVIEW_LIMIT: usize = 6;
 const SETTINGS_SLIDER_VALUE_WIDTH: f32 = 60.0;
@@ -81,6 +82,7 @@ const SETTINGS_OPACITY_CONTROL_GAP: f32 = 6.0;
 const SETTINGS_CARD_RADIUS: f32 = 10.0;
 const SETTINGS_INPUT_RADIUS: f32 = 6.0;
 const SETTINGS_BUTTON_RADIUS: f32 = 6.0;
+const SETTINGS_SWITCH_RADIUS: f32 = 11.0;
 // Section title and subtitle sizes now live in `termy_ui::metrics`.
 const GROUP_TITLE_SIZE: f32 = 11.0;
 const CARD_GAP: f32 = 22.0;
@@ -100,32 +102,6 @@ pub(crate) enum SettingsSection {
     Advanced,
     Colors,
     Keybindings,
-}
-
-#[derive(Clone)]
-enum PendingSettingsConfirmation {
-    ResetSection {
-        section: SettingsSection,
-        section_name: &'static str,
-    },
-    ResetSetting {
-        setting_key: &'static str,
-    },
-    InstallTheme {
-        theme: ThemeStoreTheme,
-    },
-    InstallPlugin {
-        path: PathBuf,
-        name: String,
-    },
-    UninstallPlugin {
-        id: String,
-        name: String,
-    },
-    DeleteSshHost {
-        id: String,
-        name: String,
-    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,7 +147,7 @@ pub struct SettingsWindow {
     scrollbar_drag_state: Option<ScrollbarDragState>,
     scrollbar_lane_bounds: Option<Bounds<Pixels>>,
     hovered_reset_setting: Option<&'static str>,
-    pending_confirmation: Option<PendingSettingsConfirmation>,
+    hovered_reset_section: Option<SettingsSection>,
     scroll_animation_token: u64,
     colors: TerminalColors,
     system_appearance: SystemAppearance,
@@ -272,7 +248,7 @@ impl SettingsWindow {
             scrollbar_drag_state: None,
             scrollbar_lane_bounds: None,
             hovered_reset_setting: None,
-            pending_confirmation: None,
+            hovered_reset_section: None,
             scroll_animation_token: 0,
             colors,
             system_appearance,
@@ -489,8 +465,25 @@ impl SettingsWindow {
         theme: ThemeStoreTheme,
         cx: &mut Context<Self>,
     ) {
-        self.pending_confirmation = Some(PendingSettingsConfirmation::InstallTheme { theme });
-        cx.notify();
+        let title = "Install Theme";
+        let message = format!(
+            "Install theme \"{}\" into your local theme library?",
+            theme.name
+        );
+
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let confirmed = termy_native_sdk::confirm(title, &message);
+            if !confirmed {
+                return;
+            }
+
+            let _ = cx.update(|cx| {
+                this.update(cx, |view, cx| {
+                    view.install_theme_store_theme(theme.clone(), cx);
+                })
+            });
+        })
+        .detach();
     }
 
     fn uninstall_theme_store_theme(&mut self, slug: &str, cx: &mut Context<Self>) {
@@ -1109,105 +1102,6 @@ impl TextInputProvider for SettingsWindow {
     }
 }
 
-impl SettingsWindow {
-    fn render_pending_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let pending = self.pending_confirmation.as_ref()?;
-        let (title, description, confirm_label) = match pending {
-            PendingSettingsConfirmation::ResetSection { section_name, .. } => (
-                "Reset section".to_string(),
-                format!("Reset all {section_name} settings to their default values?"),
-                "Reset".to_string(),
-            ),
-            PendingSettingsConfirmation::ResetSetting { .. } => (
-                "Reset setting".to_string(),
-                "Reset this setting to its default value?".to_string(),
-                "Reset".to_string(),
-            ),
-            PendingSettingsConfirmation::InstallTheme { theme } => (
-                "Install theme".to_string(),
-                format!("Install “{}” into your local theme library?", theme.name),
-                "Install".to_string(),
-            ),
-            PendingSettingsConfirmation::InstallPlugin { name, .. } => (
-                "Install plugin".to_string(),
-                format!(
-                    "Install “{name}”? Plugins are trusted local code and run with your user permissions."
-                ),
-                "Install".to_string(),
-            ),
-            PendingSettingsConfirmation::UninstallPlugin { name, .. } => (
-                "Uninstall plugin".to_string(),
-                format!(
-                    "Uninstall “{name}”? Its copied plugin directory will be permanently removed."
-                ),
-                "Uninstall".to_string(),
-            ),
-            PendingSettingsConfirmation::DeleteSshHost { name, .. } => (
-                "Delete SSH host".to_string(),
-                format!("Delete “{name}” and its saved Keychain credential?"),
-                "Delete".to_string(),
-            ),
-        };
-
-        let cancel_view = cx.entity();
-        let confirm_view = cx.entity();
-        Some(
-            termy_ui::AlertDialog::new("settings-confirmation", title, description)
-                .open(true)
-                .confirm_label(confirm_label)
-                .on_cancel(move |_, cx| {
-                    cancel_view.update(cx, |view, cx| {
-                        view.cancel_pending_confirmation(cx);
-                    });
-                })
-                .on_confirm(move |_, cx| {
-                    confirm_view.update(cx, |view, cx| {
-                        view.complete_pending_confirmation(cx);
-                    });
-                })
-                .into_any_element(),
-        )
-    }
-
-    fn complete_pending_confirmation(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_confirmation.take() else {
-            return;
-        };
-        match pending {
-            PendingSettingsConfirmation::ResetSection { section, .. } => {
-                self.reset_section_to_defaults(section, cx);
-            }
-            PendingSettingsConfirmation::ResetSetting { setting_key } => {
-                self.reset_setting_to_default(setting_key, cx);
-            }
-            PendingSettingsConfirmation::InstallTheme { theme } => {
-                self.install_theme_store_theme(theme, cx);
-            }
-            PendingSettingsConfirmation::InstallPlugin { path, .. } => {
-                self.install_plugin_from_path(path, cx);
-            }
-            PendingSettingsConfirmation::UninstallPlugin { id, .. } => {
-                self.uninstall_plugin(id, cx);
-            }
-            PendingSettingsConfirmation::DeleteSshHost { id, .. } => {
-                self.delete_ssh_host(&id, cx);
-            }
-        }
-        cx.notify();
-    }
-
-    fn cancel_pending_confirmation(&mut self, cx: &mut Context<Self>) {
-        if matches!(
-            self.pending_confirmation,
-            Some(PendingSettingsConfirmation::InstallPlugin { .. })
-        ) {
-            self.plugin_operation_in_flight = false;
-        }
-        self.pending_confirmation = None;
-        cx.notify();
-    }
-}
-
 impl gpui::EntityInputHandler for SettingsWindow {
     fn text_for_range(
         &mut self,
@@ -1313,7 +1207,6 @@ impl Render for SettingsWindow {
         // it before building this frame's element tree.
         self.sync_ui_tokens(cx);
         let bg = self.bg_primary();
-        let pending_confirmation = self.render_pending_confirmation(cx);
         let settings_scrollbar_metrics = self.settings_scrollbar_metrics(window);
         let scrollbar_thumb_active = self.scrollbar_drag_state.is_some();
         let settings_scrollbar_lane = {
@@ -1473,7 +1366,6 @@ impl Render for SettingsWindow {
                     )
                     .child(settings_scrollbar_lane),
             )
-            .children(pending_confirmation)
     }
 }
 
