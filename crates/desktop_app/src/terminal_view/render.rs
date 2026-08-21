@@ -260,13 +260,7 @@ fn terminal_cell_underline(
         TerminalCellRef::Native(cell) => {
             let style = core_terminal_underline_style(cell.underline_style)?;
             let color = cell.underline_color.map(|color| {
-                resolve_core_color(
-                    color,
-                    context.colors.foreground,
-                    context.colors,
-                    context.core_palette,
-                )
-                .into()
+                resolve_core_color(color, context.colors, context.core_palette).into()
             });
             Some(termy_terminal_ui::TerminalUnderline { style, color })
         }
@@ -522,7 +516,6 @@ fn uses_terminal_default_background(color: AnsiColor) -> bool {
 
 fn resolve_core_color(
     color: termy_core::TerminalRenderColor,
-    default: gpui::Rgba,
     colors: &TerminalColors,
     palette: Option<&TerminalPalette>,
 ) -> gpui::Rgba {
@@ -535,10 +528,10 @@ fn resolve_core_color(
     match color {
         termy_core::TerminalRenderColor::DefaultForeground => palette
             .and_then(|palette| palette.foreground)
-            .map_or(default, from_core),
+            .map_or(colors.foreground, from_core),
         termy_core::TerminalRenderColor::DefaultBackground => palette
             .and_then(|palette| palette.background)
-            .map_or(default, from_core),
+            .map_or(colors.background, from_core),
         termy_core::TerminalRenderColor::Cursor => palette
             .and_then(|palette| palette.cursor)
             .map_or(colors.cursor, from_core),
@@ -601,22 +594,11 @@ fn resolve_cell_colors<'a>(
                 std::mem::swap(&mut fg_source, &mut bg_source);
             }
             (
-                resolve_core_color(
-                    fg_source,
-                    context.colors.foreground,
-                    context.colors,
-                    context.core_palette,
-                ),
-                resolve_core_color(
-                    bg_source,
-                    context.colors.background,
-                    context.colors,
-                    context.core_palette,
-                ),
+                resolve_core_color(fg_source, context.colors, context.core_palette),
+                resolve_core_color(bg_source, context.colors, context.core_palette),
                 matches!(
                     bg_source,
-                    termy_core::TerminalRenderColor::DefaultForeground
-                        | termy_core::TerminalRenderColor::DefaultBackground
+                    termy_core::TerminalRenderColor::DefaultBackground
                 ),
                 cell.dim,
                 cell.text.chars().next().unwrap_or('\0'),
@@ -4969,6 +4951,35 @@ mod tests {
     }
 
     #[test]
+    fn reverse_video_default_cell_from_core_paints_an_explicit_background() {
+        // Ink-based tools such as Pi and Claude Code draw their input cursor by
+        // reversing a cell while the terminal cursor itself is hidden.
+        let terminal = NativeTerminal::new_display(
+            TerminalSize {
+                cols: 2,
+                rows: 1,
+                ..TerminalSize::default()
+            },
+            None,
+        );
+        terminal.hydrate_output(b"\x1b[7mX");
+        let context = test_build_context(0.2);
+        let mut observed = false;
+
+        terminal.visit_viewport_cells(|_, _, _, cell| {
+            if cell.text == "X" {
+                observed = true;
+                let resolved = resolve_cell_colors(TerminalCellRef::Native(cell), context);
+                assert!(!resolved.uses_terminal_default_bg);
+                assert_eq!(resolved.bg, context.colors.foreground);
+                assert!((resolved.bg.a - 1.0).abs() <= f32::EPSILON);
+            }
+        });
+
+        assert!(observed, "expected the reverse-video cursor cell");
+    }
+
+    #[test]
     fn resolve_cell_colors_uses_core_live_palette_overrides() {
         let terminal = NativeTerminal::new_display(TerminalSize::default(), None);
         terminal.hydrate_output(b"\x1b]4;1;#123456\x07\x1b]10;#abcdef\x07\x1b]11;#010203\x07");
@@ -5089,8 +5100,8 @@ mod tests {
             context,
         );
 
-        assert!(resolved.uses_terminal_default_bg);
-        assert!((resolved.bg.a - 0.2).abs() <= f32::EPSILON);
+        assert!(!resolved.uses_terminal_default_bg);
+        assert!((resolved.bg.a - 1.0).abs() <= f32::EPSILON);
 
         inverse_default_background.foreground = termy_core::TerminalRenderColor::Indexed(2);
         inverse_default_background.background = termy_core::TerminalRenderColor::DefaultBackground;
