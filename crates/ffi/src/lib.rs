@@ -15,12 +15,14 @@ use flume::{Receiver, Sender, bounded};
 use termy_core::{
     ConfigDiagnostic, ConfigDiagnosticKind, KittyGraphicsRenderPlacement, LoadedTermyConfig,
     ProgressState, Terminal, TerminalClipboardTarget, TerminalDamageSnapshot, TerminalDirtySpan,
-    TerminalEvent, TerminalKeyEventKind, TerminalMouseButton, TerminalMouseEventKind,
-    TerminalMouseModifiers, TerminalMousePosition, TerminalOptions, TerminalQueryColors,
-    TerminalReplyHost, TerminalRuntimeConfig, TerminalSize, TermyCell, TermyColor,
-    TermyFrameUpdate, TermyKeystroke, TermyModifiers, TermySearchOptions, TermySharedSearchMatch,
-    encode_mouse_report, keystroke_to_input_with_options, load_config_from_contents,
-    load_config_from_default_path, load_config_from_path,
+    TerminalEvent, TerminalGlyphMetrics, TerminalGlyphNeighbors, TerminalGlyphRectSnap,
+    TerminalGlyphRenderKind, TerminalGlyphStrokeKind, TerminalKeyEventKind, TerminalMouseButton,
+    TerminalMouseEventKind, TerminalMouseModifiers, TerminalMousePosition, TerminalOptions,
+    TerminalQueryColors, TerminalReplyHost, TerminalRuntimeConfig, TerminalSize, TermyCell,
+    TermyColor, TermyFrameUpdate, TermyKeystroke, TermyModifiers, TermySearchOptions,
+    TermySharedSearchMatch, encode_mouse_report, keystroke_to_input_with_options,
+    load_config_from_contents, load_config_from_default_path, load_config_from_path,
+    terminal_glyph_plan,
 };
 use termy_themes::{THEME_REGISTRY_CACHE_VERSION, ThemeRegistryCache, ThemeStoreTheme};
 
@@ -36,6 +38,7 @@ pub enum TermyFfiStatus {
     WriteFailed = 6,
     SerializeFailed = 7,
     Panicked = 8,
+    InvalidArgument = 9,
 }
 
 #[cfg(test)]
@@ -188,6 +191,71 @@ pub struct TermyFfiDirtySpan {
     pub row: usize,
     pub left_col: usize,
     pub right_col: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TermyFfiGlyphMetrics {
+    pub cell_width: f32,
+    pub cell_height: f32,
+    pub font_size: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TermyFfiGlyphRect {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub alpha: f32,
+    pub snap_kind: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TermyFfiGlyphPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TermyFfiGlyphStroke {
+    pub kind: u32,
+    pub point_count: u32,
+    pub width: f32,
+    pub point_0: TermyFfiGlyphPoint,
+    pub point_1: TermyFfiGlyphPoint,
+    pub point_2: TermyFfiGlyphPoint,
+    pub point_3: TermyFfiGlyphPoint,
+    pub point_4: TermyFfiGlyphPoint,
+    pub point_5: TermyFfiGlyphPoint,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TermyFfiGlyphPlanEntry {
+    pub cell_index: usize,
+    pub render_kind: u32,
+    pub rect_start: usize,
+    pub rect_len: usize,
+    pub stroke_start: usize,
+    pub stroke_len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TermyFfiGlyphRenderPlan {
+    pub entries_ptr: *mut TermyFfiGlyphPlanEntry,
+    pub entries_len: usize,
+    pub entries_capacity: usize,
+    pub rects_ptr: *mut TermyFfiGlyphRect,
+    pub rects_len: usize,
+    pub rects_capacity: usize,
+    pub strokes_ptr: *mut TermyFfiGlyphStroke,
+    pub strokes_len: usize,
+    pub strokes_capacity: usize,
 }
 
 #[repr(C)]
@@ -627,6 +695,164 @@ fn ffi_search_match_from_match(search_match: TermySharedSearchMatch) -> TermyFfi
         // because the C ABI gives every result independent ownership.
         line: ffi_bytes_from_string(std::sync::Arc::unwrap_or_clone(search_match.line)),
     }
+}
+
+fn ffi_glyph_render_kind(kind: TerminalGlyphRenderKind) -> u32 {
+    match kind {
+        TerminalGlyphRenderKind::BlockElement => 1,
+        TerminalGlyphRenderKind::BoxDrawing => 2,
+        TerminalGlyphRenderKind::Sextant => 3,
+        TerminalGlyphRenderKind::Braille => 4,
+        TerminalGlyphRenderKind::RoundedCorner => 5,
+        TerminalGlyphRenderKind::Diagonal => 6,
+    }
+}
+
+fn ffi_glyph_rect(rect: termy_core::TerminalGlyphRect) -> TermyFfiGlyphRect {
+    TermyFfiGlyphRect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        alpha: rect.alpha,
+        snap_kind: match rect.snap {
+            TerminalGlyphRectSnap::Nearest => 1,
+            TerminalGlyphRectSnap::Outward => 2,
+        },
+    }
+}
+
+fn ffi_glyph_stroke(stroke: termy_core::TerminalGlyphStroke) -> TermyFfiGlyphStroke {
+    let mut points = [TermyFfiGlyphPoint::default(); termy_core::MAX_TERMINAL_GLYPH_STROKE_POINTS];
+    for (target, source) in points.iter_mut().zip(stroke.points()) {
+        *target = TermyFfiGlyphPoint {
+            x: source.x,
+            y: source.y,
+        };
+    }
+    TermyFfiGlyphStroke {
+        kind: match stroke.kind {
+            TerminalGlyphStrokeKind::Line => 1,
+            TerminalGlyphStrokeKind::RoundedCorner => 2,
+        },
+        point_count: u32::from(stroke.point_count),
+        width: stroke.width,
+        point_0: points[0],
+        point_1: points[1],
+        point_2: points[2],
+        point_3: points[3],
+        point_4: points[4],
+        point_5: points[5],
+    }
+}
+
+#[derive(Default)]
+struct FfiGlyphRenderPlanVectors {
+    entries: Vec<TermyFfiGlyphPlanEntry>,
+    rects: Vec<TermyFfiGlyphRect>,
+    strokes: Vec<TermyFfiGlyphStroke>,
+}
+
+fn push_ffi_glyph_plan_for_cell(
+    output: &mut FfiGlyphRenderPlanVectors,
+    cells: &[TermyFfiCell],
+    cols: usize,
+    cell_index: usize,
+    metrics: TerminalGlyphMetrics,
+) -> Result<(), TermyFfiStatus> {
+    let cell = &cells[cell_index];
+    if !cell.render_text {
+        return Ok(());
+    }
+    let character = char::from_u32(cell.codepoint).ok_or(TermyFfiStatus::InvalidArgument)?;
+    let col = cell_index % cols;
+    let char_at = |candidate: Option<usize>| {
+        candidate
+            .filter(|candidate| *candidate < cols)
+            .and_then(|candidate| cells.get(cell_index - col + candidate))
+            .and_then(|cell| char::from_u32(cell.codepoint))
+    };
+    let neighbors = TerminalGlyphNeighbors {
+        two_before: char_at(col.checked_sub(2)),
+        before: char_at(col.checked_sub(1)),
+        after: char_at(col.checked_add(1)),
+        two_after: char_at(col.checked_add(2)),
+    };
+    let Some(plan) = terminal_glyph_plan(character, metrics, neighbors) else {
+        return Ok(());
+    };
+
+    let rect_start = output.rects.len();
+    output
+        .rects
+        .extend(plan.rects().iter().copied().map(ffi_glyph_rect));
+    let stroke_start = output.strokes.len();
+    output
+        .strokes
+        .extend(plan.strokes().iter().copied().map(ffi_glyph_stroke));
+    output.entries.push(TermyFfiGlyphPlanEntry {
+        cell_index,
+        render_kind: ffi_glyph_render_kind(plan.kind()),
+        rect_start,
+        rect_len: output.rects.len() - rect_start,
+        stroke_start,
+        stroke_len: output.strokes.len() - stroke_start,
+    });
+    Ok(())
+}
+
+fn build_ffi_glyph_render_plan(
+    cells: &[TermyFfiCell],
+    cols: usize,
+    rows: usize,
+    spans: &[TermyFfiDirtySpan],
+    metrics: TerminalGlyphMetrics,
+) -> Result<FfiGlyphRenderPlanVectors, TermyFfiStatus> {
+    if cols == 0
+        || rows == 0
+        || cells.len()
+            != cols
+                .checked_mul(rows)
+                .ok_or(TermyFfiStatus::InvalidArgument)?
+        || !metrics.cell_width.is_finite()
+        || metrics.cell_width <= 0.0
+        || !metrics.cell_height.is_finite()
+        || metrics.cell_height <= 0.0
+        || !metrics.font_size.is_finite()
+        || metrics.font_size <= 0.0
+    {
+        return Err(TermyFfiStatus::InvalidArgument);
+    }
+    if cells
+        .iter()
+        .any(|cell| char::from_u32(cell.codepoint).is_none())
+    {
+        return Err(TermyFfiStatus::InvalidArgument);
+    }
+
+    let mut output = FfiGlyphRenderPlanVectors::default();
+    if spans.is_empty() {
+        for cell_index in 0..cells.len() {
+            push_ffi_glyph_plan_for_cell(&mut output, cells, cols, cell_index, metrics)?;
+        }
+        return Ok(output);
+    }
+
+    let mut cell_indices = BTreeSet::new();
+    for span in spans {
+        if span.row >= rows || span.left_col > span.right_col || span.right_col >= cols {
+            return Err(TermyFfiStatus::InvalidArgument);
+        }
+        let row_start = span
+            .row
+            .checked_mul(cols)
+            .ok_or(TermyFfiStatus::InvalidArgument)?;
+        cell_indices.extend((span.left_col..=span.right_col).map(|col| row_start + col));
+    }
+    for cell_index in cell_indices {
+        push_ffi_glyph_plan_for_cell(&mut output, cells, cols, cell_index, metrics)?;
+    }
+    Ok(output)
 }
 
 fn leak_vec<T>(mut vec: Vec<T>) -> (*mut T, usize, usize) {
@@ -3064,6 +3290,113 @@ pub unsafe extern "C" fn termy_frame_update_free(
     })
 }
 
+/// Builds a sparse renderer-neutral glyph plan from a host's retained full frame.
+///
+/// `cells` must contain `cols * rows` row-major cells. When `spans_len` is zero,
+/// the full frame is planned; otherwise only the inclusive dirty spans are emitted.
+/// Entries use absolute row-major cell indices and reference the flattened rect and
+/// stroke arrays. Release every successful result with
+/// `termy_glyph_render_plan_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termy_cells_build_glyph_render_plan(
+    cells_ptr: *const TermyFfiCell,
+    cells_len: usize,
+    cols: u16,
+    rows: u16,
+    spans_ptr: *const TermyFfiDirtySpan,
+    spans_len: usize,
+    metrics: TermyFfiGlyphMetrics,
+    out_plan: *mut TermyFfiGlyphRenderPlan,
+) -> TermyFfiStatus {
+    ffi_status_guard(|| {
+        if out_plan.is_null() || cells_ptr.is_null() || (spans_len > 0 && spans_ptr.is_null()) {
+            return TermyFfiStatus::Null;
+        }
+        unsafe {
+            *out_plan = TermyFfiGlyphRenderPlan::default();
+        }
+
+        let cells = unsafe { slice::from_raw_parts(cells_ptr, cells_len) };
+        let spans = if spans_len == 0 {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(spans_ptr, spans_len) }
+        };
+        let plan = match build_ffi_glyph_render_plan(
+            cells,
+            usize::from(cols),
+            usize::from(rows),
+            spans,
+            TerminalGlyphMetrics {
+                cell_width: metrics.cell_width,
+                cell_height: metrics.cell_height,
+                font_size: metrics.font_size,
+            },
+        ) {
+            Ok(plan) => plan,
+            Err(status) => return status,
+        };
+        let (entries_ptr, entries_len, entries_capacity) = leak_vec(plan.entries);
+        let (rects_ptr, rects_len, rects_capacity) = leak_vec(plan.rects);
+        let (strokes_ptr, strokes_len, strokes_capacity) = leak_vec(plan.strokes);
+        unsafe {
+            *out_plan = TermyFfiGlyphRenderPlan {
+                entries_ptr,
+                entries_len,
+                entries_capacity,
+                rects_ptr,
+                rects_len,
+                rects_capacity,
+                strokes_ptr,
+                strokes_len,
+                strokes_capacity,
+            };
+        }
+        TermyFfiStatus::Ok
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termy_glyph_render_plan_free(
+    plan: *mut TermyFfiGlyphRenderPlan,
+) -> TermyFfiStatus {
+    ffi_status_guard(|| {
+        if plan.is_null() {
+            return TermyFfiStatus::Null;
+        }
+        let plan = unsafe { &mut *plan };
+        if !plan.entries_ptr.is_null() {
+            unsafe {
+                drop(Vec::from_raw_parts(
+                    plan.entries_ptr,
+                    plan.entries_len,
+                    plan.entries_capacity,
+                ));
+            }
+        }
+        if !plan.rects_ptr.is_null() {
+            unsafe {
+                drop(Vec::from_raw_parts(
+                    plan.rects_ptr,
+                    plan.rects_len,
+                    plan.rects_capacity,
+                ));
+            }
+        }
+        if !plan.strokes_ptr.is_null() {
+            unsafe {
+                drop(Vec::from_raw_parts(
+                    plan.strokes_ptr,
+                    plan.strokes_len,
+                    plan.strokes_capacity,
+                ));
+            }
+        }
+        *plan = TermyFfiGlyphRenderPlan::default();
+        TermyFfiStatus::Ok
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn termy_terminal_kitty_graphics_revision(
     terminal: *mut TermyFfiTerminal,
@@ -3458,6 +3791,14 @@ pub unsafe extern "C" fn termy_query_color_default_foreground(
 mod tests {
     use super::*;
 
+    fn glyph_test_cell(character: char) -> TermyFfiCell {
+        TermyFfiCell {
+            codepoint: character as u32,
+            render_text: true,
+            ..TermyFfiCell::default()
+        }
+    }
+
     #[test]
     fn default_size_is_nonzero() {
         let size = termy_size_default();
@@ -3465,6 +3806,110 @@ mod tests {
         assert!(size.rows > 0);
         assert!(size.cell_width > 0.0);
         assert!(size.cell_height > 0.0);
+    }
+
+    #[test]
+    fn glyph_render_plan_is_sparse_batched_and_row_aware() {
+        let cells = [
+            glyph_test_cell('\u{2580}'),
+            glyph_test_cell('\u{28FF}'),
+            glyph_test_cell('\u{28FF}'),
+            glyph_test_cell('\u{28FF}'),
+            glyph_test_cell('\u{256D}'),
+            glyph_test_cell('\u{2573}'),
+        ];
+        let metrics = TermyFfiGlyphMetrics {
+            cell_width: 10.0,
+            cell_height: 20.0,
+            font_size: 14.0,
+        };
+        let mut plan = TermyFfiGlyphRenderPlan::default();
+        assert_eq!(
+            unsafe {
+                termy_cells_build_glyph_render_plan(
+                    cells.as_ptr(),
+                    cells.len(),
+                    cells.len() as u16,
+                    1,
+                    ptr::null(),
+                    0,
+                    metrics,
+                    &mut plan,
+                )
+            },
+            TermyFfiStatus::Ok
+        );
+        let entries = unsafe { slice::from_raw_parts(plan.entries_ptr, plan.entries_len) };
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.render_kind)
+                .collect::<Vec<_>>(),
+            vec![1, 4, 4, 4, 5, 6]
+        );
+        assert_eq!(plan.rects_len, 25);
+        assert_eq!(plan.strokes_len, 3);
+        assert_eq!(
+            unsafe { termy_glyph_render_plan_free(&mut plan) },
+            TermyFfiStatus::Ok
+        );
+        assert!(plan.entries_ptr.is_null());
+
+        let dirty = TermyFfiDirtySpan {
+            row: 0,
+            left_col: 1,
+            right_col: 1,
+        };
+        assert_eq!(
+            unsafe {
+                termy_cells_build_glyph_render_plan(
+                    cells.as_ptr(),
+                    cells.len(),
+                    cells.len() as u16,
+                    1,
+                    &dirty,
+                    1,
+                    metrics,
+                    &mut plan,
+                )
+            },
+            TermyFfiStatus::Ok
+        );
+        let entries = unsafe { slice::from_raw_parts(plan.entries_ptr, plan.entries_len) };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cell_index, 1);
+        assert_eq!(entries[0].render_kind, 4);
+        assert_eq!(entries[0].rect_len, 8);
+        assert_eq!(
+            unsafe { termy_glyph_render_plan_free(&mut plan) },
+            TermyFfiStatus::Ok
+        );
+    }
+
+    #[test]
+    fn glyph_render_plan_rejects_mismatched_frame_dimensions() {
+        let cells = [glyph_test_cell('\u{2580}')];
+        let mut plan = TermyFfiGlyphRenderPlan::default();
+        assert_eq!(
+            unsafe {
+                termy_cells_build_glyph_render_plan(
+                    cells.as_ptr(),
+                    cells.len(),
+                    2,
+                    1,
+                    ptr::null(),
+                    0,
+                    TermyFfiGlyphMetrics {
+                        cell_width: 10.0,
+                        cell_height: 20.0,
+                        font_size: 14.0,
+                    },
+                    &mut plan,
+                )
+            },
+            TermyFfiStatus::InvalidArgument
+        );
+        assert!(plan.entries_ptr.is_null());
     }
 
     #[cfg(unix)]

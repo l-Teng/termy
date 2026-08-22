@@ -10,10 +10,10 @@ Termy is a Rust workspace split by ownership boundary, not by implementation con
 
 ## Runtime And UI
 
-- `core/` (`termy_core`): headless terminal runtime/API for embedders.
+- `core/` (`termy_core`): headless terminal runtime/API and renderer-neutral terminal glyph semantics for embedders.
 - `tmon/` (`tmon`): experimental renderer-neutral terminal engine and native PTY/ConPTY runtime.
 - `plugin_runtime/` (`termy_plugin_runtime`): plugin discovery, typed protocol validation, and the on-demand Bun/Worker runtime.
-- `terminal_ui/` (`termy_terminal_ui`): GPUI grid and keystroke adapters plus tmux pane display/client support; shared terminal types come directly from `termy_core`.
+- `terminal_ui/` (`termy_terminal_ui`): GPUI grid painting/pixel snapping and keystroke adapters plus tmux pane display/client support; shared terminal types and special-glyph plans come directly from `termy_core`.
 - `tmux_control_core/` (`termy_tmux_control_core`): UI-agnostic tmux control-mode protocol, session, and transport logic shared by terminal UI and FFI.
 - `ui/` (`termy_ui`): Termy's design system in GPUI — theme-derived tokens and stateless chrome.
 - `native_sdk/` (`termy_native_sdk`): narrow platform-native helpers.

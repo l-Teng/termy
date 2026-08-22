@@ -6,7 +6,8 @@
 - `termy_ffi`: C ABI wrapper over `termy_core`.
 
 The core API owns PTY startup, terminal parsing, input writes, resize, event
-draining, damage snapshots, and renderer-neutral frame snapshots. It does not
+draining, damage snapshots, renderer-neutral frame snapshots, and canonical
+special-glyph geometry. It does not
 depend on GPUI and does not expose Termy's app chrome, tabs, panes, or tmux
 session model as part of the public v1 surface.
 
@@ -67,6 +68,20 @@ Use `termy_core::measure_cell(font_family, font_size, line_height)` or
 `TerminalSize` cell width and height from Termy's font metrics instead of
 guessing a monospace ratio in the host app.
 
+### Special glyph geometry
+
+Block elements, box drawing, sextants, long Braille runs, rounded corners, and
+diagonals should not be shaped as ordinary font glyphs. Use
+`termy_core::terminal_glyph_plan` with `TerminalGlyphMetrics` and neighboring
+row characters. It returns an allocation-free `TerminalGlyphPlan` containing
+cell-relative rectangles and strokes. Rectangle snap modes tell the renderer
+whether to round edges normally or outward; the host still transforms and snaps
+the primitives in its own device coordinate space.
+
+`TerminalGlyphNeighbors::from_row` is the convenience path for a retained Rust
+row. The neighbor context preserves Termy's rule that long Braille runs use
+geometry while one- and two-cell animated spinners remain shaped text.
+
 ## C ABI
 
 Use `termy_ffi` as an opaque-handle API:
@@ -84,6 +99,10 @@ Use `termy_ffi` as an opaque-handle API:
 - `termy_terminal_resize`
 - `termy_terminal_snapshot`
 - `termy_frame_free`
+- `termy_terminal_take_frame_update`
+- `termy_frame_update_free`
+- `termy_cells_build_glyph_render_plan`
+- `termy_glyph_render_plan_free`
 - `termy_terminal_take_damage`
 - `termy_damage_free`
 - `termy_terminal_drain_events`
@@ -91,7 +110,7 @@ Use `termy_ffi` as an opaque-handle API:
 - `termy_terminal_search`
 - `termy_search_batch_free`
 
-Any returned frame, damage, event batch, search batch, or standalone byte payload must be
+Any returned frame, frame update, glyph render plan, damage, event batch, search batch, or standalone byte payload must be
 released by the matching `termy_*_free` function. Event payloads owned by an
 event batch are freed by `termy_event_batch_free`; do not free them separately.
 Search match line payloads owned by a search batch are freed by
@@ -122,6 +141,14 @@ non-Rust embedders can render the terminal with the same user config that was
 passed into `termy_terminal_new_with_config`. The render config also includes
 `cell_width` and `cell_height`, measured by `termy_core`, for constructing
 `TermyFfiSize` without duplicating font metric logic in the host app.
+
+After patching a frame update into a retained full row-major cell buffer, call
+`termy_cells_build_glyph_render_plan` once with that buffer and the update's
+dirty spans. The result is sparse: each entry names an absolute cell index and
+ranges into flat rectangle and stroke arrays. Passing zero spans builds a full
+plan. Rectangle/stroke coordinates are normalized to the cell, so the host owns
+the final backend-specific transform and device-pixel snapping. Release the
+batch with `termy_glyph_render_plan_free`.
 
 Event kind values:
 

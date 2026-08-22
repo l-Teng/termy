@@ -4,7 +4,7 @@ Reusable headless libtermy runtime and API.
 
 ## Owner
 
-This crate owns terminal lifecycle, frame snapshots, keyboard/mouse protocol helpers, search over frames, config-to-runtime conversion, shell integration state, and embedder-facing render metrics. It must remain independent of GPUI and desktop app chrome.
+This crate owns terminal lifecycle, frame snapshots, keyboard/mouse protocol helpers, search over frames, config-to-runtime conversion, shell integration state, renderer-neutral special-glyph geometry, and embedder-facing render metrics. It must remain independent of GPUI and desktop app chrome.
 
 Use this crate when behavior should be available to FFI, WASM, JS, or non-GPUI host examples.
 
@@ -45,6 +45,12 @@ Alacritty conversion helpers. Embedders should use core-owned types such as
 `TerminalColor`, `TerminalRenderCell`, and `TerminalQueryColors`, plus the
 neutral `Terminal` methods, rather than depending on an engine grid or parser.
 
+`terminal_glyph_plan` owns the terminal-specific rendering semantics for block
+elements, box drawing, sextants, long Braille runs, rounded corners, and
+diagonals. It returns allocation-free, cell-relative rectangle and stroke plans.
+Renderers transform those primitives and perform final backend/device-pixel
+snapping; they should not shape these special cells as ordinary font glyphs.
+
 ## Why libtermy instead of a VT engine directly?
 
 A VT engine provides parser, grid, and PTY primitives. libtermy wraps those
@@ -60,6 +66,7 @@ primitives with the harness every embedder ends up writing anyway:
 - **Config bridge** — `AppConfig` → `TerminalRuntimeConfig`, theme color resolution, terminal query colors.
 - **Font + cell metrics** — `measure_cell` backed by fontdb / ttf-parser for embedder layout.
 - **Render metrics** — span timings (grid paint, text shaping, cache hit/miss) for performance debugging.
+- **Special-glyph plans** — shared block, box-drawing, sextant, Braille, rounded-corner, and diagonal geometry without a renderer dependency.
 - **Launch resolution** — working directory normalization, fallbacks, locale, and PATH setup.
 - **PTY plumbing** — `rustix-openpty` on Unix, shell discovery via `winreg` on Windows.
 - **Portable surface** — no GPUI dependency. The same crate powers the desktop app, `termy_ffi` (C ABI), WASM hosts, JS bindings, and headless tests. Wrap the engine once, host many times.

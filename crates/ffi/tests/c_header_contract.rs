@@ -14,7 +14,11 @@ const C_CONTRACT_SOURCE: &str = r#"
 
 _Static_assert(TERMY_FFI_OK == 0, "status enum starts at OK");
 _Static_assert(TERMY_FFI_PANICKED == 8, "panic status is stable");
+_Static_assert(TERMY_FFI_INVALID_ARGUMENT == 9, "invalid argument status is stable");
 _Static_assert(sizeof(TermyFfiCell) == 20, "cell ABI size is stable");
+_Static_assert(sizeof(TermyFfiGlyphPoint) == 8, "glyph point ABI size is stable");
+_Static_assert(sizeof(TermyFfiGlyphRect) == 24, "glyph rect ABI size is stable");
+_Static_assert(sizeof(TermyFfiGlyphStroke) == 60, "glyph stroke ABI size is stable");
 _Static_assert(offsetof(TermyFfiCell, italic) > offsetof(TermyFfiCell, line_wrapped), "text attributes use trailing cell padding");
 _Static_assert(offsetof(TermyFfiFrame, cells_ptr) < offsetof(TermyFfiFrame, cursor), "frame cell storage precedes cursor");
 _Static_assert(offsetof(TermyFfiFrameUpdate, damage_kind) < offsetof(TermyFfiFrameUpdate, spans_ptr), "frame update damage metadata precedes spans");
@@ -24,6 +28,8 @@ void termy_header_contract(void) {
   TermyFfiSize size = termy_size_default();
   TermyFfiTerminal *terminal = 0;
   TermyFfiFrame frame = {0};
+  TermyFfiGlyphMetrics glyph_metrics = {size.cell_width, size.cell_height, 14.0f};
+  TermyFfiGlyphRenderPlan glyph_plan = {0};
   TermyFfiKittyGraphicsBatch graphics = {0};
   uint64_t graphics_revision = 0;
   const uint8_t bytes[] = {'o', 'k'};
@@ -32,6 +38,16 @@ void termy_header_contract(void) {
   (void)status;
   (void)termy_terminal_feed_output(terminal, bytes, sizeof(bytes));
   (void)termy_terminal_snapshot(terminal, &frame);
+  (void)termy_cells_build_glyph_render_plan(
+      frame.cells_ptr,
+      frame.cells_len,
+      frame.cols,
+      frame.rows,
+      0,
+      0,
+      glyph_metrics,
+      &glyph_plan);
+  (void)termy_glyph_render_plan_free(&glyph_plan);
   (void)termy_terminal_kitty_graphics_revision(terminal, &graphics_revision);
   (void)termy_terminal_kitty_graphics_placements(terminal, &graphics);
   (void)termy_kitty_graphics_batch_free(&graphics);

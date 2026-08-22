@@ -2,6 +2,7 @@ mod backend;
 mod cell_metrics;
 mod config;
 mod frame;
+mod glyph_geometry;
 mod keyboard;
 mod kitty_graphics;
 mod links;
@@ -29,6 +30,12 @@ pub use frame::{
     TerminalRenderDamageSnapshot, TerminalRenderRead, TerminalRenderText, TerminalUnderlineStyle,
     TerminalViewportMetadata, TerminalViewportScroll, TerminalViewportScrollDirection, TermyCell,
     TermyColor, TermyFrame, TermyFrameUpdate,
+};
+pub use glyph_geometry::{
+    MAX_TERMINAL_GLYPH_RECTS, MAX_TERMINAL_GLYPH_STROKE_POINTS, MAX_TERMINAL_GLYPH_STROKES,
+    TerminalGlyphMetrics, TerminalGlyphNeighbors, TerminalGlyphPlan, TerminalGlyphPoint,
+    TerminalGlyphRect, TerminalGlyphRectSnap, TerminalGlyphRenderKind, TerminalGlyphStroke,
+    TerminalGlyphStrokeKind, terminal_glyph_plan,
 };
 pub use keyboard::{
     Keystroke, Modifiers, TerminalKeyEventKind, TerminalKeyboardMode, TermyKeystroke,

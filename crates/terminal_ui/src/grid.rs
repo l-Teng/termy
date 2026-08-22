@@ -5,10 +5,11 @@ use gpui::{
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 use termy_core::{
-    TerminalCursorStyle, add_span_grid_paint_us, add_span_row_ops_rebuild_us,
-    add_span_text_shaping_us, increment_grid_paint_count, increment_shape_line_calls,
-    increment_shaped_line_cache_hit, increment_shaped_line_cache_miss,
-    terminal_ui_render_metrics_enabled,
+    TerminalCursorStyle, TerminalGlyphMetrics, TerminalGlyphNeighbors, TerminalGlyphPlan,
+    TerminalGlyphRect, TerminalGlyphRectSnap, TerminalGlyphRenderKind, TerminalGlyphStrokeKind,
+    add_span_grid_paint_us, add_span_row_ops_rebuild_us, add_span_text_shaping_us,
+    increment_grid_paint_count, increment_shape_line_calls, increment_shaped_line_cache_hit,
+    increment_shaped_line_cache_miss, terminal_glyph_plan, terminal_ui_render_metrics_enabled,
 };
 
 /// The visual form of a terminal underline requested by SGR 4 variants.
@@ -148,21 +149,14 @@ impl IntoElement for TerminalGrid {
 //   terminal cell so they meet adjacent straight lines without gaps.
 // - Diagonals (U+2571-U+2573) remain explicit stroked paths so adjacent cells
 //   join without gaps.
+#[cfg(test)]
 const BOX_DRAWING_START: u32 = 0x2500;
+#[cfg(test)]
 const BOX_DRAWING_END: u32 = 0x257F;
+#[cfg(test)]
 const BLOCK_ELEMENTS_START: u32 = 0x2580;
+#[cfg(test)]
 const BLOCK_ELEMENTS_END: u32 = 0x259F;
-
-/// Symbols for Legacy Computing mosaic (sextant) characters used by terminal QR
-/// renderers such as `toqr` (Expo SDK 55+).
-const SEXTANT_MOSAIC_START: u32 = 0x1FB00;
-const SEXTANT_MOSAIC_END: u32 = 0x1FB3B;
-const BRAILLE_PATTERNS_START: u32 = 0x2800;
-const BRAILLE_PATTERNS_END: u32 = 0x28FF;
-const QUAD_UPPER_LEFT: u8 = 0b0001;
-const QUAD_UPPER_RIGHT: u8 = 0b0010;
-const QUAD_LOWER_LEFT: u8 = 0b0100;
-const QUAD_LOWER_RIGHT: u8 = 0b1000;
 
 fn terminal_font_features() -> FontFeatures {
     // `force_width` is applied per shaped glyph. A standard `fi`/`fl` ligature
@@ -176,186 +170,62 @@ fn terminal_font_features() -> FontFeatures {
     ]))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct BlockRectSpec {
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-    alpha: f32,
-}
-
-impl BlockRectSpec {
-    const fn new(left: f32, top: f32, right: f32, bottom: f32, alpha: f32) -> Self {
-        Self {
-            left,
-            top,
-            right,
-            bottom,
-            alpha,
-        }
+#[cfg(test)]
+fn test_glyph_metrics(cell_width: f32, cell_height: f32, font_size: f32) -> TerminalGlyphMetrics {
+    TerminalGlyphMetrics {
+        cell_width,
+        cell_height,
+        font_size,
     }
 }
 
-const EMPTY_BLOCK_RECT: BlockRectSpec = BlockRectSpec::new(0.0, 0.0, 0.0, 0.0, 0.0);
-
-/// Collected set of cell-relative rectangles that compose a single block-element
-/// or box-drawing character. Fixed-capacity array (max 8 rects) to avoid heap
-/// allocation — the most complex box-drawing connectors expand to 8 rects
-/// before overlapping collinear runs are merged back together.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct BlockElementGeometry {
-    rects: [BlockRectSpec; 8],
-    rect_count: usize,
+#[cfg(test)]
+fn block_element_geometry(character: char) -> Option<TerminalGlyphPlan> {
+    let plan = terminal_glyph_plan(
+        character,
+        test_glyph_metrics(10.0, 20.0, 14.0),
+        TerminalGlyphNeighbors::default(),
+    )?;
+    (plan.kind() == TerminalGlyphRenderKind::BlockElement).then_some(plan)
 }
 
-impl BlockElementGeometry {
-    const fn empty() -> Self {
-        Self {
-            rects: [EMPTY_BLOCK_RECT; 8],
-            rect_count: 0,
-        }
-    }
-
-    const fn one(rect: BlockRectSpec) -> Self {
-        Self {
-            rects: [
-                rect,
-                EMPTY_BLOCK_RECT,
-                EMPTY_BLOCK_RECT,
-                EMPTY_BLOCK_RECT,
-                EMPTY_BLOCK_RECT,
-                EMPTY_BLOCK_RECT,
-                EMPTY_BLOCK_RECT,
-                EMPTY_BLOCK_RECT,
-            ],
-            rect_count: 1,
-        }
-    }
-
-    fn push_rect(&mut self, rect: BlockRectSpec) {
-        debug_assert!(
-            self.rect_count < self.rects.len(),
-            "box geometry exceeded rect capacity"
-        );
-        if self.rect_count >= self.rects.len() {
-            // Preserve release stability if a future mapping regression exceeds
-            // the fixed connector rect budget.
-            return;
-        }
-        self.rects[self.rect_count] = rect;
-        self.rect_count += 1;
-    }
-
-    fn rects(&self) -> &[BlockRectSpec] {
-        &self.rects[..self.rect_count]
-    }
-
-    /// Merges any pair of rects that share the same axis track and overlap or touch.
-    ///
-    /// Two rects are "collinear" if they have the same left/right (vertical track)
-    /// or the same top/bottom (horizontal track) and their perpendicular extents
-    /// overlap within `EPSILON`. The merged rect takes the union of both bounding
-    /// boxes and the maximum alpha.
-    ///
-    /// Called once after all arms of a box-drawing connector have been pushed, so
-    /// that a simple light-cross (which pushes one vertical + one horizontal rect
-    /// overlapping at center) stays as two rects rather than fragmenting into four.
-    fn merge_collinear_overlaps(&mut self) {
-        const EPSILON: f32 = 1e-6;
-
-        let mut i = 0;
-        while i < self.rect_count {
-            let mut j = i + 1;
-            while j < self.rect_count {
-                let a = self.rects[i];
-                let b = self.rects[j];
-
-                let same_vertical_track = (a.left - b.left).abs() <= EPSILON
-                    && (a.right - b.right).abs() <= EPSILON
-                    && a.top <= b.bottom + EPSILON
-                    && b.top <= a.bottom + EPSILON;
-                let same_horizontal_track = (a.top - b.top).abs() <= EPSILON
-                    && (a.bottom - b.bottom).abs() <= EPSILON
-                    && a.left <= b.right + EPSILON
-                    && b.left <= a.right + EPSILON;
-
-                if same_vertical_track || same_horizontal_track {
-                    self.rects[i] = BlockRectSpec::new(
-                        a.left.min(b.left),
-                        a.top.min(b.top),
-                        a.right.max(b.right),
-                        a.bottom.max(b.bottom),
-                        a.alpha.max(b.alpha),
-                    );
-
-                    for k in j..(self.rect_count - 1) {
-                        self.rects[k] = self.rects[k + 1];
-                    }
-                    self.rects[self.rect_count - 1] = EMPTY_BLOCK_RECT;
-                    self.rect_count -= 1;
-                } else {
-                    j += 1;
-                }
-            }
-            i += 1;
-        }
-    }
+#[cfg(test)]
+fn braille_geometry(character: char) -> Option<TerminalGlyphPlan> {
+    let plan = terminal_glyph_plan(
+        character,
+        test_glyph_metrics(10.0, 20.0, 14.0),
+        TerminalGlyphNeighbors {
+            before: Some(character),
+            after: Some(character),
+            ..TerminalGlyphNeighbors::default()
+        },
+    )?;
+    (plan.kind() == TerminalGlyphRenderKind::Braille).then_some(plan)
 }
 
-/// Stroke weight for one arm of a box-drawing connector.
-///
-/// Maps directly to the Unicode box-drawing naming convention: light strokes are
-/// 1x the base width, heavy strokes are 2x, and double strokes are two
-/// parallel light lines separated by one light-width gap.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BoxLineStyle {
-    None,
-    Light,
-    Heavy,
-    Double,
+#[cfg(test)]
+fn box_draw_geometry_for_char(
+    character: char,
+    cell_width: f32,
+    cell_height: f32,
+    font_size: f32,
+) -> Option<TerminalGlyphPlan> {
+    let plan = terminal_glyph_plan(
+        character,
+        test_glyph_metrics(cell_width, cell_height, font_size),
+        TerminalGlyphNeighbors::default(),
+    )?;
+    (plan.kind() == TerminalGlyphRenderKind::BoxDrawing).then_some(plan)
 }
 
-impl BoxLineStyle {
-    fn is_double(self) -> bool {
-        self == Self::Double
-    }
-
-    fn is_heavy(self) -> bool {
-        self == Self::Heavy
-    }
-}
-
-/// Four-arm style descriptor for a rectangular box-drawing character.
-///
-/// Each field declares whether the character extends a line in that cardinal
-/// direction and, if so, which stroke weight it uses. `box_draw_geometry`
-/// converts this into concrete pixel rectangles sized to the terminal cell.
-///
-/// Rounded corners (U+256D-U+2570) and diagonals (U+2571-U+2573) are not
-/// representable here and return `None` from `box_draw_segments`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BoxDrawSegments {
-    up: BoxLineStyle,
-    down: BoxLineStyle,
-    left: BoxLineStyle,
-    right: BoxLineStyle,
-}
-
-impl BoxDrawSegments {
-    const fn new(
-        up: BoxLineStyle,
-        down: BoxLineStyle,
-        left: BoxLineStyle,
-        right: BoxLineStyle,
-    ) -> Self {
-        Self {
-            up,
-            down,
-            left,
-            right,
-        }
-    }
+#[cfg(test)]
+fn sextant_geometry(character: char) -> Option<TerminalGlyphPlan> {
+    let plan = terminal_glyph_plan(
+        character,
+        test_glyph_metrics(10.0, 20.0, 14.0),
+        TerminalGlyphNeighbors::default(),
+    )?;
+    (plan.kind() == TerminalGlyphRenderKind::Sextant).then_some(plan)
 }
 
 #[derive(Clone)]
@@ -379,7 +249,7 @@ struct BlockDraw {
     #[cfg_attr(not(test), allow(dead_code))]
     row: usize,
     col: usize,
-    geometry: BlockElementGeometry,
+    geometry: TerminalGlyphPlan,
     fg: Hsla,
 }
 
@@ -388,7 +258,7 @@ struct SextantDraw {
     #[cfg_attr(not(test), allow(dead_code))]
     row: usize,
     col: usize,
-    packed: u8,
+    geometry: TerminalGlyphPlan,
     fg: Hsla,
 }
 
@@ -603,683 +473,33 @@ impl TextBatchBuilder {
     }
 }
 
-fn full_cell_rect(alpha: f32) -> BlockRectSpec {
-    BlockRectSpec::new(0.0, 0.0, 1.0, 1.0, alpha)
-}
-
-fn vertical_fill_from_bottom(fraction: f32) -> BlockElementGeometry {
-    BlockElementGeometry::one(BlockRectSpec::new(0.0, 1.0 - fraction, 1.0, 1.0, 1.0))
-}
-
-fn horizontal_fill_from_left(fraction: f32) -> BlockElementGeometry {
-    BlockElementGeometry::one(BlockRectSpec::new(0.0, 0.0, fraction, 1.0, 1.0))
-}
-
-fn quadrants(mask: u8) -> BlockElementGeometry {
-    let mut rects = [EMPTY_BLOCK_RECT; 8];
-    let mut count = 0;
-
-    if mask & QUAD_UPPER_LEFT != 0 {
-        rects[count] = BlockRectSpec::new(0.0, 0.0, 0.5, 0.5, 1.0);
-        count += 1;
-    }
-    if mask & QUAD_UPPER_RIGHT != 0 {
-        rects[count] = BlockRectSpec::new(0.5, 0.0, 1.0, 0.5, 1.0);
-        count += 1;
-    }
-    if mask & QUAD_LOWER_LEFT != 0 {
-        rects[count] = BlockRectSpec::new(0.0, 0.5, 0.5, 1.0, 1.0);
-        count += 1;
-    }
-    if mask & QUAD_LOWER_RIGHT != 0 {
-        rects[count] = BlockRectSpec::new(0.5, 0.5, 1.0, 1.0, 1.0);
-        count += 1;
-    }
-
-    BlockElementGeometry {
-        rects,
-        rect_count: count,
-    }
-}
-
-fn block_element_geometry(c: char) -> Option<BlockElementGeometry> {
-    let codepoint = c as u32;
-    if !(BLOCK_ELEMENTS_START..=BLOCK_ELEMENTS_END).contains(&codepoint) {
-        return None;
-    }
-
-    Some(match c {
-        '\u{2580}' => BlockElementGeometry::one(BlockRectSpec::new(0.0, 0.0, 1.0, 0.5, 1.0)),
-        '\u{2581}' => vertical_fill_from_bottom(1.0 / 8.0),
-        '\u{2582}' => vertical_fill_from_bottom(2.0 / 8.0),
-        '\u{2583}' => vertical_fill_from_bottom(3.0 / 8.0),
-        '\u{2584}' => vertical_fill_from_bottom(4.0 / 8.0),
-        '\u{2585}' => vertical_fill_from_bottom(5.0 / 8.0),
-        '\u{2586}' => vertical_fill_from_bottom(6.0 / 8.0),
-        '\u{2587}' => vertical_fill_from_bottom(7.0 / 8.0),
-        '\u{2588}' => BlockElementGeometry::one(full_cell_rect(1.0)),
-        '\u{2589}' => horizontal_fill_from_left(7.0 / 8.0),
-        '\u{258A}' => horizontal_fill_from_left(6.0 / 8.0),
-        '\u{258B}' => horizontal_fill_from_left(5.0 / 8.0),
-        '\u{258C}' => horizontal_fill_from_left(4.0 / 8.0),
-        '\u{258D}' => horizontal_fill_from_left(3.0 / 8.0),
-        '\u{258E}' => horizontal_fill_from_left(2.0 / 8.0),
-        '\u{258F}' => horizontal_fill_from_left(1.0 / 8.0),
-        '\u{2590}' => BlockElementGeometry::one(BlockRectSpec::new(0.5, 0.0, 1.0, 1.0, 1.0)),
-        '\u{2591}' => BlockElementGeometry::one(full_cell_rect(0.25)),
-        '\u{2592}' => BlockElementGeometry::one(full_cell_rect(0.50)),
-        '\u{2593}' => BlockElementGeometry::one(full_cell_rect(0.75)),
-        '\u{2594}' => BlockElementGeometry::one(BlockRectSpec::new(0.0, 0.0, 1.0, 1.0 / 8.0, 1.0)),
-        '\u{2595}' => BlockElementGeometry::one(BlockRectSpec::new(7.0 / 8.0, 0.0, 1.0, 1.0, 1.0)),
-        '\u{2596}' => quadrants(QUAD_LOWER_LEFT),
-        '\u{2597}' => quadrants(QUAD_LOWER_RIGHT),
-        '\u{2598}' => quadrants(QUAD_UPPER_LEFT),
-        '\u{2599}' => quadrants(QUAD_UPPER_LEFT | QUAD_LOWER_LEFT | QUAD_LOWER_RIGHT),
-        '\u{259A}' => quadrants(QUAD_UPPER_LEFT | QUAD_LOWER_RIGHT),
-        '\u{259B}' => quadrants(QUAD_UPPER_LEFT | QUAD_UPPER_RIGHT | QUAD_LOWER_LEFT),
-        '\u{259C}' => quadrants(QUAD_UPPER_LEFT | QUAD_UPPER_RIGHT | QUAD_LOWER_RIGHT),
-        '\u{259D}' => quadrants(QUAD_UPPER_RIGHT),
-        '\u{259E}' => quadrants(QUAD_UPPER_RIGHT | QUAD_LOWER_LEFT),
-        '\u{259F}' => quadrants(QUAD_UPPER_RIGHT | QUAD_LOWER_LEFT | QUAD_LOWER_RIGHT),
-        _ => return None,
-    })
-}
-
-fn reverse_lower_six_bits(value: u8) -> u8 {
-    ((value & 0b00_0001) << 5)
-        | ((value & 0b00_0010) << 3)
-        | ((value & 0b00_0100) << 1)
-        | ((value & 0b00_1000) >> 1)
-        | ((value & 0b01_0000) >> 3)
-        | ((value & 0b10_0000) >> 5)
-}
-
-fn sextant_char_to_packed(ch: char) -> Option<u8> {
-    let codepoint = ch as u32;
-    if !(SEXTANT_MOSAIC_START..=SEXTANT_MOSAIC_END).contains(&codepoint) {
-        return None;
-    }
-
-    let offset = codepoint - SEXTANT_MOSAIC_START;
-    let sextant = (offset + 1 + u32::from(offset >= 20) + u32::from(offset >= 40)) as u8;
-    Some(reverse_lower_six_bits(sextant) ^ 0b11_1111)
-}
-
-fn braille_geometry(c: char) -> Option<BlockElementGeometry> {
-    let codepoint = c as u32;
-    if !is_braille_pattern_char(c) {
-        return None;
-    }
-
-    let pattern = (codepoint - BRAILLE_PATTERNS_START) as u8;
-    if pattern == 0 {
-        return None;
-    }
-
-    // Braille QR output typically uses the Unicode braille block. Render it as
-    // explicit geometry so output remains readable even when the configured
-    // terminal font lacks braille glyph coverage.
-    const DOT_WIDTH: f32 = 0.24;
-    const DOT_HEIGHT: f32 = 0.16;
-    const LEFT_X: f32 = 0.22;
-    const RIGHT_X: f32 = 0.64;
-    const ROW_Y: [f32; 4] = [0.08, 0.31, 0.54, 0.77];
-    const DOT_MASKS: [(u8, f32, f32); 8] = [
-        (0b0000_0001, LEFT_X, ROW_Y[0]),
-        (0b0000_0010, LEFT_X, ROW_Y[1]),
-        (0b0000_0100, LEFT_X, ROW_Y[2]),
-        (0b0100_0000, LEFT_X, ROW_Y[3]),
-        (0b0000_1000, RIGHT_X, ROW_Y[0]),
-        (0b0001_0000, RIGHT_X, ROW_Y[1]),
-        (0b0010_0000, RIGHT_X, ROW_Y[2]),
-        (0b1000_0000, RIGHT_X, ROW_Y[3]),
-    ];
-
-    let mut geometry = BlockElementGeometry::empty();
-    for (mask, left, top) in DOT_MASKS {
-        if pattern & mask == 0 {
-            continue;
-        }
-        geometry.push_rect(BlockRectSpec::new(
-            left,
-            top,
-            (left + DOT_WIDTH).min(1.0),
-            (top + DOT_HEIGHT).min(1.0),
-            1.0,
-        ));
-    }
-    Some(geometry)
-}
-
-fn is_braille_pattern_char(c: char) -> bool {
-    (BRAILLE_PATTERNS_START..=BRAILLE_PATTERNS_END).contains(&(c as u32))
-}
-
-fn should_render_braille_as_geometry(row_cells: &[CellRenderInfo], index: usize) -> bool {
-    let Some(cell) = row_cells.get(index) else {
-        return false;
-    };
-    if !is_braille_pattern_char(cell.char) {
-        return false;
-    }
-
-    // QR output is emitted as longer contiguous braille runs. Some CLI loading
-    // spinners use two cells, so only switch to geometry for runs of three or more.
-    let is_braille_at = |candidate: usize| {
-        row_cells
-            .get(candidate)
-            .is_some_and(|neighbor| is_braille_pattern_char(neighbor.char))
-    };
-
-    (index >= 2 && is_braille_at(index - 2) && is_braille_at(index - 1))
-        || (index >= 1 && is_braille_at(index - 1) && is_braille_at(index + 1))
-        || (is_braille_at(index + 1) && is_braille_at(index + 2))
-}
-
-const fn box_segments(
-    up: BoxLineStyle,
-    down: BoxLineStyle,
-    left: BoxLineStyle,
-    right: BoxLineStyle,
-) -> BoxDrawSegments {
-    BoxDrawSegments::new(up, down, left, right)
-}
-
-/// Looks up the four-arm style descriptor for a box-drawing codepoint.
-///
-/// Returns `None` for rounded corners (U+256D-U+2570, path-rendered), diagonals
-/// (U+2571-U+2573, path-rendered), and anything outside U+2500..U+257F.
-#[allow(clippy::too_many_lines)]
-fn box_draw_segments(c: char) -> Option<BoxDrawSegments> {
-    use BoxLineStyle::{Double, Heavy, Light, None as Empty};
-
-    let codepoint = c as u32;
-    if !(BOX_DRAWING_START..=BOX_DRAWING_END).contains(&codepoint) {
-        return None;
-    }
-
-    Some(match c {
-        '\u{2500}' | '\u{2504}' | '\u{2508}' | '\u{254C}' => {
-            box_segments(Empty, Empty, Light, Light)
-        }
-        '\u{2501}' | '\u{2505}' | '\u{2509}' | '\u{254D}' => {
-            box_segments(Empty, Empty, Heavy, Heavy)
-        }
-        '\u{2502}' | '\u{2506}' | '\u{250A}' | '\u{254E}' => {
-            box_segments(Light, Light, Empty, Empty)
-        }
-        '\u{2503}' | '\u{2507}' | '\u{250B}' | '\u{254F}' => {
-            box_segments(Heavy, Heavy, Empty, Empty)
-        }
-        '\u{250C}' => box_segments(Empty, Light, Empty, Light),
-        '\u{250D}' => box_segments(Empty, Light, Empty, Heavy),
-        '\u{250E}' => box_segments(Empty, Heavy, Empty, Light),
-        '\u{250F}' => box_segments(Empty, Heavy, Empty, Heavy),
-        '\u{2510}' => box_segments(Empty, Light, Light, Empty),
-        '\u{2511}' => box_segments(Empty, Light, Heavy, Empty),
-        '\u{2512}' => box_segments(Empty, Heavy, Light, Empty),
-        '\u{2513}' => box_segments(Empty, Heavy, Heavy, Empty),
-        '\u{2514}' => box_segments(Light, Empty, Empty, Light),
-        '\u{2515}' => box_segments(Light, Empty, Empty, Heavy),
-        '\u{2516}' => box_segments(Heavy, Empty, Empty, Light),
-        '\u{2517}' => box_segments(Heavy, Empty, Empty, Heavy),
-        '\u{2518}' => box_segments(Light, Empty, Light, Empty),
-        '\u{2519}' => box_segments(Light, Empty, Heavy, Empty),
-        '\u{251A}' => box_segments(Heavy, Empty, Light, Empty),
-        '\u{251B}' => box_segments(Heavy, Empty, Heavy, Empty),
-        '\u{251C}' => box_segments(Light, Light, Empty, Light),
-        '\u{251D}' => box_segments(Light, Light, Empty, Heavy),
-        '\u{251E}' => box_segments(Heavy, Light, Empty, Light),
-        '\u{251F}' => box_segments(Light, Heavy, Empty, Light),
-        '\u{2520}' => box_segments(Heavy, Heavy, Empty, Light),
-        '\u{2521}' => box_segments(Light, Heavy, Empty, Heavy),
-        '\u{2522}' => box_segments(Heavy, Light, Empty, Heavy),
-        '\u{2523}' => box_segments(Heavy, Heavy, Empty, Heavy),
-        '\u{2524}' => box_segments(Light, Light, Light, Empty),
-        '\u{2525}' => box_segments(Light, Light, Heavy, Empty),
-        '\u{2526}' => box_segments(Heavy, Light, Light, Empty),
-        '\u{2527}' => box_segments(Light, Heavy, Light, Empty),
-        '\u{2528}' => box_segments(Heavy, Heavy, Light, Empty),
-        '\u{2529}' => box_segments(Light, Heavy, Heavy, Empty),
-        '\u{252A}' => box_segments(Heavy, Light, Heavy, Empty),
-        '\u{252B}' => box_segments(Heavy, Heavy, Heavy, Empty),
-        '\u{252C}' => box_segments(Empty, Light, Light, Light),
-        '\u{252D}' => box_segments(Empty, Light, Heavy, Light),
-        '\u{252E}' => box_segments(Empty, Light, Light, Heavy),
-        '\u{252F}' => box_segments(Empty, Light, Heavy, Heavy),
-        '\u{2530}' => box_segments(Empty, Heavy, Light, Light),
-        '\u{2531}' => box_segments(Empty, Heavy, Heavy, Light),
-        '\u{2532}' => box_segments(Empty, Heavy, Light, Heavy),
-        '\u{2533}' => box_segments(Empty, Heavy, Heavy, Heavy),
-        '\u{2534}' => box_segments(Light, Empty, Light, Light),
-        '\u{2535}' => box_segments(Light, Empty, Heavy, Light),
-        '\u{2536}' => box_segments(Light, Empty, Light, Heavy),
-        '\u{2537}' => box_segments(Light, Empty, Heavy, Heavy),
-        '\u{2538}' => box_segments(Heavy, Empty, Light, Light),
-        '\u{2539}' => box_segments(Heavy, Empty, Heavy, Light),
-        '\u{253A}' => box_segments(Heavy, Empty, Light, Heavy),
-        '\u{253B}' => box_segments(Heavy, Empty, Heavy, Heavy),
-        '\u{253C}' => box_segments(Light, Light, Light, Light),
-        '\u{253D}' => box_segments(Light, Light, Heavy, Light),
-        '\u{253E}' => box_segments(Light, Light, Light, Heavy),
-        '\u{253F}' => box_segments(Light, Light, Heavy, Heavy),
-        '\u{2540}' => box_segments(Heavy, Light, Light, Light),
-        '\u{2541}' => box_segments(Light, Heavy, Light, Light),
-        '\u{2542}' => box_segments(Heavy, Heavy, Light, Light),
-        '\u{2543}' => box_segments(Heavy, Light, Heavy, Light),
-        '\u{2544}' => box_segments(Heavy, Light, Light, Heavy),
-        '\u{2545}' => box_segments(Light, Heavy, Heavy, Light),
-        '\u{2546}' => box_segments(Light, Heavy, Light, Heavy),
-        '\u{2547}' => box_segments(Light, Heavy, Heavy, Heavy),
-        '\u{2548}' => box_segments(Heavy, Light, Heavy, Heavy),
-        '\u{2549}' => box_segments(Heavy, Heavy, Heavy, Light),
-        '\u{254A}' => box_segments(Heavy, Heavy, Light, Heavy),
-        '\u{254B}' => box_segments(Heavy, Heavy, Heavy, Heavy),
-        '\u{2550}' => box_segments(Empty, Empty, Double, Double),
-        '\u{2551}' => box_segments(Double, Double, Empty, Empty),
-        '\u{2552}' => box_segments(Empty, Light, Empty, Double),
-        '\u{2553}' => box_segments(Empty, Double, Empty, Light),
-        '\u{2554}' => box_segments(Empty, Double, Empty, Double),
-        '\u{2555}' => box_segments(Empty, Light, Double, Empty),
-        '\u{2556}' => box_segments(Empty, Double, Light, Empty),
-        '\u{2557}' => box_segments(Empty, Double, Double, Empty),
-        '\u{2558}' => box_segments(Light, Empty, Empty, Double),
-        '\u{2559}' => box_segments(Double, Empty, Empty, Light),
-        '\u{255A}' => box_segments(Double, Empty, Empty, Double),
-        '\u{255B}' => box_segments(Light, Empty, Double, Empty),
-        '\u{255C}' => box_segments(Double, Empty, Light, Empty),
-        '\u{255D}' => box_segments(Double, Empty, Double, Empty),
-        '\u{255E}' => box_segments(Light, Light, Empty, Double),
-        '\u{255F}' => box_segments(Double, Double, Empty, Light),
-        '\u{2560}' => box_segments(Double, Double, Empty, Double),
-        '\u{2561}' => box_segments(Light, Light, Double, Empty),
-        '\u{2562}' => box_segments(Double, Double, Light, Empty),
-        '\u{2563}' => box_segments(Double, Double, Double, Empty),
-        '\u{2564}' => box_segments(Empty, Light, Double, Double),
-        '\u{2565}' => box_segments(Empty, Double, Light, Light),
-        '\u{2566}' => box_segments(Empty, Double, Double, Double),
-        '\u{2567}' => box_segments(Light, Empty, Double, Double),
-        '\u{2568}' => box_segments(Double, Empty, Light, Light),
-        '\u{2569}' => box_segments(Double, Empty, Double, Double),
-        '\u{256A}' => box_segments(Light, Light, Double, Double),
-        '\u{256B}' => box_segments(Double, Double, Light, Light),
-        '\u{256C}' => box_segments(Double, Double, Double, Double),
-        '\u{256D}'..='\u{2570}' => return None,
-        '\u{2571}'..='\u{2573}' => return None,
-        '\u{2574}' => box_segments(Empty, Empty, Light, Empty),
-        '\u{2575}' => box_segments(Light, Empty, Empty, Empty),
-        '\u{2576}' => box_segments(Empty, Empty, Empty, Light),
-        '\u{2577}' => box_segments(Empty, Light, Empty, Empty),
-        '\u{2578}' => box_segments(Empty, Empty, Heavy, Empty),
-        '\u{2579}' => box_segments(Heavy, Empty, Empty, Empty),
-        '\u{257A}' => box_segments(Empty, Empty, Empty, Heavy),
-        '\u{257B}' => box_segments(Empty, Heavy, Empty, Empty),
-        '\u{257C}' => box_segments(Empty, Empty, Light, Heavy),
-        '\u{257D}' => box_segments(Light, Heavy, Empty, Empty),
-        '\u{257E}' => box_segments(Empty, Empty, Heavy, Light),
-        '\u{257F}' => box_segments(Heavy, Light, Empty, Empty),
-        _ => return None,
-    })
-}
-
-/// Pushes a rectangle into `geometry`, converting absolute pixel coordinates to
-/// cell-relative fractions (0.0..1.0). Clamps to cell bounds and silently
-/// discards zero-area results.
-fn push_box_rect_px(
-    geometry: &mut BlockElementGeometry,
-    left_px: f32,
-    top_px: f32,
-    right_px: f32,
-    bottom_px: f32,
-    cell_width: f32,
-    cell_height: f32,
-) {
-    let left = left_px.clamp(0.0, cell_width);
-    let right = right_px.clamp(0.0, cell_width);
-    let top = top_px.clamp(0.0, cell_height);
-    let bottom = bottom_px.clamp(0.0, cell_height);
-
-    if right <= left || bottom <= top {
-        return;
-    }
-
-    geometry.push_rect(BlockRectSpec::new(
-        left / cell_width,
-        top / cell_height,
-        right / cell_width,
-        bottom / cell_height,
-        1.0,
-    ));
-}
-
-/// Converts a `BoxDrawSegments` descriptor into pixel-snappable rectangles using
-/// Ghostty's `linesChar` edge placement. Each arm is built independently, then
-/// overlapping collinear runs are merged back together so simple glyphs stay
-/// compact while mixed light/heavy/double connectors keep Ghostty's join logic.
-fn box_draw_geometry(
-    segments: BoxDrawSegments,
-    cell_width: f32,
-    cell_height: f32,
-    font_size: f32,
-) -> BlockElementGeometry {
-    use BoxLineStyle::{Double, Heavy, Light, None as Empty};
-
-    let light_px = (font_size * 0.0675).ceil().max(1.0);
-    let heavy_px = light_px * 2.0;
-
-    let h_light_top = ((cell_height - light_px).max(0.0)) / 2.0;
-    let h_light_bottom = (h_light_top + light_px).min(cell_height);
-    let h_heavy_top = ((cell_height - heavy_px).max(0.0)) / 2.0;
-    let h_heavy_bottom = (h_heavy_top + heavy_px).min(cell_height);
-    let h_double_top = (h_light_top - light_px).max(0.0);
-    let h_double_bottom = (h_light_bottom + light_px).min(cell_height);
-
-    let v_light_left = ((cell_width - light_px).max(0.0)) / 2.0;
-    let v_light_right = (v_light_left + light_px).min(cell_width);
-    let v_heavy_left = ((cell_width - heavy_px).max(0.0)) / 2.0;
-    let v_heavy_right = (v_heavy_left + heavy_px).min(cell_width);
-    let v_double_left = (v_light_left - light_px).max(0.0);
-    let v_double_right = (v_light_right + light_px).min(cell_width);
-
-    let up_bottom = if segments.left.is_heavy() || segments.right.is_heavy() {
-        h_heavy_bottom
-    } else if segments.left != segments.right || segments.down == segments.up {
-        if segments.left.is_double() || segments.right.is_double() {
-            h_double_bottom
-        } else {
-            h_light_bottom
-        }
-    } else if segments.left == Empty && segments.right == Empty {
-        h_light_bottom
-    } else {
-        h_light_top
-    };
-
-    let down_top = if segments.left.is_heavy() || segments.right.is_heavy() {
-        h_heavy_top
-    } else if segments.left != segments.right || segments.up == segments.down {
-        if segments.left.is_double() || segments.right.is_double() {
-            h_double_top
-        } else {
-            h_light_top
-        }
-    } else if segments.left == Empty && segments.right == Empty {
-        h_light_top
-    } else {
-        h_light_bottom
-    };
-
-    let left_right = if segments.up.is_heavy() || segments.down.is_heavy() {
-        v_heavy_right
-    } else if segments.up != segments.down || segments.left == segments.right {
-        if segments.up.is_double() || segments.down.is_double() {
-            v_double_right
-        } else {
-            v_light_right
-        }
-    } else if segments.up == Empty && segments.down == Empty {
-        v_light_right
-    } else {
-        v_light_left
-    };
-
-    let right_left = if segments.up.is_heavy() || segments.down.is_heavy() {
-        v_heavy_left
-    } else if segments.up != segments.down || segments.right == segments.left {
-        if segments.up.is_double() || segments.down.is_double() {
-            v_double_left
-        } else {
-            v_light_left
-        }
-    } else if segments.up == Empty && segments.down == Empty {
-        v_light_left
-    } else {
-        v_light_right
-    };
-
-    let mut geometry = BlockElementGeometry::empty();
-
-    match segments.up {
-        Empty => {}
-        Light => push_box_rect_px(
-            &mut geometry,
-            v_light_left,
-            0.0,
-            v_light_right,
-            up_bottom,
-            cell_width,
-            cell_height,
-        ),
-        Heavy => push_box_rect_px(
-            &mut geometry,
-            v_heavy_left,
-            0.0,
-            v_heavy_right,
-            up_bottom,
-            cell_width,
-            cell_height,
-        ),
-        Double => {
-            let left_bottom = if segments.left == Double {
-                h_light_top
-            } else {
-                up_bottom
-            };
-            let right_bottom = if segments.right == Double {
-                h_light_top
-            } else {
-                up_bottom
-            };
-            push_box_rect_px(
-                &mut geometry,
-                v_double_left,
-                0.0,
-                v_light_left,
-                left_bottom,
-                cell_width,
-                cell_height,
-            );
-            push_box_rect_px(
-                &mut geometry,
-                v_light_right,
-                0.0,
-                v_double_right,
-                right_bottom,
-                cell_width,
-                cell_height,
-            );
-        }
-    }
-
-    match segments.right {
-        Empty => {}
-        Light => push_box_rect_px(
-            &mut geometry,
-            right_left,
-            h_light_top,
-            cell_width,
-            h_light_bottom,
-            cell_width,
-            cell_height,
-        ),
-        Heavy => push_box_rect_px(
-            &mut geometry,
-            right_left,
-            h_heavy_top,
-            cell_width,
-            h_heavy_bottom,
-            cell_width,
-            cell_height,
-        ),
-        Double => {
-            let top_left = if segments.up == Double {
-                v_light_right
-            } else {
-                right_left
-            };
-            let bottom_left = if segments.down == Double {
-                v_light_right
-            } else {
-                right_left
-            };
-            push_box_rect_px(
-                &mut geometry,
-                top_left,
-                h_double_top,
-                cell_width,
-                h_light_top,
-                cell_width,
-                cell_height,
-            );
-            push_box_rect_px(
-                &mut geometry,
-                bottom_left,
-                h_light_bottom,
-                cell_width,
-                h_double_bottom,
-                cell_width,
-                cell_height,
-            );
-        }
-    }
-
-    match segments.down {
-        Empty => {}
-        Light => push_box_rect_px(
-            &mut geometry,
-            v_light_left,
-            down_top,
-            v_light_right,
-            cell_height,
-            cell_width,
-            cell_height,
-        ),
-        Heavy => push_box_rect_px(
-            &mut geometry,
-            v_heavy_left,
-            down_top,
-            v_heavy_right,
-            cell_height,
-            cell_width,
-            cell_height,
-        ),
-        Double => {
-            let left_top = if segments.left == Double {
-                h_light_bottom
-            } else {
-                down_top
-            };
-            let right_top = if segments.right == Double {
-                h_light_bottom
-            } else {
-                down_top
-            };
-            push_box_rect_px(
-                &mut geometry,
-                v_double_left,
-                left_top,
-                v_light_left,
-                cell_height,
-                cell_width,
-                cell_height,
-            );
-            push_box_rect_px(
-                &mut geometry,
-                v_light_right,
-                right_top,
-                v_double_right,
-                cell_height,
-                cell_width,
-                cell_height,
-            );
-        }
-    }
-
-    match segments.left {
-        Empty => {}
-        Light => push_box_rect_px(
-            &mut geometry,
-            0.0,
-            h_light_top,
-            left_right,
-            h_light_bottom,
-            cell_width,
-            cell_height,
-        ),
-        Heavy => push_box_rect_px(
-            &mut geometry,
-            0.0,
-            h_heavy_top,
-            left_right,
-            h_heavy_bottom,
-            cell_width,
-            cell_height,
-        ),
-        Double => {
-            let top_right = if segments.up == Double {
-                v_light_left
-            } else {
-                left_right
-            };
-            let bottom_right = if segments.down == Double {
-                v_light_left
-            } else {
-                left_right
-            };
-            push_box_rect_px(
-                &mut geometry,
-                0.0,
-                h_double_top,
-                top_right,
-                h_light_top,
-                cell_width,
-                cell_height,
-            );
-            push_box_rect_px(
-                &mut geometry,
-                0.0,
-                h_light_bottom,
-                bottom_right,
-                h_double_bottom,
-                cell_width,
-                cell_height,
-            );
-        }
-    }
-
-    geometry.merge_collinear_overlaps();
-
-    geometry
-}
-
-/// Convenience wrapper: looks up `box_draw_segments` and, if the codepoint is a
-/// rectangular connector, converts the descriptor into cell-relative geometry.
-///
-/// Returns `None` for rounded corners (path-rendered), diagonals (path-rendered),
-/// and non-box-drawing characters.
-fn box_draw_geometry_for_char(
-    c: char,
-    cell_width: f32,
-    cell_height: f32,
-    font_size: f32,
-) -> Option<BlockElementGeometry> {
-    box_draw_segments(c)
-        .map(|segments| box_draw_geometry(segments, cell_width, cell_height, font_size))
-}
-
 fn snapped_block_rect_bounds(
     cell_bounds: Bounds<Pixels>,
-    rect: BlockRectSpec,
+    rect: TerminalGlyphRect,
 ) -> Option<Bounds<Pixels>> {
     let origin_x: f32 = cell_bounds.origin.x.into();
     let origin_y: f32 = cell_bounds.origin.y.into();
     let cell_width: f32 = cell_bounds.size.width.into();
     let cell_height: f32 = cell_bounds.size.height.into();
 
-    let left = (origin_x + cell_width * rect.left).round();
-    let right = (origin_x + cell_width * rect.right).round();
-    let top = (origin_y + cell_height * rect.top).round();
-    let bottom = (origin_y + cell_height * rect.bottom).round();
+    let transformed_left = origin_x + cell_width * rect.left;
+    let transformed_right = origin_x + cell_width * rect.right;
+    let transformed_top = origin_y + cell_height * rect.top;
+    let transformed_bottom = origin_y + cell_height * rect.bottom;
+    let (left, right, top, bottom) = match rect.snap {
+        TerminalGlyphRectSnap::Nearest => (
+            transformed_left.round(),
+            transformed_right.round(),
+            transformed_top.round(),
+            transformed_bottom.round(),
+        ),
+        TerminalGlyphRectSnap::Outward => (
+            transformed_left.floor(),
+            transformed_right.ceil(),
+            transformed_top.floor(),
+            transformed_bottom.ceil(),
+        ),
+    };
 
     let width = right - left;
     let height = bottom - top;
@@ -1329,7 +549,7 @@ fn should_paint_clear_bg(color: Hsla) -> bool {
 fn paint_block_element_quad(
     window: &mut Window,
     cell_bounds: Bounds<Pixels>,
-    geometry: BlockElementGeometry,
+    geometry: &TerminalGlyphPlan,
     color: Hsla,
 ) {
     for rect in geometry.rects() {
@@ -1348,165 +568,6 @@ fn paint_block_element_quad(
     }
 }
 
-fn paint_sextant_mosaic(window: &mut Window, cell_bounds: Bounds<Pixels>, packed: u8, color: Hsla) {
-    let cell_origin_x: f32 = cell_bounds.origin.x.into();
-    let cell_origin_y: f32 = cell_bounds.origin.y.into();
-    let cell_w: f32 = cell_bounds.size.width.into();
-    let cell_h: f32 = cell_bounds.size.height.into();
-
-    for row in 0..3usize {
-        for col in 0..2usize {
-            let bit = 5usize - (row * 2 + col);
-            if (packed & (1 << bit)) != 0 {
-                continue;
-            }
-
-            let left = (cell_origin_x + cell_w * (col as f32 / 2.0)).floor();
-            let right = (cell_origin_x + cell_w * ((col + 1) as f32 / 2.0)).ceil();
-            let top = (cell_origin_y + cell_h * (row as f32 / 3.0)).floor();
-            let bottom = (cell_origin_y + cell_h * ((row + 1) as f32 / 3.0)).ceil();
-
-            let width = right - left;
-            let height = bottom - top;
-            if width <= 0.0 || height <= 0.0 {
-                continue;
-            }
-
-            let bounds = Bounds {
-                origin: point(px(left), px(top)),
-                size: Size {
-                    width: px(width),
-                    height: px(height),
-                },
-            };
-            if let Some(bounds) = snapped_quad_bounds(bounds) {
-                window.paint_quad(quad(
-                    bounds,
-                    px(0.0),
-                    color,
-                    gpui::Edges::default(),
-                    Hsla::transparent_black(),
-                    gpui::BorderStyle::default(),
-                ));
-            }
-        }
-    }
-}
-
-fn rounded_corner_char(c: char) -> bool {
-    matches!(c, '\u{256D}' | '\u{256E}' | '\u{256F}' | '\u{2570}')
-}
-
-fn diagonal_char(c: char) -> bool {
-    matches!(c, '\u{2571}' | '\u{2572}' | '\u{2573}')
-}
-
-/// Resolved path geometry for a rounded-corner box-drawing glyph.
-///
-/// The path is: `start` → straight to `curve_start` → cubic Bézier
-/// (`control_a`, `control_b`) → `curve_end` → straight to `end`. This gives
-/// a short stub on each cell edge that aligns with adjacent straight box lines,
-/// connected by a quarter-circle arc in the cell interior.
-#[derive(Clone, Copy, Debug)]
-struct RoundedCornerPathSpec {
-    start: gpui::Point<Pixels>,
-    curve_start: gpui::Point<Pixels>,
-    control_a: gpui::Point<Pixels>,
-    control_b: gpui::Point<Pixels>,
-    curve_end: gpui::Point<Pixels>,
-    end: gpui::Point<Pixels>,
-    stroke_width: Pixels,
-}
-
-/// Resolved path geometry for a diagonal box-drawing glyph.
-///
-/// A single line segment from `start` to `end`. Both endpoints intentionally
-/// overshoot the cell boundary by a slope-dependent amount so that adjacent
-/// diagonal cells join seamlessly without pixel gaps.
-#[derive(Clone, Copy, Debug)]
-struct DiagonalPathSpec {
-    start: gpui::Point<Pixels>,
-    end: gpui::Point<Pixels>,
-    stroke_width: Pixels,
-}
-
-/// Computes the midpoint of a stroke that is pixel-snapped to integer boundaries.
-///
-/// Rounds both edges of the stroke independently, then returns their average.
-/// This prevents sub-pixel shimmer on odd-width strokes across HiDPI scales.
-fn snapped_stroke_center(origin: Pixels, size: Pixels, stroke_width: Pixels) -> Pixels {
-    let origin_px: f32 = origin.into();
-    let size_px: f32 = size.into();
-    let stroke_px: f32 = stroke_width.into();
-    let center_px = origin_px + size_px / 2.0;
-    let min_px = (center_px - stroke_px / 2.0).round();
-    let max_px = (center_px + stroke_px / 2.0).round();
-    px((min_px + max_px) / 2.0)
-}
-
-fn rounded_corner_path_spec(
-    cell_bounds: Bounds<Pixels>,
-    glyph: char,
-    stroke_width: Pixels,
-) -> Option<RoundedCornerPathSpec> {
-    let cell_bounds = snapped_quad_bounds(cell_bounds)?;
-    let origin = cell_bounds.origin;
-    let width = cell_bounds.size.width;
-    let height = cell_bounds.size.height;
-    let width_px: f32 = width.into();
-    let height_px: f32 = height.into();
-    let stroke_px: f32 = stroke_width.into();
-    let radius = px(((width_px.min(height_px) - stroke_px).max(0.0)) / 2.0);
-    let control_offset = radius / 4.0;
-    let edge_overlap = stroke_width / 2.0;
-    let center_x = snapped_stroke_center(origin.x, width, stroke_width);
-    let center_y = snapped_stroke_center(origin.y, height, stroke_width);
-    let left_center = point(origin.x - edge_overlap, center_y);
-    let right_center = point(origin.x + width + edge_overlap, center_y);
-    let top_center = point(center_x, origin.y - edge_overlap);
-    let bottom_center = point(center_x, origin.y + height + edge_overlap);
-
-    match glyph {
-        '\u{256D}' => Some(RoundedCornerPathSpec {
-            start: bottom_center,
-            curve_start: point(center_x, center_y + radius),
-            control_a: point(center_x, center_y + control_offset),
-            control_b: point(center_x + control_offset, center_y),
-            curve_end: point(center_x + radius, center_y),
-            end: right_center,
-            stroke_width,
-        }),
-        '\u{256E}' => Some(RoundedCornerPathSpec {
-            start: bottom_center,
-            curve_start: point(center_x, center_y + radius),
-            control_a: point(center_x, center_y + control_offset),
-            control_b: point(center_x - control_offset, center_y),
-            curve_end: point(center_x - radius, center_y),
-            end: left_center,
-            stroke_width,
-        }),
-        '\u{256F}' => Some(RoundedCornerPathSpec {
-            start: top_center,
-            curve_start: point(center_x, center_y - radius),
-            control_a: point(center_x, center_y - control_offset),
-            control_b: point(center_x - control_offset, center_y),
-            curve_end: point(center_x - radius, center_y),
-            end: left_center,
-            stroke_width,
-        }),
-        '\u{2570}' => Some(RoundedCornerPathSpec {
-            start: top_center,
-            curve_start: point(center_x, center_y - radius),
-            control_a: point(center_x, center_y - control_offset),
-            control_b: point(center_x + control_offset, center_y),
-            curve_end: point(center_x + radius, center_y),
-            end: right_center,
-            stroke_width,
-        }),
-        _ => None,
-    }
-}
-
 fn paint_rounded_corner_path(
     window: &mut Window,
     cell_bounds: Bounds<Pixels>,
@@ -1514,57 +575,7 @@ fn paint_rounded_corner_path(
     color: Hsla,
     font_size: Pixels,
 ) {
-    let stroke_width = px((Into::<f32>::into(font_size) * 0.0675).ceil().max(1.0));
-    let Some(spec) = rounded_corner_path_spec(cell_bounds, glyph, stroke_width) else {
-        return;
-    };
-
-    let mut builder = PathBuilder::stroke(spec.stroke_width);
-    builder.move_to(spec.start);
-    builder.line_to(spec.curve_start);
-    builder.cubic_bezier_to(spec.curve_end, spec.control_a, spec.control_b);
-    builder.line_to(spec.end);
-
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, color);
-    }
-}
-
-fn diagonal_path_specs(
-    cell_bounds: Bounds<Pixels>,
-    glyph: char,
-    stroke_width: Pixels,
-) -> Option<(DiagonalPathSpec, Option<DiagonalPathSpec>)> {
-    let cell_bounds = snapped_quad_bounds(cell_bounds)?;
-    let origin = cell_bounds.origin;
-    let width = cell_bounds.size.width;
-    let height = cell_bounds.size.height;
-    let width_px: f32 = width.into();
-    let height_px: f32 = height.into();
-    if width_px <= 0.0 || height_px <= 0.0 {
-        return None;
-    }
-
-    let slope_x = px(0.5 * (width_px / height_px).min(1.0));
-    let slope_y = px(0.5 * (height_px / width_px).min(1.0));
-
-    let upper_right_to_lower_left = DiagonalPathSpec {
-        start: point(origin.x + width + slope_x, origin.y - slope_y),
-        end: point(origin.x - slope_x, origin.y + height + slope_y),
-        stroke_width,
-    };
-    let upper_left_to_lower_right = DiagonalPathSpec {
-        start: point(origin.x - slope_x, origin.y - slope_y),
-        end: point(origin.x + width + slope_x, origin.y + height + slope_y),
-        stroke_width,
-    };
-
-    match glyph {
-        '\u{2571}' => Some((upper_right_to_lower_left, None)),
-        '\u{2572}' => Some((upper_left_to_lower_right, None)),
-        '\u{2573}' => Some((upper_right_to_lower_left, Some(upper_left_to_lower_right))),
-        _ => None,
-    }
+    paint_terminal_glyph_strokes(window, cell_bounds, glyph, color, font_size);
 }
 
 fn paint_diagonal_path(
@@ -1574,15 +585,56 @@ fn paint_diagonal_path(
     color: Hsla,
     font_size: Pixels,
 ) {
-    let stroke_width = px((Into::<f32>::into(font_size) * 0.0675).ceil().max(1.0));
-    let Some((primary, secondary)) = diagonal_path_specs(cell_bounds, glyph, stroke_width) else {
+    paint_terminal_glyph_strokes(window, cell_bounds, glyph, color, font_size);
+}
+
+fn paint_terminal_glyph_strokes(
+    window: &mut Window,
+    cell_bounds: Bounds<Pixels>,
+    glyph: char,
+    color: Hsla,
+    font_size: Pixels,
+) {
+    let Some(cell_bounds) = snapped_quad_bounds(cell_bounds) else {
         return;
     };
+    let cell_width: f32 = cell_bounds.size.width.into();
+    let cell_height: f32 = cell_bounds.size.height.into();
+    let metrics = TerminalGlyphMetrics {
+        cell_width,
+        cell_height,
+        font_size: font_size.into(),
+    };
+    let Some(plan) = terminal_glyph_plan(glyph, metrics, TerminalGlyphNeighbors::default()) else {
+        return;
+    };
+    let resolve_point = |value: termy_core::TerminalGlyphPoint| {
+        point(
+            cell_bounds.origin.x + cell_bounds.size.width * value.x,
+            cell_bounds.origin.y + cell_bounds.size.height * value.y,
+        )
+    };
 
-    for spec in [Some(primary), secondary].into_iter().flatten() {
-        let mut builder = PathBuilder::stroke(spec.stroke_width);
-        builder.move_to(spec.start);
-        builder.line_to(spec.end);
+    for stroke in plan.strokes() {
+        let points = stroke.points();
+        let mut builder = PathBuilder::stroke(px(cell_width * stroke.width));
+        match stroke.kind {
+            TerminalGlyphStrokeKind::Line if points.len() == 2 => {
+                builder.move_to(resolve_point(points[0]));
+                builder.line_to(resolve_point(points[1]));
+            }
+            TerminalGlyphStrokeKind::RoundedCorner if points.len() == 6 => {
+                builder.move_to(resolve_point(points[0]));
+                builder.line_to(resolve_point(points[1]));
+                builder.cubic_bezier_to(
+                    resolve_point(points[4]),
+                    resolve_point(points[2]),
+                    resolve_point(points[3]),
+                );
+                builder.line_to(resolve_point(points[5]));
+            }
+            TerminalGlyphStrokeKind::Line | TerminalGlyphStrokeKind::RoundedCorner => continue,
+        }
 
         if let Ok(path) = builder.build() {
             window.paint_path(path, color);
@@ -1762,7 +814,7 @@ fn diagonal_draws_match_without_row(lhs: &DiagonalDraw, rhs: &DiagonalDraw) -> b
 }
 
 fn sextant_draws_match_without_row(lhs: &SextantDraw, rhs: &SextantDraw) -> bool {
-    lhs.col == rhs.col && lhs.packed == rhs.packed && lhs.fg == rhs.fg
+    lhs.col == rhs.col && lhs.geometry == rhs.geometry && lhs.fg == rhs.fg
 }
 
 /// Returns the inclusive column range `(start, end)` covered by a draw op.
@@ -2054,6 +1106,11 @@ impl TerminalGrid {
         let cell_w: f32 = self.cell_size.width.into();
         let cell_h: f32 = self.cell_size.height.into();
         let font_sz: f32 = self.font_size.into();
+        let metrics = TerminalGlyphMetrics {
+            cell_width: cell_w,
+            cell_height: cell_h,
+            font_size: font_sz,
+        };
 
         for (index, cell) in row_cells.iter().enumerate() {
             if !Self::cell_is_drawable_text(cell) {
@@ -2062,57 +1119,52 @@ impl TerminalGrid {
             }
 
             let fg = self.cell_fg_color(row, cell, cursor_fg, highlight_fg);
-            if cell.combining.is_none() && rounded_corner_char(cell.char) {
-                Self::push_pending_text_batch(&mut current, ops);
-                ops.push(TextDrawOp::RoundedCorner(RoundedCornerDraw {
-                    row,
-                    col: cell.col,
-                    glyph: cell.char,
-                    fg,
-                }));
-                continue;
-            }
-
-            if cell.combining.is_none() && diagonal_char(cell.char) {
-                Self::push_pending_text_batch(&mut current, ops);
-                ops.push(TextDrawOp::Diagonal(DiagonalDraw {
-                    row,
-                    col: cell.col,
-                    glyph: cell.char,
-                    fg,
-                }));
-                continue;
-            }
-
+            let char_at = |candidate: Option<usize>| {
+                candidate
+                    .and_then(|candidate| row_cells.get(candidate))
+                    .map(|cell| cell.char)
+            };
+            let neighbors = TerminalGlyphNeighbors {
+                two_before: char_at(index.checked_sub(2)),
+                before: char_at(index.checked_sub(1)),
+                after: char_at(index.checked_add(1)),
+                two_after: char_at(index.checked_add(2)),
+            };
             if cell.combining.is_none()
-                && let Some(packed) = sextant_char_to_packed(cell.char)
+                && let Some(geometry) = terminal_glyph_plan(cell.char, metrics, neighbors)
             {
                 Self::push_pending_text_batch(&mut current, ops);
-                ops.push(TextDrawOp::Sextant(SextantDraw {
-                    row,
-                    col: cell.col,
-                    packed,
-                    fg,
-                }));
-                continue;
-            }
-
-            if cell.combining.is_none()
-                && let Some(geometry) = block_element_geometry(cell.char)
-                    .or_else(|| {
-                        should_render_braille_as_geometry(row_cells, index)
-                            .then(|| braille_geometry(cell.char))
-                            .flatten()
-                    })
-                    .or_else(|| box_draw_geometry_for_char(cell.char, cell_w, cell_h, font_sz))
-            {
-                Self::push_pending_text_batch(&mut current, ops);
-                ops.push(TextDrawOp::Block(BlockDraw {
-                    row,
-                    col: cell.col,
-                    geometry,
-                    fg,
-                }));
+                let operation = match geometry.kind() {
+                    TerminalGlyphRenderKind::RoundedCorner => {
+                        TextDrawOp::RoundedCorner(RoundedCornerDraw {
+                            row,
+                            col: cell.col,
+                            glyph: cell.char,
+                            fg,
+                        })
+                    }
+                    TerminalGlyphRenderKind::Diagonal => TextDrawOp::Diagonal(DiagonalDraw {
+                        row,
+                        col: cell.col,
+                        glyph: cell.char,
+                        fg,
+                    }),
+                    TerminalGlyphRenderKind::Sextant => TextDrawOp::Sextant(SextantDraw {
+                        row,
+                        col: cell.col,
+                        geometry,
+                        fg,
+                    }),
+                    TerminalGlyphRenderKind::BlockElement
+                    | TerminalGlyphRenderKind::BoxDrawing
+                    | TerminalGlyphRenderKind::Braille => TextDrawOp::Block(BlockDraw {
+                        row,
+                        col: cell.col,
+                        geometry,
+                        fg,
+                    }),
+                };
+                ops.push(operation);
                 continue;
             }
 
@@ -2336,7 +1388,7 @@ impl TerminalGrid {
                         origin: point(x, origin.y),
                         size: self.cell_size,
                     };
-                    paint_block_element_quad(window, cell_bounds, block.geometry, block.fg);
+                    paint_block_element_quad(window, cell_bounds, &block.geometry, block.fg);
                 }
                 TextDrawOp::Sextant(sextant) => {
                     let x = origin.x + self.cell_size.width * sextant.col as f32;
@@ -2344,7 +1396,7 @@ impl TerminalGrid {
                         origin: point(x, origin.y),
                         size: self.cell_size,
                     };
-                    paint_sextant_mosaic(window, cell_bounds, sextant.packed, sextant.fg);
+                    paint_block_element_quad(window, cell_bounds, &sextant.geometry, sextant.fg);
                 }
                 TextDrawOp::RoundedCorner(corner) => {
                     let x = origin.x + self.cell_size.width * corner.col as f32;
@@ -2912,6 +1964,34 @@ mod tests {
             .collect()
     }
 
+    fn glyph_plan_for_bounds(
+        bounds: Bounds<Pixels>,
+        glyph: char,
+    ) -> (Bounds<Pixels>, TerminalGlyphPlan) {
+        let bounds = snapped_quad_bounds(bounds).expect("snapped cell bounds");
+        let plan = terminal_glyph_plan(
+            glyph,
+            TerminalGlyphMetrics {
+                cell_width: bounds.size.width.into(),
+                cell_height: bounds.size.height.into(),
+                font_size: 14.0,
+            },
+            TerminalGlyphNeighbors::default(),
+        )
+        .expect("special glyph plan");
+        (bounds, plan)
+    }
+
+    fn resolve_glyph_point(
+        bounds: Bounds<Pixels>,
+        value: termy_core::TerminalGlyphPoint,
+    ) -> gpui::Point<Pixels> {
+        point(
+            bounds.origin.x + bounds.size.width * value.x,
+            bounds.origin.y + bounds.size.height * value.y,
+        )
+    }
+
     #[test]
     fn block_element_geometry_is_complete_for_unicode_range() {
         for codepoint in BLOCK_ELEMENTS_START..=BLOCK_ELEMENTS_END {
@@ -2926,7 +2006,7 @@ mod tests {
     #[test]
     fn braille_geometry_supports_non_empty_patterns() {
         let geometry = braille_geometry('\u{28FF}').expect("expected braille geometry");
-        assert_eq!(geometry.rect_count, 8);
+        assert_eq!(geometry.rects().len(), 8);
     }
 
     #[test]
@@ -2939,9 +2019,12 @@ mod tests {
         for codepoint in BOX_DRAWING_START..=BOX_DRAWING_END {
             let glyph = char::from_u32(codepoint).expect("valid box-drawing codepoint");
             assert!(
-                rounded_corner_char(glyph)
-                    || diagonal_char(glyph)
-                    || box_draw_geometry_for_char(glyph, 10.0, 20.0, 14.0).is_some(),
+                terminal_glyph_plan(
+                    glyph,
+                    test_glyph_metrics(10.0, 20.0, 14.0),
+                    TerminalGlyphNeighbors::default(),
+                )
+                .is_some(),
                 "unexpected box-drawing coverage for U+{codepoint:04X}"
             );
         }
@@ -2950,7 +2033,7 @@ mod tests {
     #[test]
     fn upper_half_block_geometry_covers_top_half() {
         let geometry = block_element_geometry('\u{2580}').expect("expected block geometry");
-        assert_eq!(geometry.rect_count, 1);
+        assert_eq!(geometry.rects().len(), 1);
         let rect = geometry.rects()[0];
         assert_eq!(rect.left, 0.0);
         assert_eq!(rect.top, 0.0);
@@ -3059,7 +2142,7 @@ mod tests {
         let geometry =
             box_draw_geometry_for_char('\u{2500}', 10.0, 20.0, 14.0).expect("expected geometry");
 
-        assert_eq!(geometry.rect_count, 1);
+        assert_eq!(geometry.rects().len(), 1);
         let rect = geometry.rects()[0];
         assert_f32_eq(rect.left, 0.0);
         assert_f32_eq(rect.right, 1.0);
@@ -3073,7 +2156,7 @@ mod tests {
         let geometry =
             box_draw_geometry_for_char('\u{253C}', 10.0, 20.0, 14.0).expect("expected geometry");
 
-        assert_eq!(geometry.rect_count, 2);
+        assert_eq!(geometry.rects().len(), 2);
         let vertical = geometry.rects()[0];
         assert_f32_eq(vertical.left, 0.45);
         assert_f32_eq(vertical.top, 0.0);
@@ -3092,7 +2175,7 @@ mod tests {
         let geometry =
             box_draw_geometry_for_char('\u{256C}', 10.0, 20.0, 14.0).expect("expected geometry");
 
-        assert_eq!(geometry.rect_count, 8);
+        assert_eq!(geometry.rects().len(), 8);
 
         let top_left_vertical = geometry.rects()[0];
         assert_f32_eq(top_left_vertical.left, 0.35);
@@ -3130,7 +2213,7 @@ mod tests {
         let geometry =
             box_draw_geometry_for_char('\u{251D}', 10.0, 20.0, 14.0).expect("expected geometry");
 
-        assert_eq!(geometry.rect_count, 2);
+        assert_eq!(geometry.rects().len(), 2);
 
         let vertical = geometry.rects()[0];
         assert_f32_eq(vertical.left, 0.45);
@@ -3150,7 +2233,7 @@ mod tests {
         let geometry =
             box_draw_geometry_for_char('\u{255E}', 10.0, 20.0, 14.0).expect("expected geometry");
 
-        assert_eq!(geometry.rect_count, 3);
+        assert_eq!(geometry.rects().len(), 3);
 
         let vertical = geometry.rects()[0];
         assert_f32_eq(vertical.left, 0.45);
@@ -3201,13 +2284,15 @@ mod tests {
                 height: px(20.0),
             },
         };
-        let spec =
-            rounded_corner_path_spec(bounds, '\u{256D}', px(1.0)).expect("expected path points");
+        let (bounds, plan) = glyph_plan_for_bounds(bounds, '\u{256D}');
+        let points = plan.strokes()[0].points();
+        let start = resolve_glyph_point(bounds, points[0]);
+        let end = resolve_glyph_point(bounds, points[5]);
 
-        assert_f32_eq(spec.start.x.into(), 5.5);
-        assert_f32_eq(spec.start.y.into(), 20.5);
-        assert_f32_eq(spec.end.x.into(), 10.5);
-        assert_f32_eq(spec.end.y.into(), 10.5);
+        assert_f32_eq(start.x.into(), 5.5);
+        assert_f32_eq(start.y.into(), 20.5);
+        assert_f32_eq(end.x.into(), 10.5);
+        assert_f32_eq(end.y.into(), 10.5);
     }
 
     #[test]
@@ -3219,13 +2304,15 @@ mod tests {
                 height: px(20.0),
             },
         };
-        let spec =
-            rounded_corner_path_spec(bounds, '\u{256E}', px(1.0)).expect("expected path points");
+        let (bounds, plan) = glyph_plan_for_bounds(bounds, '\u{256E}');
+        let points = plan.strokes()[0].points();
+        let start = resolve_glyph_point(bounds, points[0]);
+        let end = resolve_glyph_point(bounds, points[5]);
 
-        assert_f32_eq(spec.start.x.into(), 5.5);
-        assert_f32_eq(spec.start.y.into(), 20.5);
-        assert_f32_eq(spec.end.x.into(), -0.5);
-        assert_f32_eq(spec.end.y.into(), 10.5);
+        assert_f32_eq(start.x.into(), 5.5);
+        assert_f32_eq(start.y.into(), 20.5);
+        assert_f32_eq(end.x.into(), -0.5);
+        assert_f32_eq(end.y.into(), 10.5);
     }
 
     #[test]
@@ -3237,13 +2324,15 @@ mod tests {
                 height: px(10.0),
             },
         };
-        let spec =
-            rounded_corner_path_spec(bounds, '\u{256F}', px(1.0)).expect("expected path points");
+        let (bounds, plan) = glyph_plan_for_bounds(bounds, '\u{256F}');
+        let points = plan.strokes()[0].points();
+        let start = resolve_glyph_point(bounds, points[0]);
+        let end = resolve_glyph_point(bounds, points[5]);
 
-        assert_f32_eq(spec.start.x.into(), 10.5);
-        assert_f32_eq(spec.start.y.into(), -0.5);
-        assert_f32_eq(spec.end.x.into(), -0.5);
-        assert_f32_eq(spec.end.y.into(), 5.5);
+        assert_f32_eq(start.x.into(), 10.5);
+        assert_f32_eq(start.y.into(), -0.5);
+        assert_f32_eq(end.x.into(), -0.5);
+        assert_f32_eq(end.y.into(), 5.5);
     }
 
     #[test]
@@ -3255,13 +2344,15 @@ mod tests {
                 height: px(10.0),
             },
         };
-        let spec =
-            rounded_corner_path_spec(bounds, '\u{2570}', px(1.0)).expect("expected path points");
+        let (bounds, plan) = glyph_plan_for_bounds(bounds, '\u{2570}');
+        let points = plan.strokes()[0].points();
+        let start = resolve_glyph_point(bounds, points[0]);
+        let end = resolve_glyph_point(bounds, points[5]);
 
-        assert_f32_eq(spec.start.x.into(), 10.5);
-        assert_f32_eq(spec.start.y.into(), -0.5);
-        assert_f32_eq(spec.end.x.into(), 20.5);
-        assert_f32_eq(spec.end.y.into(), 5.5);
+        assert_f32_eq(start.x.into(), 10.5);
+        assert_f32_eq(start.y.into(), -0.5);
+        assert_f32_eq(end.x.into(), 20.5);
+        assert_f32_eq(end.y.into(), 5.5);
     }
 
     #[test]
@@ -3273,14 +2364,16 @@ mod tests {
                 height: px(20.0),
             },
         };
-        let (spec, secondary) =
-            diagonal_path_specs(bounds, '\u{2571}', px(1.0)).expect("expected path points");
+        let (bounds, plan) = glyph_plan_for_bounds(bounds, '\u{2571}');
+        assert_eq!(plan.strokes().len(), 1);
+        let points = plan.strokes()[0].points();
+        let start = resolve_glyph_point(bounds, points[0]);
+        let end = resolve_glyph_point(bounds, points[1]);
 
-        assert!(secondary.is_none());
-        assert_f32_eq(spec.start.x.into(), 10.25);
-        assert_f32_eq(spec.start.y.into(), -0.5);
-        assert_f32_eq(spec.end.x.into(), -0.25);
-        assert_f32_eq(spec.end.y.into(), 20.5);
+        assert_f32_eq(start.x.into(), 10.25);
+        assert_f32_eq(start.y.into(), -0.5);
+        assert_f32_eq(end.x.into(), -0.25);
+        assert_f32_eq(end.y.into(), 20.5);
     }
 
     #[test]
@@ -3292,19 +2385,24 @@ mod tests {
                 height: px(20.0),
             },
         };
-        let (primary, secondary) =
-            diagonal_path_specs(bounds, '\u{2573}', px(1.0)).expect("expected path points");
-        let secondary = secondary.expect("expected second diagonal");
+        let (bounds, plan) = glyph_plan_for_bounds(bounds, '\u{2573}');
+        assert_eq!(plan.strokes().len(), 2);
+        let primary = plan.strokes()[0].points();
+        let secondary = plan.strokes()[1].points();
+        let primary_start = resolve_glyph_point(bounds, primary[0]);
+        let primary_end = resolve_glyph_point(bounds, primary[1]);
+        let secondary_start = resolve_glyph_point(bounds, secondary[0]);
+        let secondary_end = resolve_glyph_point(bounds, secondary[1]);
 
-        assert_f32_eq(primary.start.x.into(), 10.25);
-        assert_f32_eq(primary.start.y.into(), -0.5);
-        assert_f32_eq(primary.end.x.into(), -0.25);
-        assert_f32_eq(primary.end.y.into(), 20.5);
+        assert_f32_eq(primary_start.x.into(), 10.25);
+        assert_f32_eq(primary_start.y.into(), -0.5);
+        assert_f32_eq(primary_end.x.into(), -0.25);
+        assert_f32_eq(primary_end.y.into(), 20.5);
 
-        assert_f32_eq(secondary.start.x.into(), -0.25);
-        assert_f32_eq(secondary.start.y.into(), -0.5);
-        assert_f32_eq(secondary.end.x.into(), 10.25);
-        assert_f32_eq(secondary.end.y.into(), 20.5);
+        assert_f32_eq(secondary_start.x.into(), -0.25);
+        assert_f32_eq(secondary_start.y.into(), -0.5);
+        assert_f32_eq(secondary_end.x.into(), 10.25);
+        assert_f32_eq(secondary_end.y.into(), 20.5);
     }
 
     #[test]
@@ -4394,19 +3492,25 @@ mod tests {
         let sextant = TextDrawOp::Sextant(SextantDraw {
             row: 0,
             col: 4,
-            packed: 0b01_1111,
+            geometry: sextant_geometry('\u{1FB00}').unwrap(),
             fg: Hsla::transparent_black(),
         });
         assert_eq!(draw_op_col_range(&sextant), (4, 4));
     }
 
     #[test]
-    fn sextant_char_to_packed_matches_terminal_qr_decoding() {
-        assert_eq!(sextant_char_to_packed('\u{1FB00}'), Some(0b01_1111));
-        assert_eq!(sextant_char_to_packed('\u{1FB3B}'), Some(0b10_0000));
-        assert_eq!(sextant_char_to_packed('█'), None);
-        assert_eq!(sextant_char_to_packed('\u{1FAFF}'), None);
-        assert_eq!(sextant_char_to_packed('\u{1FB3C}'), None);
+    fn sextant_geometry_matches_terminal_qr_decoding() {
+        let first = sextant_geometry('\u{1FB00}').expect("first sextant");
+        assert_eq!(first.rects().len(), 1);
+        assert_eq!(first.rects()[0].left, 0.0);
+        assert_eq!(first.rects()[0].top, 0.0);
+        assert_eq!(first.rects()[0].right, 0.5);
+        assert_eq!(first.rects()[0].bottom, 1.0 / 3.0);
+        assert_eq!(first.rects()[0].snap, TerminalGlyphRectSnap::Outward);
+        assert_eq!(sextant_geometry('\u{1FB3B}').unwrap().rects().len(), 5);
+        assert!(sextant_geometry('█').is_none());
+        assert!(sextant_geometry('\u{1FAFF}').is_none());
+        assert!(sextant_geometry('\u{1FB3C}').is_none());
     }
 
     #[test]
@@ -4416,7 +3520,7 @@ mod tests {
         assert_eq!(ops.len(), 2);
         assert!(matches!(&ops[0], TextDrawOp::Batch(batch) if batch.text == "a"));
         assert!(
-            matches!(&ops[1], TextDrawOp::Sextant(s) if s.row == 0 && s.col == 1 && s.packed == 0b01_1111)
+            matches!(&ops[1], TextDrawOp::Sextant(s) if s.row == 0 && s.col == 1 && s.geometry.rects().len() == 1)
         );
     }
 

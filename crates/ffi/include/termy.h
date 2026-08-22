@@ -20,6 +20,7 @@ typedef enum {
   TERMY_FFI_SERIALIZE_FAILED = 7,
   /* A Rust panic was caught before it could unwind across the C ABI. */
   TERMY_FFI_PANICKED = 8,
+  TERMY_FFI_INVALID_ARGUMENT = 9,
 } TermyFfiStatus;
 
 typedef enum {
@@ -44,6 +45,25 @@ typedef enum {
   TERMY_FFI_PROGRESS_INDETERMINATE = 3,
   TERMY_FFI_PROGRESS_WARNING = 4,
 } TermyFfiProgressState;
+
+typedef enum {
+  TERMY_FFI_GLYPH_RENDER_BLOCK_ELEMENT = 1,
+  TERMY_FFI_GLYPH_RENDER_BOX_DRAWING = 2,
+  TERMY_FFI_GLYPH_RENDER_SEXTANT = 3,
+  TERMY_FFI_GLYPH_RENDER_BRAILLE = 4,
+  TERMY_FFI_GLYPH_RENDER_ROUNDED_CORNER = 5,
+  TERMY_FFI_GLYPH_RENDER_DIAGONAL = 6,
+} TermyFfiGlyphRenderKind;
+
+typedef enum {
+  TERMY_FFI_GLYPH_RECT_SNAP_NEAREST = 1,
+  TERMY_FFI_GLYPH_RECT_SNAP_OUTWARD = 2,
+} TermyFfiGlyphRectSnapKind;
+
+typedef enum {
+  TERMY_FFI_GLYPH_STROKE_LINE = 1,
+  TERMY_FFI_GLYPH_STROKE_ROUNDED_CORNER = 2,
+} TermyFfiGlyphStrokeKind;
 
 /*
  * Opaque terminal handle. Created by one of the *_new constructors below and
@@ -181,6 +201,61 @@ typedef struct {
   size_t left_col;
   size_t right_col;
 } TermyFfiDirtySpan;
+
+typedef struct {
+  float cell_width;
+  float cell_height;
+  float font_size;
+} TermyFfiGlyphMetrics;
+
+typedef struct {
+  float left;
+  float top;
+  float right;
+  float bottom;
+  float alpha;
+  uint32_t snap_kind;
+} TermyFfiGlyphRect;
+
+typedef struct {
+  float x;
+  float y;
+} TermyFfiGlyphPoint;
+
+/* Stroke width is a fraction of the cell width. Lines use point_0..point_1;
+ * rounded corners use point_0..point_5. */
+typedef struct {
+  uint32_t kind;
+  uint32_t point_count;
+  float width;
+  TermyFfiGlyphPoint point_0;
+  TermyFfiGlyphPoint point_1;
+  TermyFfiGlyphPoint point_2;
+  TermyFfiGlyphPoint point_3;
+  TermyFfiGlyphPoint point_4;
+  TermyFfiGlyphPoint point_5;
+} TermyFfiGlyphStroke;
+
+typedef struct {
+  size_t cell_index;
+  uint32_t render_kind;
+  size_t rect_start;
+  size_t rect_len;
+  size_t stroke_start;
+  size_t stroke_len;
+} TermyFfiGlyphPlanEntry;
+
+typedef struct {
+  TermyFfiGlyphPlanEntry *entries_ptr;
+  size_t entries_len;
+  size_t entries_capacity;
+  TermyFfiGlyphRect *rects_ptr;
+  size_t rects_len;
+  size_t rects_capacity;
+  TermyFfiGlyphStroke *strokes_ptr;
+  size_t strokes_len;
+  size_t strokes_capacity;
+} TermyFfiGlyphRenderPlan;
 
 typedef struct {
   uint32_t kind;
@@ -544,6 +619,21 @@ TermyFfiStatus termy_terminal_take_frame_update(
     bool force_full,
     TermyFfiFrameUpdate *out_update);
 TermyFfiStatus termy_frame_update_free(TermyFfiFrameUpdate *update);
+/* Build a sparse special-glyph plan from a retained full row-major frame.
+ * Pass no spans to plan the full frame, or inclusive dirty spans to plan only
+ * changed cells. Entry cell_index values address the full frame. Rectangle and
+ * stroke coordinates are cell-relative; hosts perform final device-pixel
+ * snapping. Free successful plans with the matching plan free function. */
+TermyFfiStatus termy_cells_build_glyph_render_plan(
+    const TermyFfiCell *cells_ptr,
+    size_t cells_len,
+    uint16_t cols,
+    uint16_t rows,
+    const TermyFfiDirtySpan *spans_ptr,
+    size_t spans_len,
+    TermyFfiGlyphMetrics metrics,
+    TermyFfiGlyphRenderPlan *out_plan);
+TermyFfiStatus termy_glyph_render_plan_free(TermyFfiGlyphRenderPlan *plan);
 TermyFfiStatus termy_terminal_kitty_graphics_revision(
     TermyFfiTerminal *terminal,
     uint64_t *out_revision);

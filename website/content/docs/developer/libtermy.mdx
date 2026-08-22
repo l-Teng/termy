@@ -29,8 +29,9 @@ process.
 | External output or tmux panes | Display terminal | Parser, grid, damage, and frames without a PTY |
 
 Both APIs are renderer-neutral. libtermy produces cells, cursor state, damage,
-events, and render configuration; your host decides how those values become
-pixels and application chrome.
+events, render configuration, and canonical plans for terminal glyphs that
+should bypass font shaping; your host decides how those values become pixels
+and application chrome.
 
 ## What is available in beta
 
@@ -43,6 +44,7 @@ pixels and application chrome.
 - Wakeup notifications for event-driven render scheduling
 - Display-only terminals driven by arbitrary output bytes
 - Runtime cell measurement, theme colors, and cursor configuration
+- Shared block-element, box-drawing, sextant, Braille, rounded-corner, and diagonal geometry
 
 App chrome—windows, tabs, pane layout, settings UI, and rendering—is intentionally
 owned by the embedder.
@@ -120,7 +122,20 @@ The terminal engine itself is private. `termy_core` 0.2 removes `Terminal::with_
 helpers as part of the renderer-neutral core API change. Use core-owned
 `TerminalColor`, `TerminalRenderCell`, and `TerminalQueryColors` values plus the
 public `Terminal` methods instead. This is an intentional Rust source break;
-the flat frame layout and C ABI did not change.
+the existing flat frame layout remains unchanged.
+
+### Shared special-glyph plans
+
+Do not shape block elements, box drawing, sextants, long Braille runs, rounded
+corners, or diagonals as ordinary font glyphs. Call `terminal_glyph_plan` with
+`TerminalGlyphMetrics` and `TerminalGlyphNeighbors`. The returned
+`TerminalGlyphPlan` is allocation-free and contains normalized rectangles and
+strokes. Transform those primitives into your renderer's coordinate space and
+apply final device-pixel snapping according to each rectangle's snap mode.
+
+`TerminalGlyphNeighbors::from_row` preserves the context-sensitive Braille
+behavior: long QR-style runs use explicit geometry, while short animated
+spinners remain shaped text.
 
 ### Display-only terminals
 
@@ -196,12 +211,27 @@ A responsive host normally follows this sequence:
    the Rust wakeup sender.
 3. Drain terminal events.
 4. Call `frame_update(false)` or `termy_terminal_take_frame_update(..., false, ...)`.
-5. Patch dirty spans into the retained frame and redraw affected rows or rects.
-6. Return to the idle wait instead of polling continuously.
+5. Patch dirty spans into the retained frame.
+6. Build special-glyph plans for those spans and redraw affected rows or rects.
+7. Return to the idle wait instead of polling continuously.
 
 Full updates are row-major: `index = row * cols + col`. Partial-update cells are
 ordered by dirty span, left to right. A partial cell does not carry its own row
 or column; derive the position from its span.
+
+### Batched special-glyph plans from C
+
+Keep one full row-major `TermyFfiCell` buffer in the host and patch frame updates
+into it. Then call `termy_cells_build_glyph_render_plan` with that retained
+buffer, its dimensions, measured cell/font metrics, and the update's dirty
+spans. One call returns a sparse `TermyFfiGlyphRenderPlan`: entries identify
+absolute cell indices and ranges in flat rectangle and stroke arrays. Passing
+zero spans builds a full plan.
+
+Coordinates are relative to one cell. Apply the host renderer's transform and
+final device-pixel snapping, then release the batch with
+`termy_glyph_render_plan_free`. This keeps `TermyFfiCell` compact and avoids one
+FFI call per cell.
 
 ## Input, search, and links
 
@@ -234,6 +264,7 @@ Every returned allocation has one matching free function:
 | `TermyFfiConfig *` | `termy_config_free` |
 | `TermyFfiFrame` | `termy_frame_free` |
 | `TermyFfiFrameUpdate` | `termy_frame_update_free` |
+| `TermyFfiGlyphRenderPlan` | `termy_glyph_render_plan_free` |
 | `TermyFfiDamage` | `termy_damage_free` |
 | `TermyFfiEventBatch` | `termy_event_batch_free` |
 | `TermyFfiSearchBatch` | `termy_search_batch_free` |
