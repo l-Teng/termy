@@ -190,7 +190,7 @@ fn open_main_window(
     });
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let titlebar = Some(gpui::TitlebarOptions {
-        title: None,
+        title: Some("Termy".into()),
         appears_transparent: true,
         traffic_light_position: None,
     });
@@ -201,6 +201,10 @@ fn open_main_window(
             titlebar,
             window_background,
             app_id: Some(APP_ID.to_string()),
+            // Let the Linux compositor/window manager own the titlebar,
+            // controls, borders, and resize affordances.
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(gpui::WindowDecorations::Server),
             // Keep both sides of the xctrace comparison visible even when the
             // benchmark is launched from an IDE or another frontmost app.
             // Normal product windows retain the standard level.
@@ -219,6 +223,8 @@ fn open_main_window(
             ..Default::default()
         },
         move |window, cx| {
+            #[cfg(target_os = "linux")]
+            window.set_window_title("Termy");
             if benchmark_mode {
                 #[cfg(target_os = "macos")]
                 if let Err(error) =

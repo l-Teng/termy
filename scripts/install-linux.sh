@@ -128,6 +128,10 @@ cat > "$INSTALL_DIR/termy" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${TERMY_LINUX_BACKEND:-x11}" == "x11" && -n "${DISPLAY:-}" ]]; then
+  unset WAYLAND_DISPLAY
+fi
+
 exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/termy-bin" "$@"
 LAUNCHER
 chmod +x "$INSTALL_DIR/termy" "$INSTALL_DIR/termy-bin" "$INSTALL_DIR/termy-cli"

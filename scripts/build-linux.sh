@@ -188,6 +188,10 @@ stage_linux_package_root() {
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "\${TERMY_LINUX_BACKEND:-x11}" == "x11" && -n "\${DISPLAY:-}" ]]; then
+  unset WAYLAND_DISPLAY
+fi
+
 exec /usr/lib/$APP_NAME_LOWER/termy-bin "\$@"
 LAUNCHER
   chmod 755 "$root/usr/bin/$APP_NAME_LOWER"
@@ -212,6 +216,10 @@ case "$FORMAT" in
     cat > "$STAGING_DIR/$APP_NAME_LOWER/$APP_NAME_LOWER" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [[ "${TERMY_LINUX_BACKEND:-x11}" == "x11" && -n "${DISPLAY:-}" ]]; then
+  unset WAYLAND_DISPLAY
+fi
 
 exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/termy-bin" "$@"
 LAUNCHER
@@ -241,6 +249,10 @@ cp "$SCRIPT_DIR/termy-cli" "$INSTALL_DIR/termy-cli"
 cat > "$INSTALL_DIR/termy" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [[ "${TERMY_LINUX_BACKEND:-x11}" == "x11" && -n "${DISPLAY:-}" ]]; then
+  unset WAYLAND_DISPLAY
+fi
 
 exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/termy-bin" "$@"
 LAUNCHER
@@ -307,6 +319,10 @@ EOF
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ "${TERMY_LINUX_BACKEND:-x11}" == "x11" && -n "${DISPLAY:-}" ]]; then
+  unset WAYLAND_DISPLAY
+fi
 
 exec "$HERE/usr/bin/termy" "$@"
 APP_RUN

@@ -186,6 +186,12 @@ require_pattern 'cargo xwin check --cross-compiler clang' \
 require_pattern 'cp "\$BINARY_PATH" "\$STAGING_DIR/\$APP_NAME_LOWER/termy-bin"' \
   "scripts/build-linux.sh" \
   "Linux tarballs must ship the real GUI binary as termy-bin behind the launcher"
+require_pattern 'TERMY_LINUX_BACKEND:-x11' \
+  "scripts/build-linux.sh" \
+  "Linux release launchers must prefer X11/XWayland for native window decorations"
+require_pattern 'TERMY_LINUX_BACKEND:-x11' \
+  "scripts/install-linux.sh" \
+  "Linux installer launchers must preserve the release backend policy"
 require_pattern 'rm -f "\$INSTALL_DIR/termy" "\$INSTALL_DIR/termy-bin" "\$INSTALL_DIR/termy-cli"' \
   "scripts/build-linux.sh" \
   "Linux tarball installer must unlink existing install targets before writing replacements"

@@ -35,6 +35,10 @@ Download the AppImage or `.tar.gz` from [GitHub Releases](https://github.com/las
 - **AppImage:** mark it executable, then run it.
 - **Archive:** unpack it and run the included Termy binary.
 
+Linux release launchers prefer X11/XWayland when it is available so the desktop
+window manager can provide the native title bar and window controls. To run the
+Wayland backend instead, launch Termy with `TERMY_LINUX_BACKEND=wayland`.
+
 ## Windows
 
 Download and run the `.msi` installer from [GitHub Releases](https://github.com/lassejlv/termy/releases).
