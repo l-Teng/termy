@@ -233,7 +233,8 @@ jobs:
           fail_on_unmatched_files: true
           overwrite_files: true
 
-      - name: Mark release as latest and not pre-release
+      - name: Mark stable release as latest
+        if: ${{ github.event.release.prerelease == false }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
@@ -246,6 +247,7 @@ jobs:
             });
 
       - name: Trigger AUR publish
+        if: ${{ github.event.release.prerelease == false }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
