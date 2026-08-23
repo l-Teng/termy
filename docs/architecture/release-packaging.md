@@ -10,7 +10,8 @@ Release packaging is rooted in `scripts/`. GitHub release workflows should call 
 - Windows installer definition: `scripts/installer/termy.iss`
 - Linux tarball and AppImage: `scripts/build-linux.sh`
 - app icon generation: `scripts/generate-icon.sh`
-- release CI: `.github/workflows/release.yml`
+- release artifact CI: `.github/workflows/release.yml`
+- stable release finalization and AUR dispatch: `.github/workflows/finalize-stable-release.yml`
 
 The app version used by packaging scripts comes from `crates/desktop_app/Cargo.toml` unless an explicit version is passed.
 

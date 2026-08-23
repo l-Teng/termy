@@ -193,7 +193,7 @@ jobs:
           if-no-files-found: error
 
   attach-and-finalize-release:
-    name: Attach artifacts and finalize release
+    name: Attach release artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs:
@@ -232,30 +232,3 @@ jobs:
             dist/checksums.txt
           fail_on_unmatched_files: true
           overwrite_files: true
-
-      - name: Mark stable release as latest
-        if: ${{ github.event.release.prerelease == false }}
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        with:
-          script: |
-            await github.request("PATCH /repos/{owner}/{repo}/releases/{release_id}", {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: context.payload.release.id,
-              prerelease: false,
-              make_latest: "true"
-            });
-
-      - name: Trigger AUR publish
-        if: ${{ github.event.release.prerelease == false }}
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        with:
-          script: |
-            const version = context.payload.release.tag_name.replace(/^v/, "");
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: "aur-publish.yml",
-              ref: "main",
-              inputs: { version }
-            });

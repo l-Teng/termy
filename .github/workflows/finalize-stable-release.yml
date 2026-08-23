@@ -1,0 +1,73 @@
+name: Finalize stable release
+
+on:
+  release:
+    types: [released]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: finalize-stable-release-${{ github.event.release.id }}
+  cancel-in-progress: false
+
+jobs:
+  finalize-stable-release:
+    name: Mark release as latest and publish AUR
+    if: ${{ github.event.release.prerelease == false && github.event.release.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Wait for the AUR source asset
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const tag = context.payload.release.tag_name;
+            const expectedAsset = `Termy-${tag}-linux-x86_64.tar.gz`;
+            const deadline = Date.now() + 20 * 60 * 1000;
+
+            while (true) {
+              const { data: release } = await github.rest.repos.getRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: context.payload.release.id
+              });
+
+              if (release.assets.some((asset) => asset.name === expectedAsset)) {
+                core.info(`Found ${expectedAsset}`);
+                break;
+              }
+
+              if (Date.now() >= deadline) {
+                throw new Error(`Timed out waiting for ${expectedAsset}`);
+              }
+
+              core.info(`Waiting for ${expectedAsset}`);
+              await new Promise((resolve) => setTimeout(resolve, 15_000));
+            }
+
+      - name: Mark stable release as latest
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: context.payload.release.id,
+              prerelease: false,
+              make_latest: "true"
+            });
+
+      - name: Trigger AUR publish
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const version = context.payload.release.tag_name.replace(/^v/, "");
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "aur-publish.yml",
+              ref: "main",
+              inputs: { version }
+            });

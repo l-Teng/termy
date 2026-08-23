@@ -135,6 +135,7 @@ require_path "crates/README.md"
 require_path "scripts/README.md"
 require_path "docs/architecture/project-layout.md"
 require_path "docs/architecture/release-packaging.md"
+require_path ".github/workflows/finalize-stable-release.yml"
 
 while IFS= read -r manifest; do
   crate_dir="$(dirname "$manifest")"
@@ -147,6 +148,18 @@ require_pattern './scripts/build-dmg\.sh' \
 require_pattern 'dist/Termy-\$\{\{ env.VERSION \}\}-macos-\$\{\{ matrix.arch \}\}\.dmg' \
   ".github/workflows/release.yml" \
   "release workflow must upload the documented macOS DMG path"
+require_pattern 'types: \[released\]' \
+  ".github/workflows/finalize-stable-release.yml" \
+  "stable release finalization must run for initial stable releases and prerelease promotions"
+require_pattern 'Termy-\$\{tag\}-linux-x86_64\.tar\.gz' \
+  ".github/workflows/finalize-stable-release.yml" \
+  "stable release finalization must wait for the AUR source asset"
+require_pattern 'createWorkflowDispatch' \
+  ".github/workflows/finalize-stable-release.yml" \
+  "stable release finalization must trigger the AUR workflow"
+forbid_pattern 'name: Trigger AUR publish' \
+  ".github/workflows/release.yml" \
+  "artifact publishing must not race stable release finalization"
 forbid_pattern '^wry = ' \
   "crates/desktop_app/Cargo.toml" \
   "desktop app must not reintroduce the removed embedded browser runtime"
