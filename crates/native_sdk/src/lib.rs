@@ -53,6 +53,7 @@ pub enum ContextMenuAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabContextMenuAction {
+    Duplicate,
     Rename,
     Pin,
     Unpin,
@@ -75,6 +76,7 @@ const TAB_CONTEXT_MENU_PIN_ID: i32 = 101;
 const TAB_CONTEXT_MENU_UNPIN_ID: i32 = 102;
 const TAB_CONTEXT_MENU_RENAME_ID: i32 = 103;
 const TAB_CONTEXT_MENU_CLOSE_ID: i32 = 104;
+const TAB_CONTEXT_MENU_DUPLICATE_ID: i32 = 105;
 #[cfg(target_os = "macos")]
 static CONTEXT_MENU_SELECTION: AtomicI32 = AtomicI32::new(0);
 
@@ -85,6 +87,17 @@ fn context_menu_action_for_id(action_id: i32) -> Option<ContextMenuAction> {
         CONTEXT_MENU_PASTE_ID => Some(ContextMenuAction::Paste),
         CONTEXT_MENU_OPEN_SEARCH_ID => Some(ContextMenuAction::OpenSearch),
         CONTEXT_MENU_COPY_BUFFER_POSITION_ID => Some(ContextMenuAction::CopyBufferPosition),
+        _ => None,
+    }
+}
+
+fn tab_context_menu_action_for_id(action_id: i32) -> Option<TabContextMenuAction> {
+    match action_id {
+        TAB_CONTEXT_MENU_DUPLICATE_ID => Some(TabContextMenuAction::Duplicate),
+        TAB_CONTEXT_MENU_RENAME_ID => Some(TabContextMenuAction::Rename),
+        TAB_CONTEXT_MENU_PIN_ID => Some(TabContextMenuAction::Pin),
+        TAB_CONTEXT_MENU_UNPIN_ID => Some(TabContextMenuAction::Unpin),
+        TAB_CONTEXT_MENU_CLOSE_ID => Some(TabContextMenuAction::Close),
         _ => None,
     }
 }
@@ -593,6 +606,15 @@ pub fn show_tab_context_menu(
             let menu = NSMenu::new(mtm);
             menu.setAutoenablesItems(false);
 
+            // Duplicate Tab
+            let duplicate_item = TermyContextMenuItem::new_with_action_id(
+                mtm,
+                "Duplicate Tab",
+                TAB_CONTEXT_MENU_DUPLICATE_ID,
+                true,
+            );
+            menu.addItem(&duplicate_item);
+
             // Rename Tab
             let rename_item = TermyContextMenuItem::new_with_action_id(
                 mtm,
@@ -627,13 +649,7 @@ pub fn show_tab_context_menu(
             CONTEXT_MENU_SELECTION.store(0, Ordering::Relaxed);
             let _ = pop_up_menu_at_anchor(&menu, anchor);
 
-            match CONTEXT_MENU_SELECTION.swap(0, Ordering::Relaxed) {
-                TAB_CONTEXT_MENU_RENAME_ID => Some(TabContextMenuAction::Rename),
-                TAB_CONTEXT_MENU_PIN_ID => Some(TabContextMenuAction::Pin),
-                TAB_CONTEXT_MENU_UNPIN_ID => Some(TabContextMenuAction::Unpin),
-                TAB_CONTEXT_MENU_CLOSE_ID => Some(TabContextMenuAction::Close),
-                _ => None,
-            }
+            tab_context_menu_action_for_id(CONTEXT_MENU_SELECTION.swap(0, Ordering::Relaxed))
         }
 
         if let Some(mtm) = MainThreadMarker::new() {
@@ -648,6 +664,18 @@ pub fn show_tab_context_menu(
         let _ = anchor;
         let menu = unsafe { CreatePopupMenu().ok()? };
         let _menu_guard = MenuGuard(menu);
+
+        // Duplicate Tab
+        let duplicate_title = wide_string("Duplicate Tab");
+        unsafe {
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                TAB_CONTEXT_MENU_DUPLICATE_ID as usize,
+                windows::core::PCWSTR(duplicate_title.as_ptr()),
+            )
+            .ok()?;
+        }
 
         // Rename Tab
         let rename_title = wide_string("Rename Tab");
@@ -712,13 +740,7 @@ pub fn show_tab_context_menu(
             .0
         };
 
-        return match result {
-            TAB_CONTEXT_MENU_RENAME_ID => Some(TabContextMenuAction::Rename),
-            TAB_CONTEXT_MENU_PIN_ID => Some(TabContextMenuAction::Pin),
-            TAB_CONTEXT_MENU_UNPIN_ID => Some(TabContextMenuAction::Unpin),
-            TAB_CONTEXT_MENU_CLOSE_ID => Some(TabContextMenuAction::Close),
-            _ => None,
-        };
+        return tab_context_menu_action_for_id(result);
     }
 
     #[cfg(any(
@@ -818,5 +840,30 @@ mod tests {
             Some(ContextMenuAction::CopyBufferPosition)
         );
         assert_eq!(context_menu_action_for_id(0), None);
+    }
+
+    #[test]
+    fn tab_context_menu_ids_dispatch_to_their_actions() {
+        assert_eq!(
+            tab_context_menu_action_for_id(TAB_CONTEXT_MENU_DUPLICATE_ID),
+            Some(TabContextMenuAction::Duplicate)
+        );
+        assert_eq!(
+            tab_context_menu_action_for_id(TAB_CONTEXT_MENU_RENAME_ID),
+            Some(TabContextMenuAction::Rename)
+        );
+        assert_eq!(
+            tab_context_menu_action_for_id(TAB_CONTEXT_MENU_PIN_ID),
+            Some(TabContextMenuAction::Pin)
+        );
+        assert_eq!(
+            tab_context_menu_action_for_id(TAB_CONTEXT_MENU_UNPIN_ID),
+            Some(TabContextMenuAction::Unpin)
+        );
+        assert_eq!(
+            tab_context_menu_action_for_id(TAB_CONTEXT_MENU_CLOSE_ID),
+            Some(TabContextMenuAction::Close)
+        );
+        assert_eq!(tab_context_menu_action_for_id(0), None);
     }
 }

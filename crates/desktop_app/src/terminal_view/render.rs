@@ -2650,7 +2650,7 @@ impl TerminalView {
                 260.0
             };
             let row_height = 30.0;
-            let content_height = (row_height * (3 + plugin_commands.len()) as f32)
+            let content_height = (row_height * (4 + plugin_commands.len()) as f32)
                 + 8.0
                 + if plugin_commands.is_empty() { 0.0 } else { 7.0 };
             let menu_height = context_menu_visible_height(
@@ -2777,6 +2777,31 @@ impl TerminalView {
                                 panel.child(
                                     div().h(px(1.0)).my(px(3.0)).mx(px(8.0)).bg(panel_border),
                                 )
+                            })
+                            // Duplicate Tab
+                            .child({
+                                let tab_id = state.tab_id;
+                                div()
+                                    .id("tab-context-menu-duplicate")
+                                    .h(px(row_height))
+                                    .px(px(10.0))
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(13.0))
+                                    .text_color(text_active)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(hover_bg))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            move |view, _event: &MouseDownEvent, _window, cx| {
+                                                let _ = view.close_tab_context_menu(cx);
+                                                let _ = view.duplicate_tab_by_id(tab_id, cx);
+                                                cx.stop_propagation();
+                                            },
+                                        ),
+                                    )
+                                    .child("Duplicate Tab")
                             })
                             // Rename Tab
                             .child({

@@ -207,6 +207,9 @@ impl TerminalView {
 
         let _ = self.close_tab_context_menu(cx);
         match action {
+            termy_native_sdk::TabContextMenuAction::Duplicate => {
+                let _ = self.duplicate_tab_by_id(tab_id, cx);
+            }
             termy_native_sdk::TabContextMenuAction::Rename => {
                 if let Some(index) = self.tab_index_by_id(tab_id) {
                     self.begin_rename_tab(index, cx);

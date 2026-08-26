@@ -9,6 +9,11 @@ fn window_order_index(window_order: &[&str], target_window_id: Option<&str>) -> 
     })
 }
 
+fn tmux_pane_working_dir(pane: &TmuxPaneState) -> Option<String> {
+    let path = pane.current_path.trim();
+    (!path.is_empty()).then(|| path.to_owned())
+}
+
 fn snapshot_preferred_cwd(snapshot: &TmuxSnapshot) -> Option<String> {
     snapshot
         .windows
@@ -22,9 +27,7 @@ fn snapshot_preferred_cwd(snapshot: &TmuxSnapshot) -> Option<String> {
                 .and_then(|pane_id| window.panes.iter().find(|pane| pane.id == pane_id))
                 .or_else(|| window.panes.first())
         })
-        .map(|pane| pane.current_path.trim())
-        .filter(|path| !path.is_empty())
-        .map(ToOwned::to_owned)
+        .and_then(tmux_pane_working_dir)
 }
 
 impl TmuxRuntime {
@@ -238,6 +241,7 @@ impl TerminalView {
             tab.manual_title = manual_title;
             tab.shell_title = shell_title;
             tab.current_command = current_command;
+            tab.last_prompt_cwd = active_pane_state.and_then(tmux_pane_working_dir);
             tab.running_process = running_process;
             new_tabs.push(tab);
         }

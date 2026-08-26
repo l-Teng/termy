@@ -338,6 +338,27 @@ impl TerminalView {
         let _ = self.add_tab_with_working_dir(None, cx);
     }
 
+    pub(crate) fn duplicate_tab_by_id(&mut self, tab_id: TabId, cx: &mut Context<Self>) -> bool {
+        let Some(source_index) = self.tab_index_by_id(tab_id) else {
+            return false;
+        };
+
+        // Directory discovery is based on the active tab (shell integration,
+        // child-process cwd, and title fallbacks). Activate the requested source
+        // first so duplicating a background tab cannot inherit another tab's cwd.
+        self.switch_tab(source_index, cx);
+        if self
+            .session
+            .tabs
+            .get(self.session.active_tab)
+            .is_none_or(|tab| tab.id != tab_id)
+        {
+            return false;
+        }
+
+        self.add_tab_with_working_dir(None, cx)
+    }
+
     /// "+" button entry point: opens a dropdown when the platform has extra
     /// tab choices; otherwise it creates a terminal tab directly.
     pub(crate) fn handle_new_tab_button(&mut self, anchor: (f32, f32), cx: &mut Context<Self>) {
