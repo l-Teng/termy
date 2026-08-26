@@ -206,6 +206,7 @@ impl TerminalView {
                 {
                     terminal.resize(next_size);
                 }
+                terminal.set_query_colors(self.terminal_runtime.query_colors);
                 panes.push(TerminalPane::from_tmux_state(
                     pane_state, terminal, degraded,
                 ));

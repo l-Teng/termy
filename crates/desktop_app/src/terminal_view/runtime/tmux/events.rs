@@ -182,12 +182,25 @@ impl TerminalView {
         for notification in self.tmux_runtime().client.poll_notifications() {
             match notification {
                 TmuxNotification::Output { pane_id, bytes } => {
-                    if let Some(terminal) = self.pane_terminal_by_id(&pane_id) {
+                    let pending_replies = if let Some(terminal) = self.pane_terminal_by_id(&pane_id)
+                    {
                         terminal.feed_output(&bytes);
-                        if self.is_active_pane_id(&pane_id) {
-                            should_redraw = true;
-                            self.schedule_tmux_title_refresh();
+                        terminal.take_pending_replies()
+                    } else {
+                        Vec::new()
+                    };
+                    for reply in pending_replies {
+                        if let Err(error) =
+                            self.tmux_runtime().client.report_terminal(&pane_id, &reply)
+                        {
+                            log::warn!("Failed to reply to tmux terminal query: {error}");
                         }
+                    }
+                    if self.pane_terminal_by_id(&pane_id).is_some()
+                        && self.is_active_pane_id(&pane_id)
+                    {
+                        should_redraw = true;
+                        self.schedule_tmux_title_refresh();
                     }
                 }
                 TmuxNotification::NeedsRefresh => {

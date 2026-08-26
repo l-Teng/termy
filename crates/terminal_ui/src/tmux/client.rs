@@ -87,6 +87,13 @@ fn split_horizontal_args<'a>(pane_id: &'a str, working_dir: Option<&'a str>) -> 
     args
 }
 
+fn terminal_report_command(pane_id: &str, report: &[u8]) -> Result<String> {
+    let report = std::str::from_utf8(report).context("terminal report is not valid UTF-8")?;
+    let spec = format!("{pane_id}:{report}");
+    tmux_control_command_line(&["refresh-client", "-r", spec.as_str()])
+        .map_err(|error| anyhow!(TmuxControlError::protocol(error)))
+}
+
 impl TmuxClient {
     fn launch_plan(config: &TmuxRuntimeConfig) -> SessionLaunchPlan {
         super::launch::launch_plan(config)
@@ -669,6 +676,14 @@ impl TmuxClient {
         Ok(())
     }
 
+    /// Report a terminal response (for example OSC 10/11 colors) through the
+    /// current tmux control client. Unlike `send-keys`, `refresh-client -r`
+    /// satisfies tmux's pending terminal-query report without injecting user input.
+    pub fn report_terminal(&self, pane_id: &str, report: &[u8]) -> Result<()> {
+        let command = terminal_report_command(pane_id, report)?;
+        self.send_control_command_async(command.as_str())
+    }
+
     pub fn capture_pane(&self, pane_id: &str, max_rows: usize) -> Result<Vec<u8>> {
         // Hydration capture must stay bounded to avoid expensive full-history
         // scans that can time out during reattach on large tmux histories.
@@ -931,6 +946,27 @@ mod tests {
     use anyhow::anyhow;
     use std::cell::Cell;
     use termy_tmux_control_core::control::coalescer::signal_fatal_exit;
+
+    #[test]
+    fn terminal_reports_use_tmux_refresh_client_report_channel() {
+        let report = b"\x1b]10;rgb:bcbc/bebe/c4c4\x1b\\";
+        let command = terminal_report_command("%4", report).expect("valid terminal report");
+
+        assert!(command.starts_with("refresh-client -r "));
+        assert!(command.contains("%4:"));
+        assert!(
+            command
+                .as_bytes()
+                .windows(report.len())
+                .any(|bytes| bytes == report)
+        );
+        assert!(!command.contains("send-keys"));
+    }
+
+    #[test]
+    fn terminal_reports_reject_control_protocol_line_breaks() {
+        assert!(terminal_report_command("%4", b"bad\nreport").is_err());
+    }
 
     fn test_tmux_client(shutdown_mode_on_drop: TmuxShutdownMode) -> TmuxClient {
         let (request_tx, _request_rx) = flume::bounded::<ControlRequest>(1);

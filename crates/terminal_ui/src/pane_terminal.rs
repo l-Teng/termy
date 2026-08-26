@@ -1,10 +1,11 @@
 use alacritty_terminal::{
-    event::VoidListener,
+    event::{Event as AlacEvent, EventListener},
     grid::{Dimensions, Scroll},
     sync::FairMutex,
     term::{Term, TermMode},
     vte::ansi,
 };
+use flume::{Receiver, Sender, unbounded};
 use std::sync::Arc;
 use termy_core::{
     KittyGraphicsInterceptor, KittyGraphicsItem, KittyGraphicsRenderPlacement, KittyGraphicsScreen,
@@ -13,13 +14,25 @@ use termy_core::{
 
 use termy_core::{
     DetectedLink, DetectedViewportLink, KittyGraphicsCursorTracker, TerminalCursorState,
-    TerminalDamageSnapshot, TerminalKeyboardMode, TerminalMouseMode, TerminalOptions, TerminalSize,
+    TerminalDamageSnapshot, TerminalKeyboardMode, TerminalMouseMode, TerminalOptions,
+    TerminalQueryColors, TerminalSize, reply_bytes_for_event,
 };
 
 use crate::alacritty_bridge;
 
+#[derive(Clone)]
+pub struct PaneEventListener {
+    events_tx: Sender<AlacEvent>,
+}
+
+impl EventListener for PaneEventListener {
+    fn send_event(&self, event: AlacEvent) {
+        let _ = self.events_tx.send(event);
+    }
+}
+
 struct PaneTerminalInner {
-    term: Arc<FairMutex<Term<VoidListener>>>,
+    term: Arc<FairMutex<Term<PaneEventListener>>>,
     size: TerminalSize,
 }
 
@@ -30,6 +43,9 @@ pub struct PaneTerminal {
     kitty_graphics_interceptor: FairMutex<KittyGraphicsInterceptor>,
     kitty_graphics_cursor_tracker: FairMutex<KittyGraphicsCursorTracker>,
     kitty_graphics: FairMutex<KittyGraphicsState>,
+    events_rx: Receiver<AlacEvent>,
+    query_colors: FairMutex<TerminalQueryColors>,
+    pending_replies: FairMutex<Vec<Vec<u8>>>,
 }
 
 impl PaneTerminal {
@@ -46,17 +62,22 @@ impl PaneTerminal {
         let size = Self::normalized_size(size);
         let config = alacritty_bridge::term_config(options);
 
-        let term = Arc::new(FairMutex::new(Term::new(config, &size, VoidListener)));
+        let (events_tx, events_rx) = unbounded();
+        let listener = PaneEventListener { events_tx };
+        let term = Arc::new(FairMutex::new(Term::new(config, &size, listener)));
         Self {
             inner: FairMutex::new(PaneTerminalInner { term, size }),
             parser: FairMutex::new(ansi::Processor::new()),
             kitty_graphics_interceptor: FairMutex::new(KittyGraphicsInterceptor::default()),
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics: FairMutex::new(KittyGraphicsState::default()),
+            events_rx,
+            query_colors: FairMutex::new(TerminalQueryColors::default()),
+            pending_replies: FairMutex::new(Vec::new()),
         }
     }
 
-    fn cloned_term_arc(&self) -> Arc<FairMutex<Term<VoidListener>>> {
+    fn cloned_term_arc(&self) -> Arc<FairMutex<Term<PaneEventListener>>> {
         let inner = self.inner.lock();
         inner.term.clone()
     }
@@ -66,6 +87,7 @@ impl PaneTerminal {
             return;
         }
 
+        let size = self.size();
         let mut interceptor = self.kitty_graphics_interceptor.lock();
         let mut cursor_tracker = self.kitty_graphics_cursor_tracker.lock();
         let mut parser = self.parser.lock();
@@ -118,6 +140,24 @@ impl PaneTerminal {
                 }
             }
         }
+
+        let query_colors = *self.query_colors.lock();
+        let mut pending_replies = self.pending_replies.lock();
+        for event in self.events_rx.try_iter() {
+            if let Some(reply) =
+                reply_bytes_for_event(&event, size, term.colors(), query_colors, &mut |_| None)
+            {
+                pending_replies.push(reply);
+            }
+        }
+    }
+
+    pub fn set_query_colors(&self, query_colors: TerminalQueryColors) {
+        *self.query_colors.lock() = query_colors;
+    }
+
+    pub fn take_pending_replies(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut *self.pending_replies.lock())
     }
 
     pub fn resize(&self, new_size: TerminalSize) {
@@ -139,7 +179,7 @@ impl PaneTerminal {
         self.inner.lock().size
     }
 
-    pub fn with_term<R>(&self, f: impl FnOnce(&Term<VoidListener>) -> R) -> R {
+    pub fn with_term<R>(&self, f: impl FnOnce(&Term<PaneEventListener>) -> R) -> R {
         let term = self.cloned_term_arc();
         // Run callback outside the outer state lock so callbacks can safely call
         // back into PaneTerminal APIs (for example size()) without lock inversion.
@@ -149,7 +189,7 @@ impl PaneTerminal {
 
     fn with_term_mut<R>(
         &self,
-        f: impl FnOnce(&mut Term<VoidListener>, &mut PaneTerminalInner) -> R,
+        f: impl FnOnce(&mut Term<PaneEventListener>, &mut PaneTerminalInner) -> R,
     ) -> R {
         let term = self.cloned_term_arc();
         let mut term = term.lock();
@@ -290,7 +330,7 @@ impl Dimensions for PaneTerminal {
 mod tests {
     use super::PaneTerminal;
     use alacritty_terminal::grid::Dimensions;
-    use termy_core::{TerminalOptions, TerminalSize};
+    use termy_core::{TerminalColor, TerminalOptions, TerminalQueryColors, TerminalSize};
 
     fn test_term_options(scrollback_history: usize) -> TerminalOptions {
         TerminalOptions {
@@ -357,6 +397,42 @@ mod tests {
         assert!(visible.contains("zsh: command not found: c"));
         assert!(!visible.contains("cdcd:"));
         assert!(!visible.contains("czsh:"));
+    }
+
+    #[test]
+    fn color_queries_queue_theme_aware_tmux_replies() {
+        let terminal = PaneTerminal::new(
+            TerminalSize {
+                cols: 32,
+                rows: 4,
+                ..TerminalSize::default()
+            },
+            test_term_options(2000),
+        );
+        let query_colors = TerminalQueryColors {
+            foreground: TerminalColor {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            },
+            background: TerminalColor {
+                r: 0x65,
+                g: 0x43,
+                b: 0x21,
+            },
+            ..TerminalQueryColors::default()
+        };
+        terminal.set_query_colors(query_colors);
+
+        terminal.feed_output(b"\x1b]10;?\x1b\\\x1b]11;?\x07");
+
+        assert_eq!(
+            terminal.take_pending_replies(),
+            vec![
+                b"\x1b]10;rgb:1212/3434/5656\x1b\\".to_vec(),
+                b"\x1b]11;rgb:6565/4343/2121\x07".to_vec(),
+            ]
+        );
     }
 
     #[test]

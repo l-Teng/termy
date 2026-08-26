@@ -57,7 +57,9 @@ pub use mouse_protocol::{
 };
 pub use osc_intercept::{OscEvent, OscInterceptor};
 pub use path_env::normalized_path_env;
-pub use protocol::{TerminalClipboardTarget, TerminalQueryColors, TerminalReplyHost};
+pub use protocol::{
+    TerminalClipboardTarget, TerminalQueryColors, TerminalReplyHost, reply_bytes_for_event,
+};
 pub use render_metrics::{
     TerminalUiRenderMetricsSnapshot, add_span_damage_compute_us, add_span_grid_paint_us,
     add_span_row_ops_rebuild_us, add_span_text_shaping_us, increment_grid_paint_count,

@@ -1,5 +1,5 @@
 use alacritty_terminal::{
-    event::VoidListener,
+    event::EventListener,
     grid::Dimensions,
     index::{Column, Line},
     term::{Term, TermMode, cell::Flags},
@@ -30,7 +30,7 @@ pub(crate) fn term_config(options: TerminalOptions) -> alacritty_terminal::term:
     }
 }
 
-pub(crate) fn cursor_state(term: &Term<VoidListener>) -> Option<TerminalCursorState> {
+pub(crate) fn cursor_state<T: EventListener>(term: &Term<T>) -> Option<TerminalCursorState> {
     let cursor = term.renderable_content().cursor;
     let style = match cursor.shape {
         ansi::CursorShape::Hidden => return None,
@@ -44,7 +44,7 @@ pub(crate) fn cursor_state(term: &Term<VoidListener>) -> Option<TerminalCursorSt
     })
 }
 
-pub(crate) fn cursor_position(term: &Term<VoidListener>) -> (usize, usize) {
+pub(crate) fn cursor_position<T: EventListener>(term: &Term<T>) -> (usize, usize) {
     let cursor = term.renderable_content().cursor;
     (
         cursor.point.column.0,
@@ -74,8 +74,8 @@ pub(crate) fn keyboard_mode(mode: TermMode) -> TerminalKeyboardMode {
     )
 }
 
-pub(crate) fn hyperlink_at(
-    term: &Term<VoidListener>,
+pub(crate) fn hyperlink_at<T: EventListener>(
+    term: &Term<T>,
     row: usize,
     col: usize,
 ) -> Option<DetectedLink> {
@@ -110,8 +110,8 @@ pub(crate) fn hyperlink_at(
     })
 }
 
-pub(crate) fn link_at(
-    term: &Term<VoidListener>,
+pub(crate) fn link_at<T: EventListener>(
+    term: &Term<T>,
     row: usize,
     col: usize,
 ) -> Option<DetectedViewportLink> {
@@ -332,7 +332,7 @@ fn viewport_link_from_grid_range(
     })
 }
 
-pub(crate) fn take_damage_snapshot(term: &mut Term<VoidListener>) -> TerminalDamageSnapshot {
+pub(crate) fn take_damage_snapshot<T: EventListener>(term: &mut Term<T>) -> TerminalDamageSnapshot {
     let rows = term.grid().screen_lines();
     let cols = term.grid().columns();
     let snapshot = match term.damage() {
@@ -359,10 +359,10 @@ pub(crate) fn take_damage_snapshot(term: &mut Term<VoidListener>) -> TerminalDam
     snapshot
 }
 
-pub(crate) fn advance_graphics_text(
+pub(crate) fn advance_graphics_text<T: EventListener>(
     tracker: &mut KittyGraphicsCursorTracker,
     parser: &mut ansi::Processor,
-    term: &mut Term<VoidListener>,
+    term: &mut Term<T>,
     bytes: &[u8],
     track_scrolls: bool,
     graphics: &mut KittyGraphicsState,
@@ -376,8 +376,8 @@ pub(crate) fn advance_graphics_text(
     parser.advance(&mut handler, bytes);
 }
 
-pub(crate) fn advance_graphics_cursor(
-    term: &mut Term<VoidListener>,
+pub(crate) fn advance_graphics_cursor<T: EventListener>(
+    term: &mut Term<T>,
     cols: u32,
     rows: u32,
     full_screen_scroll_region: bool,
@@ -410,14 +410,14 @@ struct ScrollObservation {
     history_before: usize,
 }
 
-struct TrackingHandler<'a> {
-    term: &'a mut Term<VoidListener>,
+struct TrackingHandler<'a, T> {
+    term: &'a mut Term<T>,
     tracker: &'a mut KittyGraphicsCursorTracker,
     track_scrolls: bool,
     graphics: &'a mut KittyGraphicsState,
 }
 
-impl TrackingHandler<'_> {
+impl<T: EventListener> TrackingHandler<'_, T> {
     fn linefeed_scroll_lines(&self) -> usize {
         let screen_lines = self.term.grid().screen_lines();
         let full_screen_region = self.tracker.region_covers_full_screen(screen_lines);
@@ -501,7 +501,7 @@ macro_rules! forward_handler_methods {
     };
 }
 
-impl Handler for TrackingHandler<'_> {
+impl<T: EventListener> Handler for TrackingHandler<'_, T> {
     fn input(&mut self, c: char) {
         let observation = self.observe_scroll(self.input_scroll_lines(c));
         Handler::input(&mut *self.term, c);

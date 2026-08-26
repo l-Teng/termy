@@ -33,7 +33,7 @@ where
     }
 }
 
-pub(crate) fn reply_bytes_for_event(
+pub fn reply_bytes_for_event(
     event: &AlacEvent,
     size: TerminalSize,
     live_colors: &Colors,

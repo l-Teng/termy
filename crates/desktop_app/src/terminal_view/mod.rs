@@ -696,12 +696,19 @@ impl Terminal {
 
     fn set_query_colors(&self, query_colors: TerminalQueryColors) {
         match self {
+            Self::Tmux(terminal) => terminal.set_query_colors(query_colors),
             Self::Native(terminal) => {
                 if let Ok(mut terminal) = terminal.lock() {
                     terminal.set_query_colors(query_colors);
                 }
             }
-            Self::Tmux(_) => {}
+        }
+    }
+
+    fn take_pending_replies(&self) -> Vec<Vec<u8>> {
+        match self {
+            Self::Tmux(terminal) => terminal.take_pending_replies(),
+            Self::Native(_) => Vec::new(),
         }
     }
 
