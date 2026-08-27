@@ -3,6 +3,15 @@ use std::{collections::HashMap, sync::Arc};
 use termy_terminal_ui::{TerminalGridPaintCacheHandle, TerminalGridRows};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::terminal_view) struct KittyGraphicsRenderCacheKey {
+    pub(in crate::terminal_view) graphics_revision: u64,
+    pub(in crate::terminal_view) terminal_generation: Option<u64>,
+    pub(in crate::terminal_view) cols: usize,
+    pub(in crate::terminal_view) rows: usize,
+    pub(in crate::terminal_view) display_offset: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::terminal_view) struct TerminalPaneCellColorTransformKey {
     pub(in crate::terminal_view) fg_blend_bits: u32,
     pub(in crate::terminal_view) bg_blend_bits: u32,
@@ -31,6 +40,8 @@ pub(in crate::terminal_view) struct TerminalPaneRenderCache {
     pub(in crate::terminal_view) key: Option<TerminalPaneRenderCacheKey>,
     pub(in crate::terminal_view) paint_cache: TerminalGridPaintCacheHandle,
     pub(in crate::terminal_view) kitty_images: HashMap<(u32, u64), Arc<gpui::Image>>,
+    pub(in crate::terminal_view) kitty_placements: Vec<termy_core::KittyGraphicsRenderPlacement>,
+    pub(in crate::terminal_view) kitty_placements_key: Option<KittyGraphicsRenderCacheKey>,
 }
 
 impl TerminalPaneRenderCache {
@@ -42,6 +53,8 @@ impl TerminalPaneRenderCache {
         self.key = None;
         self.paint_cache.clear();
         self.kitty_images.clear();
+        self.kitty_placements.clear();
+        self.kitty_placements_key = None;
     }
 }
 
@@ -76,6 +89,8 @@ mod tests {
             }),
             paint_cache: TerminalGridPaintCacheHandle::default(),
             kitty_images: HashMap::new(),
+            kitty_placements: Vec::new(),
+            kitty_placements_key: None,
         };
         cache.paint_cache.debug_seed_rows_for_tests(3);
         assert_eq!(cache.paint_cache.debug_row_cache_len_for_tests(), 3);

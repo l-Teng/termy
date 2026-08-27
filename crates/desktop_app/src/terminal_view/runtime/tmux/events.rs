@@ -184,6 +184,15 @@ impl TerminalView {
                 TmuxNotification::Output { pane_id, bytes } => {
                     if let Some(terminal) = self.pane_terminal_by_id(&pane_id) {
                         terminal.feed_output(&bytes);
+                        let replies = {
+                            let mut clipboard_text = ClipboardTextCache::default();
+                            let mut reply_host =
+                                GpuiClipboardReplyHost::new(cx, &mut clipboard_text);
+                            terminal.drain_kitty_clipboard_events(&mut reply_host)
+                        };
+                        for reply in replies {
+                            let _ = self.tmux_send_input_to_pane(&pane_id, &reply);
+                        }
                         if self.is_active_pane_id(&pane_id) {
                             should_redraw = true;
                             self.schedule_tmux_title_refresh();

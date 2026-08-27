@@ -43,7 +43,8 @@ pub use keyboard::{
 };
 pub use kitty_graphics::{
     KittyGraphicsApplyResult, KittyGraphicsCommand, KittyGraphicsInterceptor, KittyGraphicsItem,
-    KittyGraphicsRenderPlacement, KittyGraphicsScreen, KittyGraphicsState,
+    KittyGraphicsPlaceholder, KittyGraphicsRenderPlacement, KittyGraphicsScreen,
+    KittyGraphicsState, kitty_graphics_placeholders_from_alacritty_grid,
 };
 pub use links::{DetectedLink, DetectedViewportLink, classify_link_token, find_link_in_line};
 #[cfg(unix)]
@@ -57,7 +58,13 @@ pub use mouse_protocol::{
 };
 pub use osc_intercept::{OscEvent, OscInterceptor};
 pub use path_env::normalized_path_env;
-pub use protocol::{TerminalClipboardTarget, TerminalQueryColors, TerminalReplyHost};
+pub use protocol::{
+    KittyClipboardControl, KittyClipboardHostState, KittyClipboardInput, KittyClipboardInterceptor,
+    KittyClipboardOsc, KittyClipboardOscTerminator, TerminalClipboardContent,
+    TerminalClipboardLocation, TerminalClipboardReadRequest, TerminalClipboardReadResult,
+    TerminalClipboardTarget, TerminalClipboardWriteRequest, TerminalClipboardWriteResult,
+    TerminalQueryColors, TerminalReplyHost,
+};
 pub use render_metrics::{
     TerminalUiRenderMetricsSnapshot, add_span_damage_compute_us, add_span_grid_paint_us,
     add_span_row_ops_rebuild_us, add_span_text_shaping_us, increment_grid_paint_count,

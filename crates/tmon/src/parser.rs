@@ -1,6 +1,6 @@
 use crate::grid::{Charset, Grid, Rgb, UnderlineStyle};
 use crate::{
-    ClipboardRequest, ClipboardTarget, Osc52, Size, decode_base64,
+    ClipboardRequest, ClipboardTarget, KittyClipboardPacket, Osc52, Size, decode_base64,
     graphics::{
         GraphicsCommand, GraphicsRenderPlacement, GraphicsState, MAX_COMMAND_BYTES,
         MAX_CONTROL_BYTES,
@@ -173,6 +173,9 @@ pub(crate) enum ParsedEvent {
     Bell,
     ClipboardStore(String),
     ClipboardLoad(ClipboardRequest),
+    KittyClipboard(KittyClipboardPacket),
+    KittyClipboardMode(bool),
+    KittyClipboardReset,
     ShellPromptStart,
     ShellCommandStart,
     ShellCommandExecuting,
@@ -308,6 +311,7 @@ pub(crate) struct Parser {
     osc52: Osc52,
     synchronized_update_started: Option<Instant>,
     synchronized_update_buffer: Vec<u8>,
+    kitty_clipboard_paste_events: bool,
     title: Option<Arc<str>>,
     title_stack: VecDeque<Option<Arc<str>>>,
     graphics: GraphicsState,
@@ -346,6 +350,7 @@ impl Default for Parser {
             osc52: Osc52::default(),
             synchronized_update_started: None,
             synchronized_update_buffer: Vec::new(),
+            kitty_clipboard_paste_events: false,
             title: None,
             title_stack: VecDeque::with_capacity(8),
             graphics: GraphicsState::default(),
@@ -365,6 +370,10 @@ impl Parser {
 
     pub(crate) fn set_osc52(&mut self, osc52: Osc52) {
         self.osc52 = osc52;
+    }
+
+    pub(crate) fn kitty_clipboard_paste_events_mode(&self) -> bool {
+        self.kitty_clipboard_paste_events
     }
 
     pub(crate) fn graphics_revision(&self) -> u64 {
@@ -881,11 +890,13 @@ impl Parser {
             }
             b'c' => {
                 grid.reset();
+                self.kitty_clipboard_paste_events = false;
                 self.active_charset = 0;
                 self.single_shift = None;
                 self.title = None;
                 self.title_stack.clear();
                 output.events.push(ParsedEvent::ResetTitle);
+                output.events.push(ParsedEvent::KittyClipboardReset);
                 self.state = State::Ground;
             }
             b'H' => {
@@ -1249,6 +1260,9 @@ impl Parser {
                             self.synchronized_update_started = None;
                             self.synchronized_update_buffer.clear();
                         }
+                    } else if private && mode == 5522 {
+                        self.kitty_clipboard_paste_events = enabled;
+                        output.events.push(ParsedEvent::KittyClipboardMode(enabled));
                     } else {
                         grid.set_mode(private, mode, enabled);
                     }
@@ -1302,6 +1316,12 @@ impl Parser {
                 let marker = if private { "?" } else { "" };
                 let state = if private && mode == 2026 {
                     if self.synchronized_update_started.is_some() {
+                        1
+                    } else {
+                        2
+                    }
+                } else if private && mode == 5522 {
+                    if self.kitty_clipboard_paste_events {
                         1
                     } else {
                         2

@@ -366,14 +366,16 @@ pub(crate) fn advance_graphics_text(
     bytes: &[u8],
     track_scrolls: bool,
     graphics: &mut KittyGraphicsState,
-) {
+) -> bool {
     let mut handler = TrackingHandler {
         term,
         tracker,
         track_scrolls,
         graphics,
+        graphics_changed: false,
     };
     parser.advance(&mut handler, bytes);
+    handler.graphics_changed
 }
 
 pub(crate) fn advance_graphics_cursor(
@@ -415,6 +417,7 @@ struct TrackingHandler<'a> {
     tracker: &'a mut KittyGraphicsCursorTracker,
     track_scrolls: bool,
     graphics: &'a mut KittyGraphicsState,
+    graphics_changed: bool,
 }
 
 impl TrackingHandler<'_> {
@@ -472,16 +475,18 @@ impl TrackingHandler<'_> {
             (KittyGraphicsScreen::Primary, true) => {
                 let lines = observation.physical_lines.saturating_sub(history_growth);
                 if lines > 0 {
-                    self.graphics
+                    self.graphics_changed |= self
+                        .graphics
                         .scroll_up_without_history_on_screen(lines, KittyGraphicsScreen::Primary);
                 }
             }
             (KittyGraphicsScreen::Primary, false) if history_growth > 0 => {
-                self.graphics
+                self.graphics_changed |= self
+                    .graphics
                     .preserve_primary_placements_across_partial_history_growth(history_growth);
             }
             (KittyGraphicsScreen::Alternate, true) => {
-                self.graphics.scroll_up_without_history_on_screen(
+                self.graphics_changed |= self.graphics.scroll_up_without_history_on_screen(
                     observation.physical_lines,
                     KittyGraphicsScreen::Alternate,
                 );
@@ -547,9 +552,11 @@ impl Handler for TrackingHandler<'_> {
 
     fn reset_state(&mut self) {
         self.tracker.reset_scroll_region();
-        self.graphics
+        self.graphics_changed |= self
+            .graphics
             .clear_visible_on_screen(KittyGraphicsScreen::Primary);
-        self.graphics
+        self.graphics_changed |= self
+            .graphics
             .clear_visible_on_screen(KittyGraphicsScreen::Alternate);
         Handler::reset_state(&mut *self.term);
     }
@@ -561,7 +568,8 @@ impl Handler for TrackingHandler<'_> {
         if mode == NamedPrivateMode::SwapScreenAndSetRestoreCursor.into()
             && !self.term.mode().contains(TermMode::ALT_SCREEN)
         {
-            self.graphics
+            self.graphics_changed |= self
+                .graphics
                 .clear_visible_on_screen(KittyGraphicsScreen::Alternate);
         }
         Handler::set_private_mode(&mut *self.term, mode);
@@ -590,8 +598,9 @@ impl Handler for TrackingHandler<'_> {
         let cols = self.term.grid().columns();
         Handler::clear_screen(&mut *self.term, mode);
         if clear_viewport {
-            self.graphics
-                .clear_viewport_on_screen(screen, history_size, rows, cols);
+            self.graphics_changed |=
+                self.graphics
+                    .clear_viewport_on_screen(screen, history_size, rows, cols);
         }
     }
 

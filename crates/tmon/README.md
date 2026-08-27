@@ -109,6 +109,9 @@ two columns.
 Standalone Tmon keeps the conservative `Osc52::OnlyCopy` default; the Termy
 desktop adapter explicitly enables `CopyPaste` so OSC 52 clipboard queries match
 the existing native engine and still pass through the application's reply host.
+Kitty OSC 5522 packets are emitted as bounded protocol events for the host to
+authorize and service, while private mode 5522 is tracked for MIME-aware paste
+notifications.
 Lifecycle events for shell prompt, command start, execution, and completion have
 queue priority over discardable noise, so a bounded event queue preserves a
 coherent command cycle under load.

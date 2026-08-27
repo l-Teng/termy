@@ -1,7 +1,17 @@
 // Centralize PTY reply handling so protocol-specific branches stay out of runtime.rs.
+mod kitty_clipboard;
+mod kitty_clipboard_control;
 mod query_colors;
 mod replies;
 
+pub use kitty_clipboard::{
+    KittyClipboardHostState, KittyClipboardOsc, KittyClipboardOscTerminator,
+    TerminalClipboardContent, TerminalClipboardLocation, TerminalClipboardReadRequest,
+    TerminalClipboardReadResult, TerminalClipboardWriteRequest, TerminalClipboardWriteResult,
+};
+pub use kitty_clipboard_control::{
+    KittyClipboardControl, KittyClipboardInput, KittyClipboardInterceptor,
+};
 pub use query_colors::TerminalQueryColors;
 pub(crate) use replies::reply_bytes_for_event;
 pub use replies::{TerminalClipboardTarget, TerminalReplyHost};

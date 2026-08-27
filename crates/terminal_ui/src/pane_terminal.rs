@@ -5,10 +5,18 @@ use alacritty_terminal::{
     term::{Term, TermMode},
     vte::ansi,
 };
-use std::sync::Arc;
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+};
 use termy_core::{
-    KittyGraphicsInterceptor, KittyGraphicsItem, KittyGraphicsRenderPlacement, KittyGraphicsScreen,
-    KittyGraphicsState,
+    KittyClipboardControl, KittyClipboardHostState, KittyClipboardInput, KittyClipboardInterceptor,
+    KittyClipboardOsc, KittyGraphicsInterceptor, KittyGraphicsItem, KittyGraphicsRenderPlacement,
+    KittyGraphicsScreen, KittyGraphicsState, TerminalClipboardLocation, TerminalReplyHost,
+    kitty_graphics_placeholders_from_alacritty_grid,
 };
 
 use termy_core::{
@@ -23,13 +31,27 @@ struct PaneTerminalInner {
     size: TerminalSize,
 }
 
+enum KittyClipboardPaneEvent {
+    Packet(KittyClipboardOsc),
+    SetPasteEvents(bool),
+    Reset,
+    Reply(Vec<u8>),
+}
+
+const MAX_KITTY_CLIPBOARD_EVENTS: usize = 65_536;
+
 /// In-memory terminal emulator for a tmux pane.
 pub struct PaneTerminal {
     inner: FairMutex<PaneTerminalInner>,
     parser: FairMutex<ansi::Processor>,
+    kitty_clipboard_interceptor: FairMutex<KittyClipboardInterceptor>,
+    kitty_clipboard: FairMutex<KittyClipboardHostState>,
+    kitty_clipboard_events: FairMutex<VecDeque<KittyClipboardPaneEvent>>,
+    kitty_clipboard_paste_events_enabled: AtomicBool,
     kitty_graphics_interceptor: FairMutex<KittyGraphicsInterceptor>,
     kitty_graphics_cursor_tracker: FairMutex<KittyGraphicsCursorTracker>,
     kitty_graphics: FairMutex<KittyGraphicsState>,
+    kitty_graphics_revision: AtomicU64,
 }
 
 impl PaneTerminal {
@@ -50,9 +72,14 @@ impl PaneTerminal {
         Self {
             inner: FairMutex::new(PaneTerminalInner { term, size }),
             parser: FairMutex::new(ansi::Processor::new()),
+            kitty_clipboard_interceptor: FairMutex::new(KittyClipboardInterceptor::default()),
+            kitty_clipboard: FairMutex::new(KittyClipboardHostState::new()),
+            kitty_clipboard_events: FairMutex::new(VecDeque::new()),
+            kitty_clipboard_paste_events_enabled: AtomicBool::new(false),
             kitty_graphics_interceptor: FairMutex::new(KittyGraphicsInterceptor::default()),
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics: FairMutex::new(KittyGraphicsState::default()),
+            kitty_graphics_revision: AtomicU64::new(0),
         }
     }
 
@@ -66,17 +93,49 @@ impl PaneTerminal {
             return;
         }
 
+        let (filtered, inputs) = self.kitty_clipboard_interceptor.lock().process(bytes);
+        for input in inputs {
+            match input {
+                KittyClipboardInput::Packet(packet) => {
+                    self.push_kitty_clipboard_event(KittyClipboardPaneEvent::Packet(packet));
+                }
+                KittyClipboardInput::Control(KittyClipboardControl::Set(enabled)) => {
+                    self.kitty_clipboard_paste_events_enabled
+                        .store(enabled, Ordering::Release);
+                    self.push_kitty_clipboard_event(KittyClipboardPaneEvent::SetPasteEvents(
+                        enabled,
+                    ));
+                }
+                KittyClipboardInput::Control(KittyClipboardControl::Query) => {
+                    let status = if self.kitty_clipboard_paste_events_enabled() {
+                        1
+                    } else {
+                        2
+                    };
+                    self.push_kitty_clipboard_event(KittyClipboardPaneEvent::Reply(
+                        format!("\x1b[?5522;{status}$y").into_bytes(),
+                    ));
+                }
+                KittyClipboardInput::Control(KittyClipboardControl::Reset) => {
+                    self.kitty_clipboard_paste_events_enabled
+                        .store(false, Ordering::Release);
+                    self.push_kitty_clipboard_event(KittyClipboardPaneEvent::Reset);
+                }
+            }
+        }
         let mut interceptor = self.kitty_graphics_interceptor.lock();
         let mut cursor_tracker = self.kitty_graphics_cursor_tracker.lock();
         let mut parser = self.parser.lock();
         let term = self.cloned_term_arc();
         let mut term = term.lock();
-        for item in interceptor.process(bytes) {
+        let mut graphics_changed = false;
+        for item in interceptor.process(&filtered) {
             match item {
                 KittyGraphicsItem::Text(text) => {
                     let mut graphics = self.kitty_graphics.lock();
                     let track_scrolls = graphics.has_placements();
-                    alacritty_bridge::advance_graphics_text(
+                    let tracks_placeholders = graphics.has_virtual_placements();
+                    graphics_changed |= alacritty_bridge::advance_graphics_text(
                         &mut cursor_tracker,
                         &mut parser,
                         &mut term,
@@ -84,6 +143,7 @@ impl PaneTerminal {
                         track_scrolls,
                         &mut graphics,
                     );
+                    graphics_changed |= tracks_placeholders;
                 }
                 KittyGraphicsItem::Command(command) => {
                     let cursor = term.grid().cursor.point;
@@ -100,6 +160,7 @@ impl PaneTerminal {
                         self.size(),
                         screen,
                     );
+                    graphics_changed |= result.changed;
                     if result.cursor_advance_screen == Some(screen)
                         && let Some((cols, rows)) = result.cursor_advance
                     {
@@ -110,13 +171,63 @@ impl PaneTerminal {
                             full_screen_scroll_region,
                         );
                         if untracked_scroll > 0 {
-                            self.kitty_graphics
+                            graphics_changed |= self
+                                .kitty_graphics
                                 .lock()
                                 .scroll_up_without_history_on_screen(untracked_scroll, screen);
                         }
                     }
                 }
             }
+        }
+        if graphics_changed {
+            self.kitty_graphics_revision.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn kitty_clipboard_paste_events_enabled(&self) -> bool {
+        self.kitty_clipboard_paste_events_enabled
+            .load(Ordering::Acquire)
+    }
+
+    pub fn kitty_clipboard_paste_notification(
+        &self,
+        location: TerminalClipboardLocation,
+        available_formats: &[String],
+    ) -> Option<Vec<u8>> {
+        let enabled = self.kitty_clipboard_paste_events_enabled();
+        let mut state = self.kitty_clipboard.lock();
+        state.set_paste_events_enabled(enabled);
+        state.paste_notification(location, available_formats)
+    }
+
+    pub fn drain_kitty_clipboard_events(&self, host: &mut impl TerminalReplyHost) -> Vec<Vec<u8>> {
+        let events = self
+            .kitty_clipboard_events
+            .lock()
+            .drain(..)
+            .collect::<Vec<_>>();
+        let mut state = self.kitty_clipboard.lock();
+        let mut replies = Vec::new();
+        for event in events {
+            match event {
+                KittyClipboardPaneEvent::Packet(packet) => {
+                    replies.extend(state.handle_osc(packet, host));
+                }
+                KittyClipboardPaneEvent::SetPasteEvents(enabled) => {
+                    state.set_paste_events_enabled(enabled);
+                }
+                KittyClipboardPaneEvent::Reset => state.reset(),
+                KittyClipboardPaneEvent::Reply(reply) => replies.push(reply),
+            }
+        }
+        replies
+    }
+
+    fn push_kitty_clipboard_event(&self, event: KittyClipboardPaneEvent) {
+        let mut events = self.kitty_clipboard_events.lock();
+        if events.len() < MAX_KITTY_CLIPBOARD_EVENTS {
+            events.push_back(event);
         }
     }
 
@@ -245,18 +356,32 @@ impl PaneTerminal {
     }
 
     pub fn kitty_graphics_placements(&self) -> Vec<KittyGraphicsRenderPlacement> {
+        self.kitty_graphics_snapshot().1
+    }
+
+    pub fn kitty_graphics_revision(&self) -> u64 {
+        self.kitty_graphics_revision.load(Ordering::Relaxed)
+    }
+
+    pub fn kitty_graphics_snapshot(&self) -> (u64, Vec<KittyGraphicsRenderPlacement>) {
         let term = self.cloned_term_arc();
         let term = term.lock();
         let grid = term.grid();
         let screen =
             KittyGraphicsScreen::from_alternate_screen(term.mode().contains(TermMode::ALT_SCREEN));
-        self.kitty_graphics.lock().render_placements_on_screen(
-            grid.history_size(),
-            grid.display_offset(),
-            grid.screen_lines(),
-            grid.columns(),
-            screen,
-        )
+        let placeholders = kitty_graphics_placeholders_from_alacritty_grid(grid);
+        let placements = self
+            .kitty_graphics
+            .lock()
+            .render_placements_on_screen_with_placeholders(
+                grid.history_size(),
+                grid.display_offset(),
+                grid.screen_lines(),
+                grid.columns(),
+                screen,
+                &placeholders,
+            );
+        (self.kitty_graphics_revision(), placements)
     }
 }
 
@@ -290,7 +415,7 @@ impl Dimensions for PaneTerminal {
 mod tests {
     use super::PaneTerminal;
     use alacritty_terminal::grid::Dimensions;
-    use termy_core::{TerminalOptions, TerminalSize};
+    use termy_core::{TerminalClipboardLocation, TerminalOptions, TerminalSize};
 
     fn test_term_options(scrollback_history: usize) -> TerminalOptions {
         TerminalOptions {
@@ -496,6 +621,59 @@ mod tests {
     }
 
     #[test]
+    fn direct_kitty_image_does_not_churn_revision_for_unrelated_text() {
+        let terminal = PaneTerminal::new(
+            TerminalSize {
+                cols: 20,
+                rows: 10,
+                cell_width: 10.0,
+                cell_height: 20.0,
+            },
+            test_term_options(2000),
+        );
+        terminal.feed_output(b"\x1b_Ga=T,f=32,s=1,v=1,i=91,c=2,r=2,C=1;AQID/w==\x1b\\");
+        let revision = terminal.kitty_graphics_revision();
+
+        terminal.feed_output(b"ordinary text");
+
+        assert_eq!(terminal.kitty_graphics_revision(), revision);
+    }
+
+    #[test]
+    fn tmux_kitty_relative_image_tracks_and_clears_with_unicode_placeholder() {
+        let terminal = PaneTerminal::new(
+            TerminalSize {
+                cols: 20,
+                rows: 10,
+                cell_width: 10.0,
+                cell_height: 20.0,
+            },
+            test_term_options(2000),
+        );
+        terminal.feed_output(
+            b"\x1b_Ga=t,f=32,s=1,v=1,i=41,q=1;AQID/w==\x1b\\\
+              \x1b_Ga=t,f=32,s=1,v=1,i=42,q=1;AQID/w==\x1b\\\
+              \x1b_Ga=p,U=1,i=41,p=7,c=1,r=1,C=1,q=1;\x1b\\\
+              \x1b_Ga=p,i=42,p=8,P=41,Q=7,H=3,V=-2,c=2,r=2,C=1,q=1;\x1b\\\
+              \x1b[7;5H\x1b[38;5;41;58;5;7m",
+        );
+        terminal.feed_output("\u{10eeee}\u{0305}\u{0305}".as_bytes());
+        terminal.feed_output(b"\x1b[0m");
+
+        let child = terminal
+            .kitty_graphics_placements()
+            .into_iter()
+            .find(|placement| placement.image_id == 42)
+            .expect("relative child should follow the placeholder");
+        assert_eq!((child.viewport_row, child.col), (4, 7));
+
+        let revision = terminal.kitty_graphics_revision();
+        terminal.feed_output(b"\x1b[7;5Hx");
+        assert!(terminal.kitty_graphics_placements().is_empty());
+        assert!(terminal.kitty_graphics_revision() > revision);
+    }
+
+    #[test]
     fn clear_screen_removes_kitty_graphics_from_tmux_panes() {
         let terminal = PaneTerminal::new(
             TerminalSize {
@@ -602,5 +780,31 @@ mod tests {
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].image_id, 94);
         assert_eq!(placements[0].viewport_row, 2);
+    }
+
+    #[test]
+    fn tmux_panes_route_kitty_clipboard_packets_and_paste_mode() {
+        let terminal = PaneTerminal::new(TerminalSize::default(), test_term_options(100));
+        terminal.feed_output(
+            b"\x1b[?5522h\x1b[?5522$p\x1b]5522;type=write:id=tmux\x1b\\\
+              \x1b]5522;type=wdata\x1b\\",
+        );
+
+        assert!(terminal.kitty_clipboard_paste_events_enabled());
+        let replies = terminal.drain_kitty_clipboard_events(&mut |_| None);
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0], b"\x1b[?5522;1$y");
+        assert_eq!(
+            replies[1],
+            b"\x1b]5522;type=write:status=ENOSYS:id=tmux\x1b\\"
+        );
+
+        let notification = terminal
+            .kitty_clipboard_paste_notification(
+                TerminalClipboardLocation::Clipboard,
+                &["text/plain".to_string(), "image/png".to_string()],
+            )
+            .unwrap();
+        assert!(String::from_utf8_lossy(&notification).contains("status=DATA:mime=Lg=="));
     }
 }

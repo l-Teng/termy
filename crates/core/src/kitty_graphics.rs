@@ -3,6 +3,14 @@
 //! The core owns parsing, upload assembly, storage, placement, deletion and
 //! protocol replies. Hosts only turn the returned PNG bytes into textures.
 
+mod placement;
+
+use alacritty_terminal::{
+    grid::{Dimensions, Grid},
+    index::{Column, Line},
+    term::cell::Cell,
+    vte::ansi::{Color as AnsiColor, NamedColor},
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use flate2::read::ZlibDecoder;
 use std::{
@@ -19,6 +27,8 @@ const MAX_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_COMMAND_BYTES: usize = MAX_IMAGE_BYTES * 2;
 const MAX_DIMENSION: u32 = 32_768;
 const MAX_PIXELS: u64 = (MAX_IMAGE_BYTES / 4) as u64;
+const MAX_PLACEMENTS: usize = 4_096;
+const MAX_RELATIVE_DEPTH: usize = 8;
 
 #[derive(Clone, Debug)]
 pub struct KittyGraphicsCommand {
@@ -217,8 +227,7 @@ struct Placement {
     screen: KittyGraphicsScreen,
     image_id: u32,
     placement_id: u32,
-    anchor_line: i64,
-    col: usize,
+    location: PlacementLocation,
     source_x: u32,
     source_y: u32,
     source_width: u32,
@@ -230,6 +239,39 @@ struct Placement {
     x_offset: u32,
     y_offset: u32,
     z_index: i32,
+}
+
+#[derive(Clone, Debug)]
+enum PlacementLocation {
+    Direct {
+        anchor_line: i64,
+        col: usize,
+    },
+    Virtual,
+    Relative {
+        parent_image_id: u32,
+        parent_placement_id: u32,
+        horizontal_offset: i32,
+        vertical_offset: i32,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct KittyGraphicsPlaceholder {
+    viewport_row: i64,
+    col: usize,
+    image_id_low: u32,
+    image_id_high: u8,
+    image_id: u32,
+    placement_id: u32,
+    image_row: u32,
+    image_col: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ResolvedOrigin {
+    Buffer { anchor_line: i64, col: usize },
+    Viewport { row: i64, col: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -302,6 +344,89 @@ pub struct KittyGraphicsState {
     stored_bytes: usize,
     next_generation: u64,
     next_placement_serial: u64,
+}
+
+pub fn kitty_graphics_placeholders_from_alacritty_grid(
+    grid: &Grid<Cell>,
+) -> Vec<KittyGraphicsPlaceholder> {
+    let display_offset = grid.display_offset();
+    let rows = grid.screen_lines();
+    let cols = grid.columns();
+    let mut placeholders = Vec::new();
+    let mut previous = None;
+    for viewport_row in 0..rows {
+        let line = i32::try_from(viewport_row)
+            .unwrap_or(i32::MAX)
+            .saturating_sub(i32::try_from(display_offset).unwrap_or(i32::MAX));
+        for col in 0..cols {
+            let cell = &grid[Line(line)][Column(col)];
+            if cell.c != tmon::kitty_graphics_unicode::PLACEHOLDER {
+                previous = None;
+                continue;
+            }
+            let image_id_low = ansi_color_to_placeholder_id(cell.fg);
+            let placement_id = cell
+                .underline_color()
+                .map_or(0, ansi_color_to_placeholder_id);
+            let [row, image_col, high] = placeholder_diacritics(cell.zerowidth());
+            let continuation = previous.filter(|previous: &KittyGraphicsPlaceholder| {
+                previous.viewport_row == viewport_row as i64
+                    && previous.col.saturating_add(1) == col
+                    && previous.image_id_low == image_id_low
+                    && previous.placement_id == placement_id
+                    && row.is_none_or(|row| row == previous.image_row)
+                    && image_col
+                        .is_none_or(|image_col| image_col == previous.image_col.saturating_add(1))
+                    && high.is_none_or(|high| high == u32::from(previous.image_id_high))
+            });
+            let image_row = row
+                .or_else(|| continuation.map(|value| value.image_row))
+                .unwrap_or(0);
+            let image_col = image_col
+                .or_else(|| continuation.map(|value| value.image_col.saturating_add(1)))
+                .unwrap_or(0);
+            let image_id_high = high
+                .or_else(|| continuation.map(|value| u32::from(value.image_id_high)))
+                .and_then(|value| u8::try_from(value).ok())
+                .unwrap_or(0);
+            let placeholder = KittyGraphicsPlaceholder {
+                viewport_row: viewport_row as i64,
+                col,
+                image_id_low,
+                image_id_high,
+                image_id: image_id_low | (u32::from(image_id_high) << 24),
+                placement_id,
+                image_row,
+                image_col,
+            };
+            placeholders.push(placeholder);
+            previous = Some(placeholder);
+        }
+    }
+    placeholders
+}
+
+fn ansi_color_to_placeholder_id(color: AnsiColor) -> u32 {
+    match color {
+        AnsiColor::Spec(rgb) => {
+            (u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b)
+        }
+        AnsiColor::Indexed(index) => u32::from(index),
+        AnsiColor::Named(name) if (name as usize) < 16 => name as u32,
+        AnsiColor::Named(NamedColor::Foreground) => 0,
+        AnsiColor::Named(_) => 0,
+    }
+}
+
+fn placeholder_diacritics(combining: Option<&[char]>) -> [Option<u32>; 3] {
+    let mut decoded = [None; 3];
+    for (slot, character) in decoded
+        .iter_mut()
+        .zip(combining.unwrap_or_default().iter().copied())
+    {
+        *slot = tmon::kitty_graphics_unicode::diacritic_index(character);
+    }
+    decoded
 }
 
 impl KittyGraphicsState {
@@ -468,6 +593,25 @@ impl KittyGraphicsState {
         cols: usize,
         screen: KittyGraphicsScreen,
     ) -> Vec<KittyGraphicsRenderPlacement> {
+        self.render_placements_on_screen_with_placeholders(
+            history_size,
+            display_offset,
+            rows,
+            cols,
+            screen,
+            &[],
+        )
+    }
+
+    pub fn render_placements_on_screen_with_placeholders(
+        &self,
+        history_size: usize,
+        display_offset: usize,
+        rows: usize,
+        cols: usize,
+        screen: KittyGraphicsScreen,
+        placeholders: &[KittyGraphicsPlaceholder],
+    ) -> Vec<KittyGraphicsRenderPlacement> {
         let history_size = i64::try_from(history_size).unwrap_or(i64::MAX);
         let display_offset = i64::try_from(display_offset).unwrap_or(i64::MAX);
         let rows_i64 = i64::try_from(rows).unwrap_or(i64::MAX);
@@ -475,15 +619,21 @@ impl KittyGraphicsState {
             .iter()
             .filter(|placement| placement.screen == screen)
             .filter_map(|placement| {
+                let origin = self.resolve_render_origin(placement, placeholders)?;
                 let image = self.images.get(&placement.image_id)?;
-                let viewport_row = placement
-                    .anchor_line
-                    .saturating_sub(history_size)
-                    .saturating_add(display_offset);
+                let (viewport_row, col) = match origin {
+                    ResolvedOrigin::Buffer { anchor_line, col } => (
+                        anchor_line
+                            .saturating_sub(history_size)
+                            .saturating_add(display_offset),
+                        col,
+                    ),
+                    ResolvedOrigin::Viewport { row, col } => (row, col),
+                };
                 let bottom = viewport_row.saturating_add(i64::from(placement.occupied_rows));
                 if bottom <= 0
                     || viewport_row >= rows_i64
-                    || placement.col >= cols
+                    || col >= cols
                     || placement.occupied_cols == 0
                 {
                     return None;
@@ -501,7 +651,7 @@ impl KittyGraphicsState {
                     } else {
                         i32::MAX
                     }),
-                    col: placement.col,
+                    col,
                     source_x: placement.source_x,
                     source_y: placement.source_y,
                     source_width: placement.source_width,
@@ -526,10 +676,25 @@ impl KittyGraphicsState {
         !self.placements.is_empty()
     }
 
+    pub fn has_virtual_placements(&self) -> bool {
+        self.placements
+            .iter()
+            .any(|placement| matches!(placement.location, PlacementLocation::Virtual))
+    }
+
+    pub fn reset(&mut self) -> bool {
+        let changed = !self.placements.is_empty() || self.pending.is_some();
+        self.placements.clear();
+        self.pending = None;
+        changed
+    }
+
     pub fn clear_visible_on_screen(&mut self, screen: KittyGraphicsScreen) -> bool {
         let before = self.placements.len();
-        self.placements
-            .retain(|placement| placement.screen != screen);
+        self.placements.retain(|placement| {
+            placement.screen != screen || matches!(placement.location, PlacementLocation::Virtual)
+        });
+        self.remove_orphaned_relative_placements();
         if self
             .pending
             .as_ref()
@@ -559,14 +724,16 @@ impl KittyGraphicsState {
                 return true;
             }
 
-            let placement_end = placement
-                .anchor_line
-                .saturating_add(i64::from(placement.occupied_rows));
-            let vertically_visible =
-                placement.anchor_line < viewport_end && placement_end > viewport_start;
-            let horizontally_visible = placement.col < cols && placement.occupied_cols > 0;
+            let PlacementLocation::Direct { anchor_line, col } = placement.location else {
+                return true;
+            };
+
+            let placement_end = anchor_line.saturating_add(i64::from(placement.occupied_rows));
+            let vertically_visible = anchor_line < viewport_end && placement_end > viewport_start;
+            let horizontally_visible = col < cols && placement.occupied_cols > 0;
             !(vertically_visible && horizontally_visible)
         });
+        self.remove_orphaned_relative_placements();
         before != self.placements.len()
     }
 
@@ -586,29 +753,32 @@ impl KittyGraphicsState {
         screen: KittyGraphicsScreen,
     ) -> bool {
         if lines == 0
-            || !self
-                .placements
-                .iter()
-                .any(|placement| placement.screen == screen)
+            || !self.placements.iter().any(|placement| {
+                placement.screen == screen
+                    && matches!(placement.location, PlacementLocation::Direct { .. })
+            })
         {
             return false;
         }
 
         let lines = i64::try_from(lines).unwrap_or(i64::MAX);
-        for placement in self
-            .placements
-            .iter_mut()
-            .filter(|placement| placement.screen == screen)
-        {
-            placement.anchor_line = placement.anchor_line.saturating_sub(lines);
+        for placement in self.placements.iter_mut().filter(|placement| {
+            placement.screen == screen
+                && matches!(placement.location, PlacementLocation::Direct { .. })
+        }) {
+            if let PlacementLocation::Direct { anchor_line, .. } = &mut placement.location {
+                *anchor_line = anchor_line.saturating_sub(lines);
+            }
         }
         self.placements.retain(|placement| {
             placement.screen != screen
-                || placement
-                    .anchor_line
-                    .saturating_add(i64::from(placement.occupied_rows))
-                    > 0
+                || !matches!(
+                    placement.location,
+                    PlacementLocation::Direct { anchor_line, .. }
+                        if anchor_line.saturating_add(i64::from(placement.occupied_rows)) <= 0
+                )
         });
+        self.remove_orphaned_relative_placements();
         true
     }
 
@@ -617,24 +787,25 @@ impl KittyGraphicsState {
         lines: usize,
     ) -> bool {
         if lines == 0
-            || !self
-                .placements
-                .iter()
-                .any(|placement| placement.screen == KittyGraphicsScreen::Primary)
+            || !self.placements.iter().any(|placement| {
+                placement.screen == KittyGraphicsScreen::Primary
+                    && matches!(placement.location, PlacementLocation::Direct { .. })
+            })
         {
             return false;
         }
 
         let lines = i64::try_from(lines).unwrap_or(i64::MAX);
-        for placement in self
-            .placements
-            .iter_mut()
-            .filter(|placement| placement.screen == KittyGraphicsScreen::Primary)
-        {
+        for placement in self.placements.iter_mut().filter(|placement| {
+            placement.screen == KittyGraphicsScreen::Primary
+                && matches!(placement.location, PlacementLocation::Direct { .. })
+        }) {
             // Alacritty grows history when a partial DECSTBM region starts at
             // the top. Kitty placements are not region-aware, so cancel that
             // global history offset rather than moving fixed footer images.
-            placement.anchor_line = placement.anchor_line.saturating_add(lines);
+            if let PlacementLocation::Direct { anchor_line, .. } = &mut placement.location {
+                *anchor_line = anchor_line.saturating_add(lines);
+            }
         }
         true
     }
@@ -756,9 +927,6 @@ impl KittyGraphicsState {
         size: TerminalSize,
         screen: KittyGraphicsScreen,
     ) -> Result<Option<(u32, u32)>, String> {
-        if command.u32_value('U').unwrap_or(0) == 1 {
-            return Err("EINVAL:Unicode placeholder placements are not supported".into());
-        }
         let image = self
             .images
             .get(&image_id)
@@ -825,6 +993,36 @@ impl KittyGraphicsState {
         let occupied_cols = display_cols.unwrap_or(1);
         let occupied_rows = display_rows.unwrap_or(1);
         let placement_id = command.u32_value('p').unwrap_or(0);
+        let virtual_placement = command.u32_value('U').unwrap_or(0) == 1;
+        let relative_parent = command.u32_value('P');
+        if virtual_placement && relative_parent.is_some() {
+            return Err("EINVAL:a virtual placement cannot be relative".into());
+        }
+        let location = if virtual_placement {
+            PlacementLocation::Virtual
+        } else if let Some(parent_image_id) = relative_parent {
+            let parent_placement_id = command.u32_value('Q').unwrap_or(0);
+            self.validate_relative_parent(
+                screen,
+                image_id,
+                placement_id,
+                parent_image_id,
+                parent_placement_id,
+            )?;
+            PlacementLocation::Relative {
+                parent_image_id,
+                parent_placement_id,
+                horizontal_offset: command.i32_value('H').unwrap_or(0),
+                vertical_offset: command.i32_value('V').unwrap_or(0),
+            }
+        } else {
+            PlacementLocation::Direct {
+                anchor_line: i64::try_from(history_size)
+                    .unwrap_or(i64::MAX)
+                    .saturating_add(i64::try_from(cursor_row).unwrap_or(i64::MAX)),
+                col: cursor_col,
+            }
+        };
         if placement_id != 0 {
             self.placements.retain(|placement| {
                 placement.screen != screen
@@ -838,10 +1036,7 @@ impl KittyGraphicsState {
             screen,
             image_id,
             placement_id,
-            anchor_line: i64::try_from(history_size)
-                .unwrap_or(i64::MAX)
-                .saturating_add(i64::try_from(cursor_row).unwrap_or(i64::MAX)),
-            col: cursor_col,
+            location,
             source_x,
             source_y,
             source_width: placed_source_width,
@@ -854,7 +1049,16 @@ impl KittyGraphicsState {
             y_offset: command.u32_value('Y').unwrap_or(0),
             z_index: command.i32_value('z').unwrap_or(0),
         });
-        Ok((command.u32_value('C').unwrap_or(0) == 0).then_some((occupied_cols, occupied_rows)))
+        if self.placements.len() > MAX_PLACEMENTS {
+            let overflow = self.placements.len() - MAX_PLACEMENTS;
+            self.placements.drain(..overflow);
+            self.remove_orphaned_relative_placements();
+        }
+        let advances_cursor = !virtual_placement && relative_parent.is_none();
+        Ok(
+            (advances_cursor && command.u32_value('C').unwrap_or(0) == 0)
+                .then_some((occupied_cols, occupied_rows)),
+        )
     }
 
     fn delete(
@@ -871,9 +1075,10 @@ impl KittyGraphicsState {
         let selector = selector.to_ascii_lowercase();
         let before = self.placements.len();
         match selector {
-            'a' => self
-                .placements
-                .retain(|placement| placement.screen != screen),
+            'a' => self.placements.retain(|placement| {
+                placement.screen != screen
+                    || matches!(placement.location, PlacementLocation::Virtual)
+            }),
             'i' => {
                 let image_id = command.u32_value('i').unwrap_or(0);
                 let placement_id = command.u32_value('p').unwrap_or(0);
@@ -907,27 +1112,40 @@ impl KittyGraphicsState {
             'x' => {
                 let col = command.u32_value('x').unwrap_or(1).saturating_sub(1) as usize;
                 self.placements.retain(|p| {
+                    let PlacementLocation::Direct {
+                        col: placement_col, ..
+                    } = p.location
+                    else {
+                        return true;
+                    };
                     p.screen != screen
-                        || col < p.col
-                        || col >= p.col.saturating_add(p.occupied_cols as usize)
+                        || col < placement_col
+                        || col >= placement_col.saturating_add(p.occupied_cols as usize)
                 });
             }
             'y' => {
                 let row = command.u32_value('y').unwrap_or(1).saturating_sub(1) as i64
                     + i64::try_from(history_size).unwrap_or(i64::MAX);
                 self.placements.retain(|p| {
+                    let PlacementLocation::Direct { anchor_line, .. } = p.location else {
+                        return true;
+                    };
                     p.screen != screen
-                        || row < p.anchor_line
-                        || row >= p.anchor_line + i64::from(p.occupied_rows)
+                        || row < anchor_line
+                        || row >= anchor_line + i64::from(p.occupied_rows)
                 });
             }
             'z' => {
                 let z = command.i32_value('z').unwrap_or(0);
-                self.placements
-                    .retain(|p| p.screen != screen || p.z_index != z);
+                self.placements.retain(|p| {
+                    p.screen != screen
+                        || matches!(p.location, PlacementLocation::Virtual)
+                        || p.z_index != z
+                });
             }
             _ => return self.failure(command, "EINVAL:unsupported delete selector"),
         }
+        self.remove_orphaned_relative_placements();
         if free_data {
             self.drop_unplaced_images();
         }
@@ -1027,6 +1245,7 @@ impl KittyGraphicsState {
         }
         self.placements
             .retain(|placement| placement.image_id != image_id);
+        self.remove_orphaned_relative_placements();
         self.insertion_order.retain(|id| *id != image_id);
     }
 
@@ -1069,16 +1288,17 @@ impl KittyGraphicsState {
 }
 
 fn placement_contains(placement: &Placement, line: i64, col: usize) -> bool {
-    line >= placement.anchor_line
-        && line
-            < placement
-                .anchor_line
-                .saturating_add(i64::from(placement.occupied_rows))
-        && col >= placement.col
-        && col
-            < placement
-                .col
-                .saturating_add(placement.occupied_cols as usize)
+    let PlacementLocation::Direct {
+        anchor_line,
+        col: placement_col,
+    } = placement.location
+    else {
+        return false;
+    };
+    line >= anchor_line
+        && line < anchor_line.saturating_add(i64::from(placement.occupied_rows))
+        && col >= placement_col
+        && col < placement_col.saturating_add(placement.occupied_cols as usize)
 }
 
 fn response(command: &KittyGraphicsCommand, success: bool, message: &str) -> Option<Vec<u8>> {
@@ -1413,6 +1633,185 @@ mod tests {
         assert_eq!(placements.len(), 2);
         assert_eq!(placements[0].placement_serial, 1);
         assert_eq!(placements[1].placement_serial, 2);
+    }
+
+    #[test]
+    fn grok_virtual_placement_is_accepted_without_moving_the_cursor() {
+        let png = one_pixel_png();
+        let mut state = KittyGraphicsState::default();
+        state.apply(command("a=t,f=100,i=42,q=1", &png), 0, 0, 0, size());
+
+        let result = state.apply(
+            command("a=p,U=1,i=42,p=7,c=1,r=1,q=1", &[]),
+            60,
+            20,
+            0,
+            size(),
+        );
+
+        assert!(result.changed, "the virtual placement must be registered");
+        assert_eq!(result.cursor_advance, None);
+        assert_eq!(state.placements.len(), 1);
+    }
+
+    #[test]
+    fn grok_relative_placement_uses_parent_origin_and_signed_offset() {
+        let png = one_pixel_png();
+        let mut state = KittyGraphicsState::default();
+        state.apply(command("a=t,f=100,i=41,q=1", &png), 0, 0, 0, size());
+        state.apply(command("a=t,f=100,i=42,q=1", &png), 0, 0, 0, size());
+        state.apply(
+            command("a=p,i=41,p=7,c=1,r=1,C=1,q=1", &[]),
+            4,
+            5,
+            0,
+            size(),
+        );
+
+        let result = state.apply(
+            command("a=p,i=42,p=8,P=41,Q=7,H=3,V=-2,c=2,r=2,q=1", &[]),
+            70,
+            20,
+            0,
+            size(),
+        );
+
+        assert!(result.changed);
+        assert_eq!(
+            result.cursor_advance, None,
+            "relative placements never move the cursor"
+        );
+        let placement = state
+            .render_placements(0, 0, 24, 80)
+            .into_iter()
+            .find(|placement| placement.image_id == 42)
+            .expect("relative child must be visible");
+        assert_eq!((placement.viewport_row, placement.col), (3, 7));
+    }
+
+    #[test]
+    fn grok_relative_placement_tracks_and_clears_with_unicode_placeholder() {
+        let png = one_pixel_png();
+        let mut state = KittyGraphicsState::default();
+        state.apply(command("a=t,f=100,i=41,q=1", &png), 0, 0, 0, size());
+        state.apply(command("a=t,f=100,i=42,q=1", &png), 0, 0, 0, size());
+        state.apply(
+            command("a=p,U=1,i=41,p=7,c=1,r=1,C=1,q=1", &[]),
+            70,
+            20,
+            0,
+            size(),
+        );
+        state.apply(
+            command("a=p,i=42,p=8,P=41,Q=7,H=3,V=-2,c=2,r=2,q=1", &[]),
+            70,
+            20,
+            0,
+            size(),
+        );
+        let placeholders = [KittyGraphicsPlaceholder {
+            viewport_row: 6,
+            col: 4,
+            image_id_low: 41,
+            image_id_high: 0,
+            image_id: 41,
+            placement_id: 7,
+            image_row: 0,
+            image_col: 0,
+        }];
+
+        let child = state
+            .render_placements_on_screen_with_placeholders(
+                0,
+                0,
+                24,
+                80,
+                KittyGraphicsScreen::Primary,
+                &placeholders,
+            )
+            .into_iter()
+            .find(|placement| placement.image_id == 42)
+            .expect("the child should follow the virtual placeholder");
+        assert_eq!((child.viewport_row, child.col), (4, 7));
+        assert!(
+            state
+                .render_placements_on_screen_with_placeholders(
+                    0,
+                    0,
+                    24,
+                    80,
+                    KittyGraphicsScreen::Primary,
+                    &[],
+                )
+                .is_empty(),
+            "overwriting the placeholder must clear its image and relative children"
+        );
+    }
+
+    #[test]
+    fn grok_deleting_parent_removes_relative_descendants() {
+        let png = one_pixel_png();
+        let mut state = KittyGraphicsState::default();
+        state.apply(command("a=t,f=100,i=41,q=1", &png), 0, 0, 0, size());
+        state.apply(command("a=t,f=100,i=42,q=1", &png), 0, 0, 0, size());
+        state.apply(
+            command("a=p,i=41,p=7,c=1,r=1,C=1,q=1", &[]),
+            4,
+            5,
+            0,
+            size(),
+        );
+        state.apply(
+            command("a=p,i=42,p=8,P=41,Q=7,c=2,r=2,q=1", &[]),
+            70,
+            20,
+            0,
+            size(),
+        );
+
+        state.apply(command("a=d,d=i,i=41,p=7,q=1", &[]), 0, 0, 0, size());
+
+        assert!(
+            state
+                .placements
+                .iter()
+                .all(|placement| placement.image_id != 42),
+            "relative descendants must share their parent's lifetime"
+        );
+    }
+
+    #[test]
+    fn grok_anonymous_placement_churn_has_a_hard_bound() {
+        const EXPECTED_MAX_PLACEMENTS: usize = 4_096;
+
+        let png = one_pixel_png();
+        let mut state = KittyGraphicsState::default();
+        state.apply(command("a=t,f=100,i=42,q=1", &png), 0, 0, 0, size());
+        for _ in 0..=EXPECTED_MAX_PLACEMENTS {
+            state.apply(command("a=p,i=42,c=1,r=1,C=1,q=1", &[]), 0, 0, 0, size());
+        }
+
+        let mut samples = Vec::with_capacity(50);
+        let mut rendered_count = 0;
+        for _ in 0..50 {
+            let started = std::time::Instant::now();
+            rendered_count = state.render_placements(0, 0, 24, 80).len();
+            samples.push(started.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        eprintln!(
+            "grok churn baseline: stored={} rendered={} snapshot_p50={}us snapshot_p95={}us",
+            state.placements.len(),
+            rendered_count,
+            samples[25],
+            samples[47],
+        );
+
+        assert!(
+            state.placements.len() <= EXPECTED_MAX_PLACEMENTS,
+            "a redraw loop must not grow placement work without bound; stored {} placements",
+            state.placements.len(),
+        );
     }
 
     #[test]

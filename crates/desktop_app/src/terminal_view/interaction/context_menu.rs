@@ -42,10 +42,14 @@ impl TerminalView {
 
     fn terminal_context_menu_capabilities(&self, cx: &mut Context<Self>) -> (Option<String>, bool) {
         let selected_text = self.selected_text();
-        let can_paste = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .is_some();
+        let can_paste = self
+            .active_terminal()
+            .is_some_and(Terminal::kitty_clipboard_paste_events_enabled)
+            && termy_native_sdk::available_clipboard_formats().is_ok()
+            || cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some();
         (selected_text, can_paste)
     }
 

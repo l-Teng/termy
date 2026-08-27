@@ -212,6 +212,17 @@ impl Parser {
         let Some(raw_command) = raw_fields.next() else {
             return;
         };
+        if raw_command == b"5522" {
+            if let Some(body) = self.osc.strip_prefix(b"5522;") {
+                output
+                    .events
+                    .push(ParsedEvent::KittyClipboard(KittyClipboardPacket {
+                        body: body.to_vec(),
+                        bell_terminated: terminator == b"\x07",
+                    }));
+            }
+            return;
+        }
         match raw_command {
             b"0" | b"2" => {
                 let Some(first_value) = raw_fields.next() else {

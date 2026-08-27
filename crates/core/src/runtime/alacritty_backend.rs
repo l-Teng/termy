@@ -1,4 +1,5 @@
 use super::*;
+use crate::kitty_graphics_placeholders_from_alacritty_grid;
 
 /// Complete state for the retained Alacritty implementation.
 ///
@@ -9,6 +10,8 @@ pub(super) struct AlacrittyBackend {
     term: Arc<FairMutex<Term<JsonEventListener>>>,
     listener: JsonEventListener,
     parser: FairMutex<ansi::Processor>,
+    kitty_clipboard_interceptor: FairMutex<KittyClipboardInterceptor>,
+    kitty_clipboard: FairMutex<KittyClipboardHostState>,
     kitty_graphics_interceptor: FairMutex<KittyGraphicsInterceptor>,
     kitty_graphics_cursor_tracker: FairMutex<KittyGraphicsCursorTracker>,
     kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
@@ -149,6 +152,8 @@ impl AlacrittyBackend {
             term,
             listener,
             parser: FairMutex::new(ansi::Processor::new()),
+            kitty_clipboard_interceptor: FairMutex::new(KittyClipboardInterceptor::default()),
+            kitty_clipboard: FairMutex::new(KittyClipboardHostState::new()),
             kitty_graphics_interceptor: FairMutex::new(KittyGraphicsInterceptor::default()),
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics,
@@ -200,6 +205,8 @@ impl AlacrittyBackend {
             term,
             listener,
             parser: FairMutex::new(ansi::Processor::new()),
+            kitty_clipboard_interceptor: FairMutex::new(KittyClipboardInterceptor::default()),
+            kitty_clipboard: FairMutex::new(KittyClipboardHostState::new()),
             kitty_graphics_interceptor: FairMutex::new(KittyGraphicsInterceptor::default()),
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics,
@@ -267,13 +274,18 @@ impl AlacrittyBackend {
     }
 
     fn feed_output_to_parser(&self, bytes: &[u8]) {
+        let (filtered, kitty_clipboard_inputs) =
+            self.kitty_clipboard_interceptor.lock().process(bytes);
+        for input in kitty_clipboard_inputs {
+            self.listener.send_kitty_clipboard_input(input);
+        }
         let mut interceptor = self.kitty_graphics_interceptor.lock();
         let mut cursor_tracker = self.kitty_graphics_cursor_tracker.lock();
         let mut parser = self.parser.lock();
         let mut term = self.term.lock();
         let mut graphics_changed = false;
         let mut term_mutated = false;
-        for item in interceptor.process(bytes) {
+        for item in interceptor.process(&filtered) {
             match item {
                 KittyGraphicsItem::Text(text) => {
                     term_mutated = true;
@@ -399,17 +411,42 @@ impl AlacrittyBackend {
         let grid = term.grid();
         let screen =
             KittyGraphicsScreen::from_alternate_screen(term.mode().contains(TermMode::ALT_SCREEN));
-        let placements = self.kitty_graphics.lock().render_placements_on_screen(
-            grid.history_size(),
-            grid.display_offset(),
-            grid.screen_lines(),
-            grid.columns(),
-            screen,
-        );
+        let placeholders = kitty_graphics_placeholders_from_alacritty_grid(grid);
+        let placements = self
+            .kitty_graphics
+            .lock()
+            .render_placements_on_screen_with_placeholders(
+                grid.history_size(),
+                grid.display_offset(),
+                grid.screen_lines(),
+                grid.columns(),
+                screen,
+                &placeholders,
+            );
         (
             self.kitty_graphics_revision.load(Ordering::Relaxed),
             placements,
         )
+    }
+
+    pub fn kitty_clipboard_paste_events_enabled(&self) -> bool {
+        self.kitty_clipboard.lock().paste_events_enabled()
+    }
+
+    pub fn send_kitty_clipboard_paste_event(
+        &self,
+        location: TerminalClipboardLocation,
+        available_formats: &[String],
+    ) -> bool {
+        let Some(notification) = self
+            .kitty_clipboard
+            .lock()
+            .paste_notification(location, available_formats)
+        else {
+            return false;
+        };
+        self.write_owned(notification);
+        true
     }
 
     /// Drain pending Alacritty events, writing reply bytes back to the PTY when required.
@@ -439,6 +476,7 @@ impl AlacrittyBackend {
             self.size,
             &self.term,
             self.query_colors,
+            &self.kitty_clipboard,
             host,
             |response| self.write(response),
         )

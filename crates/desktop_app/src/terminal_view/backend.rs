@@ -213,6 +213,243 @@ impl TerminalReplyHost for GpuiClipboardReplyHost<'_, '_> {
         self.clipboard_text
             .get_or_read(|| self.cx.read_from_clipboard().and_then(|item| item.text()))
     }
+
+    fn read_clipboard(
+        &mut self,
+        request: TerminalClipboardReadRequest,
+    ) -> TerminalClipboardReadResult {
+        let remember_permission = if request.permission_granted || request.mime_types.is_empty() {
+            false
+        } else {
+            let name = request.name.as_deref().unwrap_or("A terminal application");
+            let formats = request.mime_types.join(", ");
+            let message = format!(
+                "{name} wants to read {formats} from your {}.",
+                clipboard_location_name(request.location)
+            );
+            match termy_native_sdk::request_clipboard_permission(
+                "Allow clipboard access?",
+                &message,
+                request.can_remember_permission,
+            ) {
+                termy_native_sdk::ClipboardPermission::Deny => {
+                    return TerminalClipboardReadResult::Denied;
+                }
+                termy_native_sdk::ClipboardPermission::AllowOnce => false,
+                termy_native_sdk::ClipboardPermission::AllowAlways => true,
+            }
+        };
+
+        let available_formats = if request.list_available {
+            match available_formats(self.cx, request.location) {
+                Ok(formats) => formats,
+                Err(result) => return result,
+            }
+        } else {
+            Vec::new()
+        };
+        let contents = if request.mime_types.is_empty() {
+            Vec::new()
+        } else {
+            match read_formats(self.cx, request.location, &request.mime_types) {
+                Ok(contents) => contents,
+                Err(result) => return result,
+            }
+        };
+        TerminalClipboardReadResult::Success {
+            available_formats,
+            contents,
+            remember_permission,
+        }
+    }
+
+    fn write_clipboard(
+        &mut self,
+        request: TerminalClipboardWriteRequest,
+    ) -> TerminalClipboardWriteResult {
+        match request.location {
+            TerminalClipboardLocation::Clipboard => {
+                let contents = request
+                    .contents
+                    .into_iter()
+                    .map(|content| termy_native_sdk::NativeClipboardContent {
+                        mime_type: content.mime_type,
+                        data: content.data,
+                    })
+                    .collect();
+                match termy_native_sdk::write_clipboard_contents(contents) {
+                    Ok(()) => TerminalClipboardWriteResult::Success {
+                        remember_permission: false,
+                    },
+                    Err(error) => native_write_error(error),
+                }
+            }
+            TerminalClipboardLocation::Primary => write_primary(self.cx, request.contents),
+        }
+    }
+}
+
+fn clipboard_location_name(location: TerminalClipboardLocation) -> &'static str {
+    match location {
+        TerminalClipboardLocation::Clipboard => "clipboard",
+        TerminalClipboardLocation::Primary => "primary selection",
+    }
+}
+
+fn available_formats(
+    cx: &mut Context<'_, TerminalView>,
+    location: TerminalClipboardLocation,
+) -> Result<Vec<String>, TerminalClipboardReadResult> {
+    match location {
+        TerminalClipboardLocation::Clipboard => {
+            termy_native_sdk::available_clipboard_formats().map_err(native_read_error)
+        }
+        TerminalClipboardLocation::Primary => primary_item(cx)
+            .map(|(_, formats)| formats)
+            .ok_or(TerminalClipboardReadResult::Unsupported),
+    }
+}
+
+fn read_formats(
+    cx: &mut Context<'_, TerminalView>,
+    location: TerminalClipboardLocation,
+    mime_types: &[String],
+) -> Result<Vec<TerminalClipboardContent>, TerminalClipboardReadResult> {
+    match location {
+        TerminalClipboardLocation::Clipboard => {
+            termy_native_sdk::read_clipboard_formats(mime_types)
+                .map(|contents| {
+                    contents
+                        .into_iter()
+                        .map(|content| TerminalClipboardContent {
+                            mime_type: content.mime_type,
+                            data: content.data,
+                        })
+                        .collect()
+                })
+                .map_err(native_read_error)
+        }
+        TerminalClipboardLocation::Primary => {
+            let (item, _) = primary_item(cx).ok_or(TerminalClipboardReadResult::Unsupported)?;
+            let item = item.ok_or(TerminalClipboardReadResult::Unsupported)?;
+            let mut contents = Vec::new();
+            for mime_type in mime_types {
+                for entry in item.entries() {
+                    match entry {
+                        ClipboardEntry::String(text) if mime_type == "text/plain" => {
+                            contents.push(TerminalClipboardContent {
+                                mime_type: mime_type.clone(),
+                                data: text.text().as_bytes().to_vec(),
+                            });
+                        }
+                        ClipboardEntry::Image(image) if image.format.mime_type() == mime_type => {
+                            contents.push(TerminalClipboardContent {
+                                mime_type: mime_type.clone(),
+                                data: image.bytes.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if contents.is_empty() {
+                Err(TerminalClipboardReadResult::Unsupported)
+            } else {
+                Ok(contents)
+            }
+        }
+    }
+}
+
+fn primary_item(
+    cx: &mut Context<'_, TerminalView>,
+) -> Option<(Option<ClipboardItem>, Vec<String>)> {
+    #[cfg(target_os = "linux")]
+    {
+        let item = cx.read_from_primary();
+        let mut formats = Vec::new();
+        if let Some(item) = &item {
+            for entry in item.entries() {
+                let mime_type = match entry {
+                    ClipboardEntry::String(_) => "text/plain",
+                    ClipboardEntry::Image(image) => image.format.mime_type(),
+                };
+                if !formats.iter().any(|existing| existing == mime_type) {
+                    formats.push(mime_type.to_string());
+                }
+            }
+        }
+        Some((item, formats))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = cx;
+        None
+    }
+}
+
+fn write_primary(
+    cx: &mut Context<'_, TerminalView>,
+    contents: Vec<TerminalClipboardContent>,
+) -> TerminalClipboardWriteResult {
+    #[cfg(target_os = "linux")]
+    {
+        let item = contents.into_iter().find_map(|content| {
+            if content.mime_type == "text/plain" {
+                String::from_utf8(content.data)
+                    .ok()
+                    .map(ClipboardItem::new_string)
+            } else {
+                gpui::ImageFormat::from_mime_type(&content.mime_type).map(|format| {
+                    ClipboardItem::new_image(&gpui::Image::from_bytes(format, content.data))
+                })
+            }
+        });
+        let Some(item) = item else {
+            return TerminalClipboardWriteResult::InvalidData;
+        };
+        cx.write_to_primary(item);
+        TerminalClipboardWriteResult::Success {
+            remember_permission: false,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (cx, contents);
+        TerminalClipboardWriteResult::Unsupported
+    }
+}
+
+fn native_read_error(error: termy_native_sdk::NativeClipboardError) -> TerminalClipboardReadResult {
+    match error {
+        termy_native_sdk::NativeClipboardError::Unsupported
+        | termy_native_sdk::NativeClipboardError::Unavailable => {
+            TerminalClipboardReadResult::Unsupported
+        }
+        termy_native_sdk::NativeClipboardError::InvalidData => TerminalClipboardReadResult::IoError,
+        termy_native_sdk::NativeClipboardError::Io(message) => {
+            log::warn!("Kitty clipboard read failed: {message}");
+            TerminalClipboardReadResult::IoError
+        }
+    }
+}
+
+fn native_write_error(
+    error: termy_native_sdk::NativeClipboardError,
+) -> TerminalClipboardWriteResult {
+    match error {
+        termy_native_sdk::NativeClipboardError::Unsupported
+        | termy_native_sdk::NativeClipboardError::Unavailable => {
+            TerminalClipboardWriteResult::Unsupported
+        }
+        termy_native_sdk::NativeClipboardError::InvalidData => {
+            TerminalClipboardWriteResult::InvalidData
+        }
+        termy_native_sdk::NativeClipboardError::Io(message) => {
+            log::warn!("Kitty clipboard write failed: {message}");
+            TerminalClipboardWriteResult::IoError
+        }
+    }
 }
 
 #[cfg(test)]

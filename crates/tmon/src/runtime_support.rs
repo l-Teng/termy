@@ -376,9 +376,13 @@ fn event_priority(event: &Event) -> EventPriority {
         | Event::ShellCommandStart
         | Event::ShellCommandExecuting
         | Event::ShellCommandFinished(_) => EventPriority::Lifecycle,
-        Event::Wakeup | Event::Exit | Event::ClipboardLoad(_) | Event::ClipboardStore(_) => {
-            EventPriority::Protocol
-        }
+        Event::Wakeup
+        | Event::Exit
+        | Event::ClipboardLoad(_)
+        | Event::ClipboardStore(_)
+        | Event::KittyClipboard(_)
+        | Event::KittyClipboardMode(_)
+        | Event::KittyClipboardReset => EventPriority::Protocol,
     }
 }
 

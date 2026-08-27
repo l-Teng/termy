@@ -711,6 +711,9 @@ impl TerminalView {
                 if self.paste_clipboard_into_active_inline_input(cx) {
                     return true;
                 }
+                if self.send_kitty_clipboard_paste_notification(cx) {
+                    return true;
+                }
                 if let Some(item) = cx.read_from_clipboard() {
                     match clipboard_item_to_terminal_paste_input(&item) {
                         Ok(Some(input)) => {
@@ -738,6 +741,35 @@ impl TerminalView {
             }
             _ => false,
         }
+    }
+
+    fn send_kitty_clipboard_paste_notification(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(terminal) = self.active_terminal() else {
+            return false;
+        };
+        if !terminal.kitty_clipboard_paste_events_enabled() {
+            return false;
+        }
+        let available_formats = match termy_native_sdk::available_clipboard_formats() {
+            Ok(formats) => formats,
+            Err(termy_native_sdk::NativeClipboardError::Unavailable) => Vec::new(),
+            Err(error) => {
+                log::warn!("Kitty clipboard paste notification failed: {error:?}");
+                Vec::new()
+            }
+        };
+        let tmux_notification = terminal.kitty_clipboard_paste_notification(&available_formats);
+        let sent = if let Some(notification) = tmux_notification {
+            self.send_owned_input_to_active_pane(notification)
+        } else {
+            terminal.send_kitty_clipboard_paste_event(&available_formats)
+        };
+        if !sent {
+            return false;
+        }
+        self.clear_selection();
+        cx.notify();
+        true
     }
 
     pub(in super::super) fn handle_key_down(

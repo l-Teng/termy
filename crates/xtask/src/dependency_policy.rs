@@ -49,7 +49,29 @@ const ALLOWED_LICENSES: &[&str] = &[
     "Zlib",
 ];
 
-const REVIEWED_LICENSE_EXCEPTIONS: &[LicenseException] = &[];
+const REVIEWED_LICENSE_EXCEPTIONS: &[LicenseException] = &[
+    LicenseException {
+        name: "clipboard-win",
+        version: "5.4.1",
+        license: "BSL-1.0",
+        source_contains: "crates.io-index",
+        reason: "permissive Boost license; Windows backend for clipboard-rs",
+    },
+    LicenseException {
+        name: "error-code",
+        version: "3.4.0",
+        license: "BSL-1.0",
+        source_contains: "crates.io-index",
+        reason: "permissive Boost license; clipboard-win error adapter",
+    },
+    LicenseException {
+        name: "windows-win",
+        version: "3.0.0",
+        license: "BSL-1.0",
+        source_contains: "crates.io-index",
+        reason: "permissive Boost license; clipboard-win monitor dependency",
+    },
+];
 
 pub fn run() -> Result<()> {
     let metadata = cargo_metadata()?;
