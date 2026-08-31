@@ -6,7 +6,8 @@ use objc2::{
 };
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
-    NSAlert, NSAlertSecondButtonReturn, NSApplication, NSEvent, NSImage, NSMenu, NSMenuItem, NSView,
+    NSAlert, NSAlertSecondButtonReturn, NSAlertThirdButtonReturn, NSApplication, NSEvent, NSImage,
+    NSMenu, NSMenuItem, NSView,
 };
 #[cfg(target_os = "macos")]
 use objc2_foundation::{MainThreadMarker, NSData, NSPoint, NSString};
@@ -22,9 +23,9 @@ use std::process::Command;
 use windows::Win32::Foundation::{HWND, POINT};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, IDYES,
-    MB_ICONINFORMATION, MB_OK, MB_YESNO, MF_GRAYED, MF_SEPARATOR, MF_STRING, MessageBoxW,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, IDNO, IDYES,
+    MB_ICONINFORMATION, MB_OK, MB_YESNO, MB_YESNOCANCEL, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    MessageBoxW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
 };
 
 #[cfg(target_os = "windows")]
@@ -58,6 +59,13 @@ pub enum TabContextMenuAction {
     Pin,
     Unpin,
     Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardPermission {
+    Deny,
+    AllowOnce,
+    AllowAlways,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -813,6 +821,130 @@ pub fn confirm(title: &str, message: &str) -> bool {
     }
 }
 
+pub fn request_clipboard_permission(
+    title: &str,
+    message: &str,
+    can_remember: bool,
+) -> ClipboardPermission {
+    #[cfg(target_os = "macos")]
+    {
+        run_on_main(|mtm| {
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(&NSString::from_str(title));
+            alert.setInformativeText(&NSString::from_str(message));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("Deny"));
+            let _ = alert.addButtonWithTitle(&NSString::from_str("Allow Once"));
+            if can_remember {
+                let _ = alert.addButtonWithTitle(&NSString::from_str("Always Allow"));
+            }
+            let response = alert.runModal();
+            if response == NSAlertSecondButtonReturn {
+                ClipboardPermission::AllowOnce
+            } else if can_remember && response == NSAlertThirdButtonReturn {
+                ClipboardPermission::AllowAlways
+            } else {
+                ClipboardPermission::Deny
+            }
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if has_command("zenity") {
+            let mut command = Command::new("zenity");
+            command.args([
+                "--question",
+                "--title",
+                title,
+                "--text",
+                message,
+                "--ok-label",
+                "Allow Once",
+                "--cancel-label",
+                "Deny",
+            ]);
+            if can_remember {
+                command.arg("--extra-button=Always Allow");
+            }
+            return match command.output() {
+                Ok(output) if String::from_utf8_lossy(&output.stdout).trim() == "Always Allow" => {
+                    ClipboardPermission::AllowAlways
+                }
+                Ok(output) if output.status.success() => ClipboardPermission::AllowOnce,
+                _ => ClipboardPermission::Deny,
+            };
+        }
+        if has_command("kdialog") {
+            if can_remember {
+                let status = Command::new("kdialog")
+                    .args([
+                        "--yesnocancel",
+                        message,
+                        "--title",
+                        title,
+                        "--yes-label",
+                        "Allow Once",
+                        "--no-label",
+                        "Always Allow",
+                        "--cancel-label",
+                        "Deny",
+                    ])
+                    .status();
+                return match status.ok().and_then(|status| status.code()) {
+                    Some(0) => ClipboardPermission::AllowOnce,
+                    Some(1) => ClipboardPermission::AllowAlways,
+                    _ => ClipboardPermission::Deny,
+                };
+            }
+            return if Command::new("kdialog")
+                .args(["--yesno", message, "--title", title])
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                ClipboardPermission::AllowOnce
+            } else {
+                ClipboardPermission::Deny
+            };
+        }
+        eprintln!("[native_sdk] clipboard permission: {title}: {message}");
+        ClipboardPermission::Deny
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let message = if can_remember {
+            format!("{message}\n\nYes: Allow Once\nNo: Always Allow\nCancel: Deny")
+        } else {
+            format!("{message}\n\nYes: Allow Once\nNo: Deny")
+        };
+        let result = unsafe {
+            MessageBoxW(
+                None,
+                windows::core::PCWSTR(wide_string(&message).as_ptr()),
+                windows::core::PCWSTR(wide_string(title).as_ptr()),
+                if can_remember {
+                    MB_YESNOCANCEL | MB_ICONINFORMATION
+                } else {
+                    MB_YESNO | MB_ICONINFORMATION
+                },
+            )
+        };
+        if result == IDYES {
+            ClipboardPermission::AllowOnce
+        } else if can_remember && result == IDNO {
+            ClipboardPermission::AllowAlways
+        } else {
+            ClipboardPermission::Deny
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (title, message, can_remember);
+        ClipboardPermission::Deny
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,3 +999,9 @@ mod tests {
         assert_eq!(tab_context_menu_action_for_id(0), None);
     }
 }
+mod clipboard;
+
+pub use clipboard::{
+    NativeClipboardContent, NativeClipboardError, available_clipboard_formats,
+    read_clipboard_formats, write_clipboard_contents,
+};

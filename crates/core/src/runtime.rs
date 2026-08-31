@@ -13,7 +13,11 @@ use crate::locale::{Utf8LocaleOverridePlan, preferred_utf8_locale, utf8_locale_o
 use crate::mouse_protocol::TerminalMouseMode;
 use crate::osc_intercept::{OscEvent, OscInterceptor};
 use crate::path_env::normalized_path_env;
-use crate::protocol::{TerminalQueryColors, TerminalReplyHost, reply_bytes_for_event};
+use crate::protocol::{
+    KittyClipboardControl, KittyClipboardHostState, KittyClipboardInput, KittyClipboardInterceptor,
+    KittyClipboardOsc, KittyClipboardOscTerminator, TerminalClipboardLocation, TerminalQueryColors,
+    TerminalReplyHost, reply_bytes_for_event,
+};
 use crate::render_metrics::increment_runtime_wakeup_count;
 use crate::search::{
     TermySearchMatch, TermySearchOptions, TermySharedSearchMatch, search_lines_shared,
@@ -301,12 +305,7 @@ impl KittyGraphicsTextEffects {
                 KittyGraphicsTextEffect::EnteredAlternateScreen => {
                     graphics.clear_visible_on_screen(KittyGraphicsScreen::Alternate)
                 }
-                KittyGraphicsTextEffect::TerminalReset => {
-                    let primary = graphics.clear_visible_on_screen(KittyGraphicsScreen::Primary);
-                    let alternate =
-                        graphics.clear_visible_on_screen(KittyGraphicsScreen::Alternate);
-                    primary || alternate
-                }
+                KittyGraphicsTextEffect::TerminalReset => graphics.reset(),
                 KittyGraphicsTextEffect::PreservePrimaryAcrossPartialHistoryGrowth(lines) => {
                     graphics.preserve_primary_placements_across_partial_history_growth(lines)
                 }
@@ -1349,8 +1348,34 @@ impl JsonEventListener {
     }
 
     fn send_terminal_event(&self, event: TerminalEvent) {
+        if self.replay_suppressed.load(Ordering::Acquire) {
+            return;
+        }
         self.send_runtime_event(RuntimeEvent::Terminal(event));
         self.send_wake_signal();
+    }
+
+    fn send_kitty_clipboard_event(&self, event: KittyClipboardOsc) {
+        if self.replay_suppressed.load(Ordering::Acquire) {
+            return;
+        }
+        self.send_runtime_event(RuntimeEvent::KittyClipboard(event));
+        self.send_wake_signal();
+    }
+
+    fn send_kitty_clipboard_control(&self, control: KittyClipboardControl) {
+        if self.replay_suppressed.load(Ordering::Acquire) {
+            return;
+        }
+        self.send_runtime_event(RuntimeEvent::KittyClipboardControl(control));
+        self.send_wake_signal();
+    }
+
+    fn send_kitty_clipboard_input(&self, input: KittyClipboardInput) {
+        match input {
+            KittyClipboardInput::Packet(packet) => self.send_kitty_clipboard_event(packet),
+            KittyClipboardInput::Control(control) => self.send_kitty_clipboard_control(control),
+        }
     }
 
     /// Queues an event unless the host has stopped draining and the event is
@@ -1415,6 +1440,7 @@ fn droppable_when_backlogged(event: &RuntimeEvent) -> bool {
                 | AlacEvent::MouseCursorDirty
         ),
         RuntimeEvent::Terminal(_) => true,
+        RuntimeEvent::KittyClipboard(_) | RuntimeEvent::KittyClipboardControl(_) => false,
     }
 }
 
@@ -1462,6 +1488,8 @@ const NATIVE_EVENT_LOOP_CHILD_EVENT_TOKEN: usize = 1;
 enum RuntimeEvent {
     Alacritty(AlacEvent),
     Terminal(TerminalEvent),
+    KittyClipboard(KittyClipboardOsc),
+    KittyClipboardControl(KittyClipboardControl),
 }
 
 #[derive(Debug)]
@@ -1546,6 +1574,7 @@ struct NativeEventLoopState {
     writing: Option<Writing>,
     parser: ansi::Processor,
     osc_interceptor: OscInterceptor,
+    kitty_clipboard_interceptor: KittyClipboardInterceptor,
     kitty_graphics_interceptor: KittyGraphicsInterceptor,
     kitty_graphics_cursor_tracker: KittyGraphicsCursorTracker,
 }
@@ -1768,8 +1797,14 @@ impl NativeEventLoop {
                 }),
             };
 
-            let (filtered, osc_events) = state.osc_interceptor.process(&buf[..unprocessed]);
-            processed = processed.saturating_add(filtered.len());
+            let (filtered, kitty_clipboard_inputs) = state
+                .kitty_clipboard_interceptor
+                .process(&buf[..unprocessed]);
+            for input in kitty_clipboard_inputs {
+                self.event_proxy.send_kitty_clipboard_input(input);
+            }
+            let (filtered, osc_events) = state.osc_interceptor.process(&filtered);
+            processed = processed.saturating_add(unprocessed);
             self.handle_osc_events(osc_events);
 
             for item in state.kitty_graphics_interceptor.process(&filtered) {
@@ -2222,6 +2257,19 @@ impl Terminal {
         self.backend.kitty_graphics_snapshot()
     }
 
+    pub fn kitty_clipboard_paste_events_enabled(&self) -> bool {
+        self.backend.kitty_clipboard_paste_events_enabled()
+    }
+
+    pub fn send_kitty_clipboard_paste_event(
+        &self,
+        location: TerminalClipboardLocation,
+        available_formats: &[String],
+    ) -> bool {
+        self.backend
+            .send_kitty_clipboard_paste_event(location, available_formats)
+    }
+
     pub fn drain_events(&self, host: &mut impl TerminalReplyHost) -> (Vec<TerminalEvent>, bool) {
         self.backend.drain_events(host)
     }
@@ -2386,8 +2434,9 @@ fn drain_runtime_events<T: EventListener>(
     size: TerminalSize,
     term: &FairMutex<Term<T>>,
     query_colors: TerminalQueryColors,
+    kitty_clipboard: &FairMutex<KittyClipboardHostState>,
     host: &mut impl TerminalReplyHost,
-    mut write_reply: impl FnMut(&[u8]),
+    mut write_reply: impl FnMut(&[u8]) -> bool,
 ) -> (Vec<TerminalEvent>, bool) {
     let fallback_live_colors = alacritty_terminal::term::color::Colors::default();
     let mut events = Vec::with_capacity(16);
@@ -2413,7 +2462,7 @@ fn drain_runtime_events<T: EventListener>(
                 };
 
                 if let Some(response) = response {
-                    write_reply(&response);
+                    dispatch_protocol_reply(host, &mut write_reply, &response);
                 }
 
                 if let Some(event) = terminal_event_from_alacritty(event) {
@@ -2423,6 +2472,29 @@ fn drain_runtime_events<T: EventListener>(
             RuntimeEvent::Terminal(event) => {
                 push_drained_terminal_event(&mut events, &mut wakeup_pending, event);
             }
+            RuntimeEvent::KittyClipboard(packet) => {
+                for response in kitty_clipboard.lock().handle_osc(packet, host) {
+                    dispatch_protocol_reply(host, &mut write_reply, &response);
+                }
+            }
+            RuntimeEvent::KittyClipboardControl(control) => match control {
+                KittyClipboardControl::Set(enabled) => {
+                    kitty_clipboard.lock().set_paste_events_enabled(enabled);
+                }
+                KittyClipboardControl::Reset => kitty_clipboard.lock().reset(),
+                KittyClipboardControl::Query => {
+                    let status = if kitty_clipboard.lock().paste_events_enabled() {
+                        1
+                    } else {
+                        2
+                    };
+                    dispatch_protocol_reply(
+                        host,
+                        &mut write_reply,
+                        format!("\x1b[?5522;{status}$y").as_bytes(),
+                    );
+                }
+            },
         }
 
         drained += 1;
@@ -2434,6 +2506,16 @@ fn drain_runtime_events<T: EventListener>(
 
     flush_pending_wakeup(&mut events, &mut wakeup_pending);
     (events, false)
+}
+
+fn dispatch_protocol_reply(
+    host: &mut impl TerminalReplyHost,
+    write_reply: &mut impl FnMut(&[u8]) -> bool,
+    response: &[u8],
+) {
+    if !write_reply(response) {
+        host.protocol_reply(response);
+    }
 }
 
 fn push_drained_terminal_event(
@@ -2504,7 +2586,11 @@ mod tests {
     use crate::keyboard::{
         Keystroke, Modifiers, TerminalKeyEventKind, TerminalKeyboardMode, keystroke_to_input,
     };
-    use crate::protocol::{TerminalClipboardTarget, TerminalQueryColors, TerminalReplyHost};
+    use crate::protocol::{
+        TerminalClipboardReadRequest, TerminalClipboardReadResult, TerminalClipboardTarget,
+        TerminalClipboardWriteRequest, TerminalClipboardWriteResult, TerminalQueryColors,
+        TerminalReplyHost,
+    };
     use crate::resize_anchor::ResizeAnchorState;
     use crate::search::TermySearchOptions;
     use alacritty_terminal::{
@@ -3292,6 +3378,9 @@ mod tests {
     struct RecordingReplyHost {
         clipboard_text: Option<String>,
         requested_targets: Vec<TerminalClipboardTarget>,
+        kitty_reads: Vec<TerminalClipboardReadRequest>,
+        kitty_writes: Vec<TerminalClipboardWriteRequest>,
+        protocol_replies: Vec<u8>,
     }
 
     impl TerminalReplyHost for RecordingReplyHost {
@@ -3299,6 +3388,79 @@ mod tests {
             self.requested_targets.push(target);
             self.clipboard_text.clone()
         }
+
+        fn protocol_reply(&mut self, bytes: &[u8]) {
+            self.protocol_replies.extend_from_slice(bytes);
+        }
+
+        fn read_clipboard(
+            &mut self,
+            request: TerminalClipboardReadRequest,
+        ) -> TerminalClipboardReadResult {
+            self.kitty_reads.push(request);
+            TerminalClipboardReadResult::Success {
+                available_formats: vec!["text/plain".to_string(), "image/png".to_string()],
+                contents: Vec::new(),
+                remember_permission: false,
+            }
+        }
+
+        fn write_clipboard(
+            &mut self,
+            request: TerminalClipboardWriteRequest,
+        ) -> TerminalClipboardWriteResult {
+            self.kitty_writes.push(request);
+            TerminalClipboardWriteResult::Success {
+                remember_permission: false,
+            }
+        }
+    }
+
+    fn assert_kitty_clipboard_runtime(terminal: &Terminal) {
+        terminal.feed_output(
+            b"\x1b[?5522h\
+              \x1b]5522;type=read:id=list;Lg==\x1b\\\
+              \x1b]5522;type=write:id=write\x1b\\\
+              \x1b]5522;type=walias:mime=dGV4dC9wbGFpbg==;dGV4dC91dGY4\x1b\\\
+              \x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\
+              \x1b]5522;type=wdata;\x1b\\",
+        );
+
+        let mut host = RecordingReplyHost::default();
+        let (_, has_more) = terminal.drain_events(&mut host);
+
+        assert!(!has_more);
+        assert!(terminal.kitty_clipboard_paste_events_enabled());
+        assert_eq!(host.kitty_reads.len(), 1);
+        assert!(host.kitty_reads[0].list_available);
+        assert_eq!(host.kitty_writes.len(), 1);
+        assert_eq!(host.kitty_writes[0].contents.len(), 2);
+        assert_eq!(host.kitty_writes[0].contents[0].mime_type, "text/utf8");
+        assert_eq!(host.kitty_writes[0].contents[1].data, b"hello");
+        let replies = String::from_utf8_lossy(&host.protocol_replies);
+        assert!(replies.contains("type=read:status=OK:id=list"));
+        assert!(replies.contains("type=read:status=DONE:id=list"));
+        assert!(replies.contains("type=write:status=DONE:id=write"));
+
+        host.protocol_replies.clear();
+        assert!(terminal.send_kitty_clipboard_paste_event(
+            crate::TerminalClipboardLocation::Clipboard,
+            &["text/plain".to_string()],
+        ));
+        let (_, has_more) = terminal.drain_events(&mut host);
+        assert!(!has_more);
+        let replies = String::from_utf8_lossy(&host.protocol_replies);
+        assert!(replies.contains("type=read:status=OK"));
+        assert!(replies.contains("type=read:status=DONE"));
+    }
+
+    #[test]
+    fn kitty_clipboard_routes_through_both_core_backends() {
+        assert_kitty_clipboard_runtime(&Terminal::new_display(test_terminal_size(), None));
+        assert_kitty_clipboard_runtime(&Terminal::new_alacritty_display_for_test(
+            test_terminal_size(),
+            None,
+        ));
     }
 
     #[test]
@@ -3413,8 +3575,10 @@ mod tests {
         let mut reply_host = RecordingReplyHost {
             clipboard_text: Some("payload".to_string()),
             requested_targets: Vec::new(),
+            ..RecordingReplyHost::default()
         };
         let mut replies = Vec::new();
+        let kitty_clipboard = FairMutex::new(crate::KittyClipboardHostState::new());
 
         let first_event = events_rx.try_recv().expect("queued runtime event");
         let (events, _has_more) = drain_runtime_events(
@@ -3423,8 +3587,12 @@ mod tests {
             test_terminal_size(),
             &term,
             TerminalQueryColors::default(),
+            &kitty_clipboard,
             &mut reply_host,
-            |response| replies.push(String::from_utf8(response.to_vec()).unwrap()),
+            |response| {
+                replies.push(String::from_utf8(response.to_vec()).unwrap());
+                true
+            },
         );
 
         assert_eq!(
@@ -3465,6 +3633,7 @@ mod tests {
 
         let term = FairMutex::new(term_after_bytes(b""));
         let mut reply_host = RecordingReplyHost::default();
+        let kitty_clipboard = FairMutex::new(crate::KittyClipboardHostState::new());
 
         let first_event = events_rx.try_recv().expect("queued runtime event");
         let (events, has_more) = drain_runtime_events(
@@ -3473,8 +3642,9 @@ mod tests {
             test_terminal_size(),
             &term,
             TerminalQueryColors::default(),
+            &kitty_clipboard,
             &mut reply_host,
-            |_| {},
+            |_| true,
         );
 
         assert!(!has_more);
@@ -3504,6 +3674,7 @@ mod tests {
 
         let term = FairMutex::new(term_after_bytes(b""));
         let mut reply_host = RecordingReplyHost::default();
+        let kitty_clipboard = FairMutex::new(crate::KittyClipboardHostState::new());
 
         let first_event = events_rx.try_recv().expect("queued runtime event");
         let (events, has_more) = drain_runtime_events(
@@ -3512,8 +3683,9 @@ mod tests {
             test_terminal_size(),
             &term,
             TerminalQueryColors::default(),
+            &kitty_clipboard,
             &mut reply_host,
-            |_| {},
+            |_| true,
         );
 
         assert!(!has_more);

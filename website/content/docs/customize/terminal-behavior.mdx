@@ -43,6 +43,14 @@ description: Shell, cursor, scrolling, clipboard, and terminal UI behavior.
 | `copy_on_select` | `false` | Auto-copy selected text. |
 | `copy_on_select_toast` | `true` | Show toast when text is copied on select. |
 
+Termy supports the Kitty clipboard protocol (OSC 5522) out of the box. Terminal
+applications can list, read, and write multiple clipboard formats—including
+images and other non-text data—and can receive MIME-aware paste events. Reads
+that are not covered by a short-lived paste token or a remembered application
+grant require confirmation; format listing does not expose clipboard contents
+and does not prompt. The primary selection is supported on Linux. Native and
+tmux terminals use the same behavior.
+
 ## UI
 
 | Key | Default | Description |

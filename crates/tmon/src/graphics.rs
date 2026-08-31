@@ -13,6 +13,8 @@ use crate::{
     inflate::{InflateError, OutputLimit, decompress_zlib as inflate_zlib},
 };
 
+mod placement;
+
 const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STORED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_STORED_IMAGES: usize = 4096;
@@ -24,6 +26,7 @@ pub(crate) const MAX_COMMAND_BYTES: usize =
 const MAX_DIMENSION: u32 = 32_768;
 const MAX_PIXELS: u64 = (MAX_UPLOAD_BYTES / 4) as u64;
 const MAX_PLACEMENTS: usize = 4096;
+const MAX_RELATIVE_DEPTH: usize = 8;
 
 #[derive(Debug)]
 pub(crate) struct GraphicsCommand {
@@ -116,8 +119,7 @@ struct Placement {
     alternate: bool,
     image_id: u32,
     placement_id: u32,
-    anchor_line: i64,
-    col: usize,
+    location: PlacementLocation,
     source_x: u32,
     source_y: u32,
     source_width: u32,
@@ -129,6 +131,39 @@ struct Placement {
     x_offset: u32,
     y_offset: u32,
     z_index: i32,
+}
+
+#[derive(Clone, Debug)]
+enum PlacementLocation {
+    Direct {
+        anchor_line: i64,
+        col: usize,
+    },
+    Virtual,
+    Relative {
+        parent_image_id: u32,
+        parent_placement_id: u32,
+        horizontal_offset: i32,
+        vertical_offset: i32,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UnicodePlaceholder {
+    viewport_row: i64,
+    col: usize,
+    image_id_low: u32,
+    image_id_high: u8,
+    image_id: u32,
+    placement_id: u32,
+    image_row: u32,
+    image_col: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ResolvedOrigin {
+    Buffer { anchor_line: i64, col: usize },
+    Viewport { row: i64, col: usize },
 }
 
 #[derive(Debug)]
@@ -246,9 +281,10 @@ impl GraphicsState {
             } => self.clear_viewport(alternate, history_size, rows, cols),
             GridEffect::RebaseHistory { dropped } => self.rebase_primary_history(dropped),
             GridEffect::Reset => {
-                let primary = self.clear_screen_placements(false);
-                let alternate = self.clear_screen_placements(true);
-                primary || alternate
+                let changed = !self.placements.is_empty() || self.pending.is_some();
+                self.placements.clear();
+                self.pending = None;
+                changed
             }
         }
     }
@@ -426,7 +462,7 @@ impl GraphicsState {
         };
 
         let staged_placement = if command.char_value('a').unwrap_or('t') == 'T' {
-            match Self::placement_for_image(
+            match self.placement_for_image(
                 &image,
                 image_id,
                 &command,
@@ -506,7 +542,7 @@ impl GraphicsState {
             .images
             .get(&image_id)
             .ok_or_else(|| "ENOENT:image id not found".to_string())?;
-        let (placement, advance) = Self::placement_for_image(
+        let (placement, advance) = self.placement_for_image(
             image,
             image_id,
             command,
@@ -523,6 +559,7 @@ impl GraphicsState {
 
     #[allow(clippy::too_many_arguments)]
     fn placement_for_image(
+        &self,
         image: &StoredImage,
         image_id: u32,
         command: &GraphicsCommand,
@@ -533,9 +570,6 @@ impl GraphicsState {
         alternate: bool,
         serial: u64,
     ) -> Result<(Placement, Option<(u32, u32)>), String> {
-        if command.u32_value('U').unwrap_or(0) == 1 {
-            return Err("EINVAL:Unicode placeholder placements are not supported".into());
-        }
         let source_x = command.u32_value('x').unwrap_or(0).min(image.width);
         let source_y = command.u32_value('y').unwrap_or(0).min(image.height);
         let source_width = command
@@ -589,19 +623,46 @@ impl GraphicsState {
         let occupied_cols = display_cols.unwrap_or(1);
         let occupied_rows = display_rows.unwrap_or(1);
         let placement_id = command.u32_value('p').unwrap_or(0);
+        let virtual_placement = command.u32_value('U').unwrap_or(0) == 1;
+        let relative_parent = command.u32_value('P');
+        if virtual_placement && relative_parent.is_some() {
+            return Err("EINVAL:a virtual placement cannot be relative".into());
+        }
+        let location = if virtual_placement {
+            PlacementLocation::Virtual
+        } else if let Some(parent_image_id) = relative_parent {
+            let parent_placement_id = command.u32_value('Q').unwrap_or(0);
+            self.validate_relative_parent(
+                alternate,
+                image_id,
+                placement_id,
+                parent_image_id,
+                parent_placement_id,
+            )?;
+            PlacementLocation::Relative {
+                parent_image_id,
+                parent_placement_id,
+                horizontal_offset: command.i32_value('H').unwrap_or(0),
+                vertical_offset: command.i32_value('V').unwrap_or(0),
+            }
+        } else {
+            PlacementLocation::Direct {
+                anchor_line: if alternate {
+                    i64::try_from(cursor_row).unwrap_or(i64::MAX)
+                } else {
+                    i64::try_from(history_size)
+                        .unwrap_or(i64::MAX)
+                        .saturating_add(i64::try_from(cursor_row).unwrap_or(i64::MAX))
+                },
+                col: cursor_col,
+            }
+        };
         let placement = Placement {
             serial,
             alternate,
             image_id,
             placement_id,
-            anchor_line: if alternate {
-                i64::try_from(cursor_row).unwrap_or(i64::MAX)
-            } else {
-                i64::try_from(history_size)
-                    .unwrap_or(i64::MAX)
-                    .saturating_add(i64::try_from(cursor_row).unwrap_or(i64::MAX))
-            },
-            col: cursor_col,
+            location,
             source_x,
             source_y,
             source_width: placed_source_width,
@@ -614,8 +675,9 @@ impl GraphicsState {
             y_offset: command.u32_value('Y').unwrap_or(0),
             z_index: command.i32_value('z').unwrap_or(0),
         };
-        let advance =
-            (command.u32_value('C').unwrap_or(0) == 0).then_some((occupied_cols, occupied_rows));
+        let advances_cursor = !virtual_placement && relative_parent.is_none();
+        let advance = (advances_cursor && command.u32_value('C').unwrap_or(0) == 0)
+            .then_some((occupied_cols, occupied_rows));
         Ok((placement, advance))
     }
 
@@ -632,6 +694,7 @@ impl GraphicsState {
         if self.placements.len() > MAX_PLACEMENTS {
             let overflow = self.placements.len() - MAX_PLACEMENTS;
             self.placements.drain(..overflow);
+            self.remove_orphaned_relative_placements();
         }
     }
 
@@ -646,7 +709,8 @@ impl GraphicsState {
         let mut resolved_image_id = None;
         match selector {
             'a' => self.placements.retain(|placement| {
-                let remove = placement.alternate == alternate;
+                let remove = placement.alternate == alternate
+                    && !matches!(placement.location, PlacementLocation::Virtual);
                 if remove {
                     affected_images.insert(placement.image_id);
                 }
@@ -729,12 +793,17 @@ impl GraphicsState {
             'x' => {
                 let col = command.u32_value('x').unwrap_or(1).saturating_sub(1) as usize;
                 self.placements.retain(|placement| {
-                    let remove = placement.alternate == alternate
-                        && col >= placement.col
-                        && col
-                            < placement
-                                .col
-                                .saturating_add(placement.occupied_cols as usize);
+                    let remove = match placement.location {
+                        PlacementLocation::Direct {
+                            col: placement_col, ..
+                        } => {
+                            placement.alternate == alternate
+                                && col >= placement_col
+                                && col
+                                    < placement_col.saturating_add(placement.occupied_cols as usize)
+                        }
+                        PlacementLocation::Virtual | PlacementLocation::Relative { .. } => false,
+                    };
                     if remove {
                         affected_images.insert(placement.image_id);
                     }
@@ -749,12 +818,15 @@ impl GraphicsState {
                         grid.history_size() as i64
                     };
                 self.placements.retain(|placement| {
-                    let remove = placement.alternate == alternate
-                        && row >= placement.anchor_line
-                        && row
-                            < placement
-                                .anchor_line
-                                .saturating_add(i64::from(placement.occupied_rows));
+                    let remove = match placement.location {
+                        PlacementLocation::Direct { anchor_line, .. } => {
+                            placement.alternate == alternate
+                                && row >= anchor_line
+                                && row
+                                    < anchor_line.saturating_add(i64::from(placement.occupied_rows))
+                        }
+                        PlacementLocation::Virtual | PlacementLocation::Relative { .. } => false,
+                    };
                     if remove {
                         affected_images.insert(placement.image_id);
                     }
@@ -764,7 +836,9 @@ impl GraphicsState {
             'z' => {
                 let z_index = command.i32_value('z').unwrap_or(0);
                 self.placements.retain(|placement| {
-                    let remove = placement.alternate == alternate && placement.z_index == z_index;
+                    let remove = placement.alternate == alternate
+                        && !matches!(placement.location, PlacementLocation::Virtual)
+                        && placement.z_index == z_index;
                     if remove {
                         affected_images.insert(placement.image_id);
                     }
@@ -773,6 +847,7 @@ impl GraphicsState {
             }
             _ => return failure(command, "EINVAL:unsupported delete selector"),
         }
+        self.remove_orphaned_relative_placements();
         if free_data {
             for image_id in affected_images {
                 if !self
@@ -812,22 +887,27 @@ impl GraphicsState {
         let history = i64::try_from(grid.history_size()).unwrap_or(i64::MAX);
         let offset = i64::try_from(grid.display_offset()).unwrap_or(i64::MAX);
         let rows = i64::try_from(grid.rows()).unwrap_or(i64::MAX);
+        let placeholders = self.unicode_placeholders(grid);
         self.placements
             .iter()
             .filter(|placement| placement.alternate == alternate)
             .filter_map(|placement| {
+                let origin = self.resolve_render_origin(placement, &placeholders)?;
                 let image = self.images.get(&placement.image_id)?;
-                let viewport_row = if alternate {
-                    placement.anchor_line
-                } else {
-                    placement
-                        .anchor_line
-                        .saturating_sub(history)
-                        .saturating_add(offset)
+                let (viewport_row, col) = match origin {
+                    ResolvedOrigin::Buffer { anchor_line, col } => {
+                        let row = if alternate {
+                            anchor_line
+                        } else {
+                            anchor_line.saturating_sub(history).saturating_add(offset)
+                        };
+                        (row, col)
+                    }
+                    ResolvedOrigin::Viewport { row, col } => (row, col),
                 };
                 if viewport_row.saturating_add(i64::from(placement.occupied_rows)) <= 0
                     || viewport_row >= rows
-                    || placement.col >= grid.cols()
+                    || col >= grid.cols()
                 {
                     return None;
                 }
@@ -844,7 +924,7 @@ impl GraphicsState {
                     } else {
                         i32::MAX
                     }),
-                    col: placement.col,
+                    col,
                     source_x: placement.source_x,
                     source_y: placement.source_y,
                     source_width: placement.source_width,
@@ -868,16 +948,21 @@ impl GraphicsState {
         let dropped = i64::try_from(dropped).unwrap_or(i64::MAX);
         let mut changed = false;
         self.placements.retain_mut(|placement| {
-            if placement.alternate {
+            if placement.alternate
+                || !matches!(placement.location, PlacementLocation::Direct { .. })
+            {
                 return true;
             }
-            placement.anchor_line = placement.anchor_line.saturating_sub(dropped);
+            let PlacementLocation::Direct { anchor_line, .. } = &mut placement.location else {
+                unreachable!()
+            };
+            *anchor_line = anchor_line.saturating_sub(dropped);
             changed = true;
-            placement
-                .anchor_line
-                .saturating_add(i64::from(placement.occupied_rows))
-                > 0
+            anchor_line.saturating_add(i64::from(placement.occupied_rows)) > 0
         });
+        if changed {
+            self.remove_orphaned_relative_placements();
+        }
         changed
     }
 
@@ -887,12 +972,12 @@ impl GraphicsState {
         }
         let lines = i64::try_from(lines).unwrap_or(i64::MAX);
         let mut changed = false;
-        for placement in self
-            .placements
-            .iter_mut()
-            .filter(|placement| !placement.alternate)
-        {
-            placement.anchor_line = placement.anchor_line.saturating_add(lines);
+        for placement in self.placements.iter_mut().filter(|placement| {
+            !placement.alternate && matches!(placement.location, PlacementLocation::Direct { .. })
+        }) {
+            if let PlacementLocation::Direct { anchor_line, .. } = &mut placement.location {
+                *anchor_line = anchor_line.saturating_add(lines);
+            }
             changed = true;
         }
         changed
@@ -919,18 +1004,26 @@ impl GraphicsState {
         let count = i64::try_from(count).unwrap_or(i64::MAX);
         let mut changed = false;
         self.placements.retain_mut(|placement| {
-            if placement.alternate != alternate {
+            if placement.alternate != alternate
+                || !matches!(placement.location, PlacementLocation::Direct { .. })
+            {
                 return true;
             }
-            let row = placement.anchor_line.saturating_sub(base);
+            let PlacementLocation::Direct { anchor_line, .. } = &mut placement.location else {
+                unreachable!()
+            };
+            let row = anchor_line.saturating_sub(base);
             if row < top || row > bottom {
                 return true;
             }
             let new_row = row.saturating_sub(count);
-            placement.anchor_line = base.saturating_add(new_row);
+            *anchor_line = base.saturating_add(new_row);
             changed = true;
             new_row.saturating_add(i64::from(placement.occupied_rows)) > top
         });
+        if changed {
+            self.remove_orphaned_relative_placements();
+        }
         changed
     }
 
@@ -955,18 +1048,26 @@ impl GraphicsState {
         let count = i64::try_from(count).unwrap_or(i64::MAX);
         let mut changed = false;
         self.placements.retain_mut(|placement| {
-            if placement.alternate != alternate {
+            if placement.alternate != alternate
+                || !matches!(placement.location, PlacementLocation::Direct { .. })
+            {
                 return true;
             }
-            let row = placement.anchor_line.saturating_sub(base);
+            let PlacementLocation::Direct { anchor_line, .. } = &mut placement.location else {
+                unreachable!()
+            };
+            let row = anchor_line.saturating_sub(base);
             if row < top || row > bottom {
                 return true;
             }
             let new_row = row.saturating_add(count);
-            placement.anchor_line = base.saturating_add(new_row);
+            *anchor_line = base.saturating_add(new_row);
             changed = true;
             new_row <= bottom
         });
+        if changed {
+            self.remove_orphaned_relative_placements();
+        }
         changed
     }
 
@@ -978,8 +1079,11 @@ impl GraphicsState {
 
     fn clear_screen_placements(&mut self, alternate: bool) -> bool {
         let before = self.placements.len();
-        self.placements
-            .retain(|placement| placement.alternate != alternate);
+        self.placements.retain(|placement| {
+            placement.alternate != alternate
+                || matches!(placement.location, PlacementLocation::Virtual)
+        });
+        self.remove_orphaned_relative_placements();
         if self
             .pending
             .as_ref()
@@ -1011,14 +1115,15 @@ impl GraphicsState {
             if placement.alternate != alternate {
                 return true;
             }
-            let placement_end = placement
-                .anchor_line
-                .saturating_add(i64::from(placement.occupied_rows));
-            let vertically_visible =
-                placement.anchor_line < viewport_end && placement_end > viewport_start;
-            let horizontally_visible = placement.col < cols && placement.occupied_cols > 0;
+            let PlacementLocation::Direct { anchor_line, col } = placement.location else {
+                return true;
+            };
+            let placement_end = anchor_line.saturating_add(i64::from(placement.occupied_rows));
+            let vertically_visible = anchor_line < viewport_end && placement_end > viewport_start;
+            let horizontally_visible = col < cols && placement.occupied_cols > 0;
             !(vertically_visible && horizontally_visible)
         });
+        self.remove_orphaned_relative_placements();
         before != self.placements.len()
     }
 
@@ -1130,6 +1235,7 @@ impl GraphicsState {
         }
         self.placements
             .retain(|placement| placement.image_id != image_id);
+        self.remove_orphaned_relative_placements();
         self.insertion_order.retain(|id| *id != image_id);
     }
 
@@ -1161,16 +1267,17 @@ fn advance_cursor_after_placement(grid: &mut Grid, cols: u32, rows: u32) {
 }
 
 fn placement_contains(placement: &Placement, line: i64, col: usize) -> bool {
-    line >= placement.anchor_line
-        && line
-            < placement
-                .anchor_line
-                .saturating_add(i64::from(placement.occupied_rows))
-        && col >= placement.col
-        && col
-            < placement
-                .col
-                .saturating_add(placement.occupied_cols as usize)
+    let PlacementLocation::Direct {
+        anchor_line,
+        col: placement_col,
+    } = placement.location
+    else {
+        return false;
+    };
+    line >= anchor_line
+        && line < anchor_line.saturating_add(i64::from(placement.occupied_rows))
+        && col >= placement_col
+        && col < placement_col.saturating_add(placement.occupied_cols as usize)
 }
 
 fn success(command: &GraphicsCommand, changed: bool) -> ApplyResult {

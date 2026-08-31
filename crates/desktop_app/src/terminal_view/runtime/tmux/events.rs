@@ -182,25 +182,28 @@ impl TerminalView {
         for notification in self.tmux_runtime().client.poll_notifications() {
             match notification {
                 TmuxNotification::Output { pane_id, bytes } => {
-                    let pending_replies = if let Some(terminal) = self.pane_terminal_by_id(&pane_id)
-                    {
+                    if let Some(terminal) = self.pane_terminal_by_id(&pane_id) {
                         terminal.feed_output(&bytes);
-                        terminal.take_pending_replies()
-                    } else {
-                        Vec::new()
-                    };
-                    for reply in pending_replies {
-                        if let Err(error) =
-                            self.tmux_runtime().client.report_terminal(&pane_id, &reply)
-                        {
-                            log::warn!("Failed to reply to tmux terminal query: {error}");
+                        for reply in terminal.take_pending_replies() {
+                            if let Err(error) =
+                                self.tmux_runtime().client.report_terminal(&pane_id, &reply)
+                            {
+                                log::warn!("Failed to reply to tmux terminal query: {error}");
+                            }
                         }
-                    }
-                    if self.pane_terminal_by_id(&pane_id).is_some()
-                        && self.is_active_pane_id(&pane_id)
-                    {
-                        should_redraw = true;
-                        self.schedule_tmux_title_refresh();
+                        let replies = {
+                            let mut clipboard_text = ClipboardTextCache::default();
+                            let mut reply_host =
+                                GpuiClipboardReplyHost::new(cx, &mut clipboard_text);
+                            terminal.drain_kitty_clipboard_events(&mut reply_host)
+                        };
+                        for reply in replies {
+                            let _ = self.tmux_send_input_to_pane(&pane_id, &reply);
+                        }
+                        if self.is_active_pane_id(&pane_id) {
+                            should_redraw = true;
+                            self.schedule_tmux_title_refresh();
+                        }
                     }
                 }
                 TmuxNotification::NeedsRefresh => {

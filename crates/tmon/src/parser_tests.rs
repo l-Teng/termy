@@ -1427,3 +1427,25 @@ fn decrqss_reports_extended_underline_style_and_color() {
     let (_, output) = parse(b"\x1b[4:3;58:2::12:34:56m\x1bP$qm\x1b\\");
     assert_eq!(output.replies, b"\x1bP1$r4:3;58;2;12;34;56m\x1b\\");
 }
+
+#[test]
+fn kitty_clipboard_packets_modes_queries_and_reset_are_supported() {
+    let mut grid = Grid::new(12, 3, 8, CursorStyle::Block);
+    let mut parser = Parser::default();
+    let output = parser.advance(
+        &mut grid,
+        b"\x1b[?5522h\x1b[?5522$p\x1b]5522;type=read:id=one;Lg==\x07\x1bc",
+    );
+
+    assert_eq!(output.replies, b"\x1b[?5522;1$y");
+    assert!(!parser.kitty_clipboard_paste_events_mode());
+    assert!(matches!(
+        output.events.as_slice(),
+        [
+            ParsedEvent::KittyClipboardMode(true),
+            ParsedEvent::KittyClipboard(packet),
+            ParsedEvent::ResetTitle,
+            ParsedEvent::KittyClipboardReset,
+        ] if packet.body() == b"type=read:id=one;Lg==" && packet.bell_terminated()
+    ));
+}

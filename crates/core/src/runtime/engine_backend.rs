@@ -297,6 +297,28 @@ impl Backend {
         }
     }
 
+    pub(super) fn kitty_clipboard_paste_events_enabled(&self) -> bool {
+        match self {
+            Self::Alacritty(backend) => backend.kitty_clipboard_paste_events_enabled(),
+            Self::Tmon(backend) => backend.kitty_clipboard_paste_events_enabled(),
+        }
+    }
+
+    pub(super) fn send_kitty_clipboard_paste_event(
+        &self,
+        location: TerminalClipboardLocation,
+        available_formats: &[String],
+    ) -> bool {
+        match self {
+            Self::Alacritty(backend) => {
+                backend.send_kitty_clipboard_paste_event(location, available_formats)
+            }
+            Self::Tmon(backend) => {
+                backend.send_kitty_clipboard_paste_event(location, available_formats)
+            }
+        }
+    }
+
     pub(super) fn drain_events(
         &self,
         host: &mut impl TerminalReplyHost,

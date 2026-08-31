@@ -25,8 +25,10 @@ protocol. The shared terminal core handles APC parsing, direct and file-backed
 transfers, chunking, PNG/RGB/RGBA data, zlib compression, placements, deletion,
 quiet-mode replies, source rectangles, cursor movement, and storage limits. The
 desktop renderer handles clipping, cell/pixel sizing, z-index ordering, and GPU
-image caching. Animations, shared-memory transfers, Unicode placeholders, and
-relative placements are not currently supported.
+image caching. Unicode placeholder placements and relative placement chains are
+supported across the native, experimental Tmon, and tmux-pane paths, including
+placeholder-driven clearing. Animations and shared-memory transfers are not
+currently supported.
 
 Natural-size placements (no `c`/`r`) use 1:1 image pixels and **truncate** on
 the right edge of the screen from the cursor, matching Kitty — they do not

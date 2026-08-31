@@ -1,4 +1,5 @@
 use super::*;
+use crate::kitty_graphics_placeholders_from_alacritty_grid;
 
 /// Complete state for the retained Alacritty implementation.
 ///
@@ -9,6 +10,8 @@ pub(super) struct AlacrittyBackend {
     term: Arc<FairMutex<Term<JsonEventListener>>>,
     listener: JsonEventListener,
     parser: FairMutex<ansi::Processor>,
+    kitty_clipboard_interceptor: FairMutex<KittyClipboardInterceptor>,
+    kitty_clipboard: FairMutex<KittyClipboardHostState>,
     kitty_graphics_interceptor: FairMutex<KittyGraphicsInterceptor>,
     kitty_graphics_cursor_tracker: FairMutex<KittyGraphicsCursorTracker>,
     kitty_graphics: Arc<FairMutex<KittyGraphicsState>>,
@@ -19,6 +22,7 @@ pub(super) struct AlacrittyBackend {
     resize_anchor_state: Arc<crate::resize_anchor::ResizeAnchorState>,
     graphics_size: Arc<FairMutex<TerminalSize>>,
     pty_tx: Option<EventLoopSender>,
+    pending_protocol_replies: FairMutex<Vec<u8>>,
     events_rx: Receiver<RuntimeEvent>,
     size: TerminalSize,
     query_colors: TerminalQueryColors,
@@ -149,6 +153,8 @@ impl AlacrittyBackend {
             term,
             listener,
             parser: FairMutex::new(ansi::Processor::new()),
+            kitty_clipboard_interceptor: FairMutex::new(KittyClipboardInterceptor::default()),
+            kitty_clipboard: FairMutex::new(KittyClipboardHostState::new()),
             kitty_graphics_interceptor: FairMutex::new(KittyGraphicsInterceptor::default()),
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics,
@@ -159,6 +165,7 @@ impl AlacrittyBackend {
             resize_anchor_state,
             graphics_size,
             pty_tx: Some(pty_tx),
+            pending_protocol_replies: FairMutex::new(Vec::new()),
             events_rx,
             size,
             query_colors: runtime_config.query_colors,
@@ -200,6 +207,8 @@ impl AlacrittyBackend {
             term,
             listener,
             parser: FairMutex::new(ansi::Processor::new()),
+            kitty_clipboard_interceptor: FairMutex::new(KittyClipboardInterceptor::default()),
+            kitty_clipboard: FairMutex::new(KittyClipboardHostState::new()),
             kitty_graphics_interceptor: FairMutex::new(KittyGraphicsInterceptor::default()),
             kitty_graphics_cursor_tracker: FairMutex::new(KittyGraphicsCursorTracker::default()),
             kitty_graphics,
@@ -210,6 +219,7 @@ impl AlacrittyBackend {
             resize_anchor_state,
             graphics_size: Arc::new(FairMutex::new(size)),
             pty_tx: None,
+            pending_protocol_replies: FairMutex::new(Vec::new()),
             events_rx,
             size,
             query_colors: runtime_config.query_colors,
@@ -267,13 +277,18 @@ impl AlacrittyBackend {
     }
 
     fn feed_output_to_parser(&self, bytes: &[u8]) {
+        let (filtered, kitty_clipboard_inputs) =
+            self.kitty_clipboard_interceptor.lock().process(bytes);
+        for input in kitty_clipboard_inputs {
+            self.listener.send_kitty_clipboard_input(input);
+        }
         let mut interceptor = self.kitty_graphics_interceptor.lock();
         let mut cursor_tracker = self.kitty_graphics_cursor_tracker.lock();
         let mut parser = self.parser.lock();
         let mut term = self.term.lock();
         let mut graphics_changed = false;
         let mut term_mutated = false;
-        for item in interceptor.process(bytes) {
+        for item in interceptor.process(&filtered) {
             match item {
                 KittyGraphicsItem::Text(text) => {
                     term_mutated = true;
@@ -399,22 +414,59 @@ impl AlacrittyBackend {
         let grid = term.grid();
         let screen =
             KittyGraphicsScreen::from_alternate_screen(term.mode().contains(TermMode::ALT_SCREEN));
-        let placements = self.kitty_graphics.lock().render_placements_on_screen(
-            grid.history_size(),
-            grid.display_offset(),
-            grid.screen_lines(),
-            grid.columns(),
-            screen,
-        );
+        let placeholders = kitty_graphics_placeholders_from_alacritty_grid(grid);
+        let placements = self
+            .kitty_graphics
+            .lock()
+            .render_placements_on_screen_with_placeholders(
+                grid.history_size(),
+                grid.display_offset(),
+                grid.screen_lines(),
+                grid.columns(),
+                screen,
+                &placeholders,
+            );
         (
             self.kitty_graphics_revision.load(Ordering::Relaxed),
             placements,
         )
     }
 
+    pub fn kitty_clipboard_paste_events_enabled(&self) -> bool {
+        self.kitty_clipboard.lock().paste_events_enabled()
+    }
+
+    pub fn send_kitty_clipboard_paste_event(
+        &self,
+        location: TerminalClipboardLocation,
+        available_formats: &[String],
+    ) -> bool {
+        let Some(notification) = self
+            .kitty_clipboard
+            .lock()
+            .paste_notification(location, available_formats)
+        else {
+            return false;
+        };
+        if self.pty_tx.is_some() {
+            self.write_owned(notification);
+        } else {
+            self.pending_protocol_replies.lock().extend(notification);
+        }
+        true
+    }
+
     /// Drain pending Alacritty events, writing reply bytes back to the PTY when required.
     /// Returns the collected events and whether more events remain (batch limit hit).
     pub fn drain_events(&self, host: &mut impl TerminalReplyHost) -> (Vec<TerminalEvent>, bool) {
+        let pending_protocol_replies = {
+            let mut pending = self.pending_protocol_replies.lock();
+            std::mem::take(&mut *pending)
+        };
+        if !pending_protocol_replies.is_empty() {
+            host.protocol_reply(&pending_protocol_replies);
+        }
+
         // Reset before probing the queue. A previous drain can consume a Wakeup
         // queued concurrently while leaving the coalescing flag set. Another
         // PTY update can then be folded into that flag without queueing a new
@@ -439,8 +491,13 @@ impl AlacrittyBackend {
             self.size,
             &self.term,
             self.query_colors,
+            &self.kitty_clipboard,
             host,
-            |response| self.write(response),
+            |response| {
+                let has_transport = self.pty_tx.is_some();
+                self.write(response);
+                has_transport
+            },
         )
     }
 

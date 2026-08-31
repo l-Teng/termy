@@ -14,12 +14,12 @@ use alacritty_terminal::{grid::Dimensions, term::cell::Flags};
 use flume::{Sender, bounded};
 use gpui::AppContext;
 use gpui::{
-    AnyElement, App, AsyncApp, Bounds, ClipboardItem, Context, DragMoveEvent, Element, Entity,
-    ExternalPaths, FocusHandle, Focusable, Font, FontWeight, InteractiveElement, IntoElement,
-    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Render, ScrollWheelEvent, SharedString, Size,
-    StatefulInteractiveElement, Styled, TouchPhase, WeakEntity, Window, WindowBackgroundAppearance,
-    div, point, px, relative,
+    AnyElement, App, AsyncApp, Bounds, ClipboardEntry, ClipboardItem, Context, DragMoveEvent,
+    Element, Entity, ExternalPaths, FocusHandle, Focusable, Font, FontWeight, InteractiveElement,
+    IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollWheelEvent, SharedString,
+    Size, StatefulInteractiveElement, Styled, TouchPhase, WeakEntity, Window,
+    WindowBackgroundAppearance, div, point, px, relative,
 };
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
@@ -39,13 +39,16 @@ use termy_auto_update::{AutoUpdater, UpdateState};
 use termy_config_core::{MAX_LINE_HEIGHT, MIN_LINE_HEIGHT};
 use termy_core::{
     CommandLifecycle, KittyGraphicsRenderPlacement, ProgressState, TabTitleShellIntegration,
-    Terminal as NativeTerminal, TerminalClipboardTarget, TerminalColor, TerminalCursorState,
-    TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan, TerminalEvent,
-    TerminalKeyEventKind, TerminalKeyboardMode, TerminalLaunch, TerminalMouseMode, TerminalOptions,
-    TerminalPalette, TerminalQueryColors, TerminalReplyHost, TerminalRuntimeConfig, TerminalSize,
-    TerminalWakeupNotifier, WindowsShell as RuntimeWindowsShell,
-    WorkingDirFallback as RuntimeWorkingDirFallback, normalize_working_directory_candidate,
-    resolve_launch_working_directory, resolve_working_directory_path,
+    Terminal as NativeTerminal, TerminalClipboardContent, TerminalClipboardLocation,
+    TerminalClipboardReadRequest, TerminalClipboardReadResult, TerminalClipboardTarget,
+    TerminalClipboardWriteRequest, TerminalClipboardWriteResult, TerminalColor,
+    TerminalCursorState, TerminalCursorStyle, TerminalDamageSnapshot, TerminalDirtySpan,
+    TerminalEvent, TerminalKeyEventKind, TerminalKeyboardMode, TerminalLaunch, TerminalMouseMode,
+    TerminalOptions, TerminalPalette, TerminalQueryColors, TerminalReplyHost,
+    TerminalRuntimeConfig, TerminalSize, TerminalWakeupNotifier,
+    WindowsShell as RuntimeWindowsShell, WorkingDirFallback as RuntimeWorkingDirFallback,
+    normalize_working_directory_candidate, resolve_launch_working_directory,
+    resolve_working_directory_path,
 };
 use termy_plugin_runtime::{PluginEvent, PluginInvocationControl, PluginRuntime};
 use termy_search::SearchState;
@@ -117,7 +120,8 @@ use metrics::{TerminalRenderMetricsCounters, TerminalRenderMetricsState};
 use overlay_view::TerminalOverlayView;
 use plugin_ui::PluginUiView;
 use render_cache::{
-    TerminalPaneCellColorTransformKey, TerminalPaneRenderCache, TerminalPaneRenderCacheKey,
+    KittyGraphicsRenderCacheKey, TerminalPaneCellColorTransformKey, TerminalPaneRenderCache,
+    TerminalPaneRenderCacheKey,
 };
 use runtime::{RuntimeKind, RuntimeState, TmuxRuntime};
 use session::SessionState;
@@ -595,6 +599,13 @@ impl Terminal {
         }
     }
 
+    fn drain_kitty_clipboard_events(&self, host: &mut impl TerminalReplyHost) -> Vec<Vec<u8>> {
+        match self {
+            Self::Tmux(terminal) => terminal.drain_kitty_clipboard_events(host),
+            Self::Native(_) => Vec::new(),
+        }
+    }
+
     fn resize(&self, new_size: TerminalSize) {
         match self {
             Self::Tmux(terminal) => terminal.resize(new_size),
@@ -728,6 +739,37 @@ impl Terminal {
         }
     }
 
+    fn kitty_clipboard_paste_events_enabled(&self) -> bool {
+        match self {
+            Self::Tmux(terminal) => terminal.kitty_clipboard_paste_events_enabled(),
+            Self::Native(terminal) => terminal
+                .lock()
+                .is_ok_and(|terminal| terminal.kitty_clipboard_paste_events_enabled()),
+        }
+    }
+
+    fn send_kitty_clipboard_paste_event(&self, available_formats: &[String]) -> bool {
+        match self {
+            Self::Tmux(_) => false,
+            Self::Native(terminal) => terminal.lock().is_ok_and(|terminal| {
+                terminal.send_kitty_clipboard_paste_event(
+                    TerminalClipboardLocation::Clipboard,
+                    available_formats,
+                )
+            }),
+        }
+    }
+
+    fn kitty_clipboard_paste_notification(&self, available_formats: &[String]) -> Option<Vec<u8>> {
+        match self {
+            Self::Tmux(terminal) => terminal.kitty_clipboard_paste_notification(
+                TerminalClipboardLocation::Clipboard,
+                available_formats,
+            ),
+            Self::Native(_) => None,
+        }
+    }
+
     fn alternate_screen_mode(&self) -> bool {
         match self {
             Self::Tmux(terminal) => terminal.alternate_screen_mode(),
@@ -783,17 +825,32 @@ impl Terminal {
     }
 
     fn try_kitty_graphics_placements(&self) -> Option<Vec<KittyGraphicsRenderPlacement>> {
+        self.try_kitty_graphics_snapshot()
+            .map(|(_, placements)| placements)
+    }
+
+    fn try_kitty_graphics_snapshot(&self) -> Option<(u64, Vec<KittyGraphicsRenderPlacement>)> {
         match self {
-            Self::Tmux(terminal) => Some(terminal.kitty_graphics_placements()),
+            Self::Tmux(terminal) => Some(terminal.kitty_graphics_snapshot()),
             Self::Native(terminal) => terminal
                 .lock()
                 .ok()
-                .map(|terminal| terminal.kitty_graphics_placements()),
+                .map(|terminal| terminal.kitty_graphics_snapshot()),
         }
     }
 
     fn kitty_graphics_placements(&self) -> Vec<KittyGraphicsRenderPlacement> {
         self.try_kitty_graphics_placements().unwrap_or_default()
+    }
+
+    fn kitty_graphics_revision(&self) -> Option<u64> {
+        match self {
+            Self::Tmux(terminal) => Some(terminal.kitty_graphics_revision()),
+            Self::Native(terminal) => terminal
+                .lock()
+                .ok()
+                .map(|terminal| terminal.kitty_graphics_revision()),
+        }
     }
 
     /// The OSC 8 hyperlink under the given viewport cell, if any.

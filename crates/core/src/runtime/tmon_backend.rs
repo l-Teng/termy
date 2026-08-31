@@ -8,6 +8,7 @@ use crate::{
 
 pub(super) struct TmonBackend {
     terminal: tmon::Terminal,
+    kitty_clipboard: std::sync::Mutex<KittyClipboardHostState>,
     query_colors: TerminalQueryColors,
     default_cursor_style: TerminalCursorStyle,
     last_damage_cursor: std::sync::Mutex<Option<tmon::CursorState>>,
@@ -78,6 +79,7 @@ impl TmonBackend {
         let last_damage_cursor = std::sync::Mutex::new(terminal.cursor_state());
         Ok(Self {
             terminal,
+            kitty_clipboard: std::sync::Mutex::new(KittyClipboardHostState::new()),
             query_colors: runtime_config.query_colors,
             default_cursor_style: runtime_config.default_cursor_style,
             last_damage_cursor,
@@ -103,6 +105,7 @@ impl TmonBackend {
         let last_damage_cursor = std::sync::Mutex::new(terminal.cursor_state());
         Self {
             terminal,
+            kitty_clipboard: std::sync::Mutex::new(KittyClipboardHostState::new()),
             query_colors: runtime_config.query_colors,
             default_cursor_style: runtime_config.default_cursor_style,
             last_damage_cursor,
@@ -169,6 +172,29 @@ impl TmonBackend {
         )
     }
 
+    pub(super) fn kitty_clipboard_paste_events_enabled(&self) -> bool {
+        self.terminal.kitty_clipboard_paste_events_mode()
+    }
+
+    pub(super) fn send_kitty_clipboard_paste_event(
+        &self,
+        location: TerminalClipboardLocation,
+        available_formats: &[String],
+    ) -> bool {
+        let enabled = self.terminal.kitty_clipboard_paste_events_mode();
+        let mut state = self
+            .kitty_clipboard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.set_paste_events_enabled(enabled);
+        let Some(notification) = state.paste_notification(location, available_formats) else {
+            return false;
+        };
+        drop(state);
+        self.terminal.write_protocol_reply_owned(notification);
+        true
+    }
+
     pub(super) fn drain_events(
         &self,
         host: &mut impl TerminalReplyHost,
@@ -183,12 +209,40 @@ impl TmonBackend {
                             .write_protocol_reply_owned(request.format_reply(&text));
                     }
                 }
+                tmon::Event::KittyClipboard(packet) => {
+                    let terminator = if packet.bell_terminated() {
+                        KittyClipboardOscTerminator::Bell
+                    } else {
+                        KittyClipboardOscTerminator::StringTerminator
+                    };
+                    let packet = KittyClipboardOsc::from_body(packet.body(), terminator);
+                    let mut state = self
+                        .kitty_clipboard
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let responses = state.handle_osc(packet, host);
+                    drop(state);
+                    for response in responses {
+                        self.terminal.write_protocol_reply_owned(response);
+                    }
+                }
+                tmon::Event::KittyClipboardMode(enabled) => self
+                    .kitty_clipboard
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_paste_events_enabled(enabled),
+                tmon::Event::KittyClipboardReset => self
+                    .kitty_clipboard
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .reset(),
                 event => translated.push(terminal_event(event)),
             }
         }
-        // A display-only core terminal has no transport for automatic protocol
-        // replies. Match the retained backend, which discards those writes.
-        let _ = self.terminal.discard_protocol_replies(usize::MAX);
+        let protocol_replies = self.terminal.drain_protocol_replies();
+        if !protocol_replies.is_empty() {
+            host.protocol_reply(&protocol_replies);
+        }
         (translated, has_more)
     }
 
@@ -656,6 +710,11 @@ fn terminal_event(event: tmon::Event) -> TerminalEvent {
         tmon::Event::Exit => TerminalEvent::Exit,
         tmon::Event::ClipboardStore(text) => TerminalEvent::ClipboardStore(text),
         tmon::Event::ClipboardLoad(_) => unreachable!("clipboard loads are handled before mapping"),
+        tmon::Event::KittyClipboard(_)
+        | tmon::Event::KittyClipboardMode(_)
+        | tmon::Event::KittyClipboardReset => {
+            unreachable!("Kitty clipboard events are handled before mapping")
+        }
         tmon::Event::ShellPromptStart => TerminalEvent::ShellPromptStart,
         tmon::Event::ShellCommandStart => TerminalEvent::ShellCommandStart,
         tmon::Event::ShellCommandExecuting => TerminalEvent::ShellCommandExecuting,

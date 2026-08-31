@@ -337,7 +337,7 @@ fn failed_image_replacement_keeps_the_previous_image_and_placements() {
     let placements = state.placements.clone();
 
     let invalid = state.apply(
-        command("a=T,f=32,s=1,v=1,i=7,U=1,C=1,q=1", &[0, 255, 0, 255]),
+        command("a=T,f=32,s=1,v=1,i=7,U=1,P=7,C=1,q=1", &[0, 255, 0, 255]),
         &mut grid,
         size,
     );
@@ -425,6 +425,13 @@ fn raw_rgba_upload_encodes_png_and_places_at_cursor() {
     assert_eq!(placements.len(), 1);
     assert!(placements[0].png.starts_with(b"\x89PNG"));
     assert_eq!((placements[0].viewport_row, placements[0].col), (5, 4));
+}
+
+mod relative {
+    use super::*;
+    use crate::kitty_graphics_unicode::PLACEHOLDER;
+
+    include!("graphics_relative_tests.rs");
 }
 
 #[test]
@@ -749,7 +756,9 @@ fn column_resize_preserves_placements_and_clips_them_at_render_time() {
     let initial = state.render_placements(&grid);
     assert_eq!(initial.len(), 1);
     let serial = initial[0].placement_serial;
-    let anchor_line = state.placements[0].anchor_line;
+    let PlacementLocation::Direct { anchor_line, .. } = state.placements[0].location else {
+        panic!("expected a direct placement")
+    };
 
     grid.resize(4, 4);
     while let Some(effect) = grid.pop_effect() {
@@ -757,7 +766,13 @@ fn column_resize_preserves_placements_and_clips_them_at_render_time() {
     }
 
     assert_eq!(state.placements.len(), 1);
-    assert_eq!(state.placements[0].anchor_line, anchor_line);
+    assert!(matches!(
+        state.placements[0].location,
+        PlacementLocation::Direct {
+            anchor_line: current,
+            ..
+        } if current == anchor_line
+    ));
     assert!(state.render_placements(&grid).is_empty());
 
     grid.resize(8, 4);

@@ -20,19 +20,12 @@ struct KittyGraphicsSelectionPaint<'a> {
 }
 
 fn kitty_graphics_layers(
-    mut placements: Vec<KittyGraphicsRenderPlacement>,
+    placements: &[KittyGraphicsRenderPlacement],
     cell_size: Size<Pixels>,
     image_cache: &mut HashMap<(u32, u64), Arc<gpui::Image>>,
     selection: KittyGraphicsSelectionPaint<'_>,
 ) -> (Vec<AnyElement>, Vec<AnyElement>) {
-    placements.sort_by_key(|placement| {
-        (
-            placement.z_index,
-            placement.image_id,
-            placement.placement_id,
-            placement.placement_serial,
-        )
-    });
+    const MAX_CACHED_KITTY_IMAGES: usize = 256;
     let mut below_text = Vec::new();
     let mut above_text = Vec::new();
     let cell_width: f32 = cell_size.width.into();
@@ -41,10 +34,16 @@ fn kitty_graphics_layers(
         .iter()
         .map(|placement| (placement.image_id, placement.image_generation))
         .collect();
-    image_cache.retain(|key, _| active_images.contains(key));
+    let active_image_ids = active_images
+        .iter()
+        .map(|(image_id, _)| *image_id)
+        .collect::<HashSet<_>>();
+    image_cache.retain(|(image_id, generation), _| {
+        !active_image_ids.contains(image_id) || active_images.contains(&(*image_id, *generation))
+    });
 
     for placement in placements {
-        let bounds = kitty_graphics_placement_bounds(&placement, cell_width, cell_height);
+        let bounds = kitty_graphics_placement_bounds(placement, cell_width, cell_height);
         if bounds.width <= 0.0 || bounds.height <= 0.0 {
             continue;
         }
@@ -69,9 +68,9 @@ fn kitty_graphics_layers(
             .object_fit(ObjectFit::Fill);
         let selected = selection
             .explicit
-            .is_some_and(|selected| selected.matches(selection.pane_id, &placement))
+            .is_some_and(|selected| selected.matches(selection.pane_id, placement))
             || kitty_graphics_placement_intersects_selection(
-                &placement,
+                placement,
                 selection.display_offset,
                 selection.selection_range,
             );
@@ -106,6 +105,9 @@ fn kitty_graphics_layers(
         } else {
             above_text.push(layer);
         }
+    }
+    if image_cache.len() > MAX_CACHED_KITTY_IMAGES {
+        image_cache.retain(|key, _| active_images.contains(key));
     }
     (below_text, above_text)
 }
@@ -3281,6 +3283,7 @@ impl Render for TerminalView {
                 // of terminal locks here.
                 let alternate_screen_mode = pane.last_alternate_screen.get();
                 let damage = terminal.take_render_damage_snapshot();
+                let terminal_generation = damage.generation;
                 let core_palette = terminal.core_palette();
                 let palette_revision = core_palette.as_ref().map(|palette| palette.revision);
                 let pane_cache_key = self.pane_render_cache_key(
@@ -3392,8 +3395,33 @@ impl Render for TerminalView {
                 );
                 let (kitty_below_text, kitty_above_text) = {
                     let mut pane_render_cache = pane.render_cache.borrow_mut();
+                    let graphics_revision = terminal.kitty_graphics_revision().unwrap_or(0);
+                    let mut graphics_cache_key = KittyGraphicsRenderCacheKey {
+                        graphics_revision,
+                        terminal_generation,
+                        cols,
+                        rows,
+                        display_offset: pane_display_offset,
+                    };
+                    if pane_render_cache.kitty_placements_key != Some(graphics_cache_key) {
+                        let (snapshot_revision, mut placements) = terminal
+                            .try_kitty_graphics_snapshot()
+                            .unwrap_or((graphics_revision, Vec::new()));
+                        placements.sort_by_key(|placement| {
+                            (
+                                placement.z_index,
+                                placement.image_id,
+                                placement.placement_id,
+                                placement.placement_serial,
+                            )
+                        });
+                        graphics_cache_key.graphics_revision = snapshot_revision;
+                        pane_render_cache.kitty_placements = placements;
+                        pane_render_cache.kitty_placements_key = Some(graphics_cache_key);
+                    }
+                    let pane_render_cache = &mut *pane_render_cache;
                     kitty_graphics_layers(
-                        terminal.kitty_graphics_placements(),
+                        &pane_render_cache.kitty_placements,
                         pane_cell_size,
                         &mut pane_render_cache.kitty_images,
                         KittyGraphicsSelectionPaint {
@@ -4018,6 +4046,7 @@ impl Render for TerminalView {
                     .on_action(cx.listener(Self::handle_minimize_window_action))
                     .on_action(cx.listener(Self::handle_copy_action))
                     .on_action(cx.listener(Self::handle_paste_action))
+                    .on_action(cx.listener(Self::handle_clear_screen_action))
                     .on_action(cx.listener(Self::handle_zoom_in_action))
                     .on_action(cx.listener(Self::handle_zoom_out_action))
                     .on_action(cx.listener(Self::handle_zoom_reset_action))

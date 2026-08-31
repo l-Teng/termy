@@ -8,6 +8,8 @@
 mod graphics;
 mod grid;
 mod inflate;
+#[doc(hidden)]
+pub mod kitty_graphics_unicode;
 mod parser;
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 mod pty;
@@ -111,6 +113,7 @@ pub struct TerminalStateSnapshot {
     pub history_size: usize,
     pub cursor_state: Option<CursorState>,
     pub bracketed_paste_mode: bool,
+    pub kitty_clipboard_paste_events_mode: bool,
     pub alternate_screen_mode: bool,
     pub mouse_mode: MouseMode,
     pub keyboard_mode: KeyboardMode,
@@ -215,6 +218,22 @@ pub struct ClipboardRequest {
     bell_terminated: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KittyClipboardPacket {
+    body: Vec<u8>,
+    bell_terminated: bool,
+}
+
+impl KittyClipboardPacket {
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    pub fn bell_terminated(&self) -> bool {
+        self.bell_terminated
+    }
+}
+
 impl ClipboardRequest {
     pub fn target(self) -> ClipboardTarget {
         self.target
@@ -260,6 +279,9 @@ pub enum Event {
     Exit,
     ClipboardStore(String),
     ClipboardLoad(ClipboardRequest),
+    KittyClipboard(KittyClipboardPacket),
+    KittyClipboardMode(bool),
+    KittyClipboardReset,
     ShellPromptStart,
     ShellCommandStart,
     ShellCommandExecuting,
@@ -445,6 +467,9 @@ impl From<ParsedEvent> for Event {
             ParsedEvent::Bell => Self::Bell,
             ParsedEvent::ClipboardStore(text) => Self::ClipboardStore(text),
             ParsedEvent::ClipboardLoad(request) => Self::ClipboardLoad(request),
+            ParsedEvent::KittyClipboard(packet) => Self::KittyClipboard(packet),
+            ParsedEvent::KittyClipboardMode(enabled) => Self::KittyClipboardMode(enabled),
+            ParsedEvent::KittyClipboardReset => Self::KittyClipboardReset,
             ParsedEvent::ShellPromptStart => Self::ShellPromptStart,
             ParsedEvent::ShellCommandStart => Self::ShellCommandStart,
             ParsedEvent::ShellCommandExecuting => Self::ShellCommandExecuting,
@@ -979,6 +1004,7 @@ impl Terminal {
             history_size: engine.grid.history_size(),
             cursor_state: engine.grid.cursor_state(),
             bracketed_paste_mode: engine.grid.bracketed_paste_mode(),
+            kitty_clipboard_paste_events_mode: engine.parser.kitty_clipboard_paste_events_mode(),
             alternate_screen_mode: engine.grid.alternate_screen_mode(),
             mouse_mode: engine.grid.mouse_mode(),
             keyboard_mode: engine.grid.keyboard_mode(),
@@ -1092,6 +1118,14 @@ impl Terminal {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .grid
             .bracketed_paste_mode()
+    }
+
+    pub fn kitty_clipboard_paste_events_mode(&self) -> bool {
+        self.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .parser
+            .kitty_clipboard_paste_events_mode()
     }
 
     pub fn alternate_screen_mode(&self) -> bool {
